@@ -1,6 +1,7 @@
 import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.api.tasks.javadoc.Javadoc
 import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.GradleBuild
 import org.gradle.external.javadoc.StandardJavadocDocletOptions
 import org.gradle.jvm.tasks.Jar
@@ -66,6 +67,7 @@ subprojects {
             jvmArgs("-XX:+EnableDynamicAgentLoading")
             testLogging {
                 events("failed", "skipped")
+                exceptionFormat = TestExceptionFormat.FULL
             }
         }
 

@@ -256,14 +256,21 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private DatabaseIdentity verifyDatabase() {
+        BootstrapStage stage = BootstrapStage.CONNECTION_ACQUISITION;
         try (Connection connection = acquireConnection()) {
             Throwable verificationFailure = null;
             try {
+                stage = BootstrapStage.VERIFIER_CONFIGURATION;
                 configureVerifier(connection);
+                stage = BootstrapStage.POSTGRESQL_VERSION;
                 verifyPostgresVersion(connection);
+                stage = BootstrapStage.RUNTIME_ROLE;
                 DatabaseIdentity identity = verifyRuntimeRole(connection);
+                stage = BootstrapStage.SCHEMA_FINGERPRINT;
                 verifySchemaFingerprint(connection);
+                stage = BootstrapStage.TENANT_ISOLATION;
                 verifyTenantIsolation(connection);
+                stage = BootstrapStage.BOOTSTRAP_CONTEXT;
                 verifyBootstrapContext(connection, identity);
                 return identity;
             } catch (SQLException | RuntimeException | Error failure) {
@@ -273,9 +280,25 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 rollbackVerifier(connection, verificationFailure);
             }
         } catch (SQLException failure) {
-            throw sanitizedSqlFailure("Vev could not verify the PostgreSQL schema", failure);
+            throw sanitizedSqlFailure("Vev could not verify PostgreSQL during " + stage.label, failure);
         } catch (RuntimeException failure) {
-            throw new IllegalStateException("Vev rejected the PostgreSQL schema or bootstrap context");
+            throw new IllegalStateException("Vev rejected PostgreSQL during " + stage.label);
+        }
+    }
+
+    private enum BootstrapStage {
+        CONNECTION_ACQUISITION("connection acquisition"),
+        VERIFIER_CONFIGURATION("verifier configuration"),
+        POSTGRESQL_VERSION("PostgreSQL version verification"),
+        RUNTIME_ROLE("runtime role verification"),
+        SCHEMA_FINGERPRINT("schema fingerprint verification"),
+        TENANT_ISOLATION("tenant isolation verification"),
+        BOOTSTRAP_CONTEXT("bootstrap context verification");
+
+        private final String label;
+
+        BootstrapStage(String label) {
+            this.label = label;
         }
     }
 
