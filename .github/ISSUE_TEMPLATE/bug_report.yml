@@ -1,0 +1,70 @@
+name: Bug report
+description: Report incorrect behavior in the documented experimental profile
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Vev is experimental and not production-ready. Do not include credentials, private schemas, production data, or tenant-isolation vulnerabilities. Report security issues through SECURITY.md.
+  - type: input
+    id: revision
+    attributes:
+      label: Vev revision
+      description: Commit hash or exact experimental version.
+      placeholder: abcdef123456
+    validations:
+      required: true
+  - type: dropdown
+    id: module
+    attributes:
+      label: Affected module
+      options:
+        - vev-core
+        - vev-postgres
+        - vev-processor
+        - vev-jakarta4
+        - vev-integration-tests
+        - vev-benchmark-vev
+        - vev-benchmark-hibernate
+        - documentation or build
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include exact JDK 26, PostgreSQL, JDBC driver, operating system, and architecture versions that matter.
+    validations:
+      required: true
+  - type: textarea
+    id: synthetic_reproduction
+    attributes:
+      label: Synthetic reproduction
+      description: Provide the smallest self-contained model, schema, and invocation. Do not use private application code or data.
+      render: java
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Observed behavior
+      description: Include complete diagnostics or stack traces after removing sensitive values.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Safety checks
+      options:
+        - label: This report does not contain a vulnerability or cross-tenant reproduction.
+          required: true
+        - label: The model is inside the currently documented supported profile, or the bug is that an unsupported model was not rejected.
+          required: true
+        - label: All examples and data are synthetic.
+          required: true

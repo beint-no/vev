@@ -1,0 +1,61 @@
+name: Benchmark report
+description: Submit reproducible experimental performance evidence
+title: "benchmark: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read docs/benchmark-policy.md first. A benchmark report is evidence for one workload, not a general performance claim.
+  - type: textarea
+    id: revisions
+    attributes:
+      label: Revisions and dependency versions
+      description: Include commit IDs and exact JDK 26, PostgreSQL, JDBC, Jakarta Persistence, JMH, and comparison-runtime versions.
+    validations:
+      required: true
+  - type: textarea
+    id: machine
+    attributes:
+      label: Machine and operating environment
+      description: Include OS, architecture, CPU, memory, power mode, and whether the database is local.
+    validations:
+      required: true
+  - type: textarea
+    id: workload
+    attributes:
+      label: Synthetic workload
+      description: Describe schema, indexes, seed, row count, data distribution, consumed result, and semantic parity checks.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Complete JMH command and settings
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results and uncertainty
+      description: Include sample count, mean/error, median, p95, allocation, regressions, and execution order.
+    validations:
+      required: true
+  - type: input
+    id: artifact
+    attributes:
+      label: Raw result artifact and checksum
+      description: Link to machine-readable output and provide its digest.
+    validations:
+      required: true
+  - type: checkboxes
+    id: policy
+    attributes:
+      label: Policy checks
+      options:
+        - label: Both sides used comparable transactions, pooling, fetch size, timeout, and cache policy, or every asymmetry is disclosed.
+          required: true
+        - label: The report includes unfavorable results and does not make a universal superiority claim.
+          required: true
+        - label: The fixture and report contain no production-derived or private data.
+          required: true
