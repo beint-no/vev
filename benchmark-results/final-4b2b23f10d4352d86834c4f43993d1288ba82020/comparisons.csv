@@ -1,0 +1,6 @@
+workload,vev_over_hibernate_mean_latency_ratio,vev_mean_latency_difference_pct,vev_over_hibernate_mean_allocation_ratio,vev_mean_allocation_difference_pct
+transactionOnly,0.993423,-0.657670,0.967407,-3.259301
+findOne,1.000581,0.058112,0.893700,-10.629994
+findMultiple32,0.883692,-11.630849,0.633653,-36.634677
+findMultiple256,0.536963,-46.303717,0.500936,-49.906431
+boundedScan,0.866995,-13.300479,0.650763,-34.923657
