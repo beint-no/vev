@@ -684,15 +684,27 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                            AND type_namespace.nspname = 'pg_catalog'
                            AND mapped_type.typtype = 'b'
                            AND COALESCE(mapped_collation.collisdeterministic, true)
-                           AND (mapped_collation.oid IS NULL
-                                OR mapped_collation.collversion IS NOT DISTINCT FROM
-                                   pg_catalog.pg_collation_actual_version(mapped_collation.oid))
+                           AND (
+                               mapped_collation.oid IS NULL
+                               OR (
+                                   mapped_collation.collprovider = 'd'
+                                   AND database_identity.datcollversion IS NOT DISTINCT FROM
+                                       pg_catalog.pg_database_collation_actual_version(database_identity.oid)
+                               )
+                               OR (
+                                   mapped_collation.collprovider <> 'd'
+                                   AND mapped_collation.collversion IS NOT DISTINCT FROM
+                                       pg_catalog.pg_collation_actual_version(mapped_collation.oid)
+                               )
+                           )
                        ), false)
                   FROM pg_catalog.pg_attribute attribute
                   JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
                   JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
                   JOIN pg_catalog.pg_type mapped_type ON mapped_type.oid = attribute.atttypid
                   JOIN pg_catalog.pg_namespace type_namespace ON type_namespace.oid = mapped_type.typnamespace
+                  JOIN pg_catalog.pg_database database_identity
+                    ON database_identity.datname = pg_catalog.current_database()
                   LEFT JOIN pg_catalog.pg_collation mapped_collation
                     ON mapped_collation.oid = attribute.attcollation
                  WHERE namespace.nspname = 'public'
@@ -1092,13 +1104,19 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                        type.typtype = 'b',
                        COALESCE(mapped_collation.collisdeterministic, true),
                        mapped_collation.oid IS NULL
-                           OR mapped_collation.collversion IS NOT DISTINCT FROM
-                              pg_catalog.pg_collation_actual_version(mapped_collation.oid)
+                           OR mapped_collation.collprovider = 'd'
+                              AND database_identity.datcollversion IS NOT DISTINCT FROM
+                                  pg_catalog.pg_database_collation_actual_version(database_identity.oid)
+                           OR mapped_collation.collprovider <> 'd'
+                              AND mapped_collation.collversion IS NOT DISTINCT FROM
+                                  pg_catalog.pg_collation_actual_version(mapped_collation.oid)
                   FROM pg_catalog.pg_attribute attribute
                   JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
                   JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
                   JOIN pg_catalog.pg_type type ON type.oid = attribute.atttypid
                   JOIN pg_catalog.pg_namespace type_namespace ON type_namespace.oid = type.typnamespace
+                  JOIN pg_catalog.pg_database database_identity
+                    ON database_identity.datname = pg_catalog.current_database()
                   LEFT JOIN pg_catalog.pg_collation mapped_collation
                     ON mapped_collation.oid = attribute.attcollation
                  WHERE namespace.nspname = ?

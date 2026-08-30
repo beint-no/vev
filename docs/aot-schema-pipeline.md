@@ -36,7 +36,7 @@ Compilation proves source consistency, not database consistency. When `PgVev` is
 - an endpoint identity consisting of server address and port, PostgreSQL system identifier, postmaster start time, database name and OID, session user, current role, and recovery state;
 - an application role that is neither superuser nor `BYPASSRLS`, is not a member of a role with either capability, and is not the mapped-table owner or a member of the owner role;
 - `SELECT` access and no data-mutation privilege on `public.vev_schema_fingerprint`, plus exactly one matching migration-installed fingerprint row;
-- an exact generated column set with built-in PostgreSQL types, exact `varchar` and `numeric` modifiers, nullability, deterministic collations, no defaults, no identity, no generated columns, and no missing-value catalog state;
+- an exact generated column set with built-in PostgreSQL types, exact `varchar` and `numeric` modifiers, nullability, deterministic collations whose recorded provider version is current, no defaults, no identity, no generated columns, and no missing-value catalog state; the database-default collation is attested through `pg_database`, while named collations are attested through `pg_collation`;
 - one exact immediate built-in B-tree `(tenant, id)` primary key, which bounds the implemented tenant/ID scan work;
 - permanent logged nonpartitioned non-inherited built-in heap tables, with no rewrite rules, secondary indexes, or foreign keys touching a mapped table;
 - schema `USAGE` without `CREATE`, table `SELECT`, exact column-level `INSERT`, exact mutable-value/version column-level `UPDATE` plus table `DELETE` only for versioned entities, and no effective `TRUNCATE`, `REFERENCES`, `TRIGGER`, or `MAINTAIN` privilege;
