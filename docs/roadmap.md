@@ -4,7 +4,7 @@
 
 ## Phase 0 — closed foundation
 
-- stabilize the generated entity-plan model and selected `EntityAgent` adapter;
+- stabilize the generated entity-plan model and either implement the complete inherited `EntityAgent` contracts or replace the current facade with a Vev-specific interface;
 - keep `vev-core` free of ORM, framework, and dialect dependencies;
 - define deterministic generation and reproducible artifacts;
 - establish positive, negative, and compiler-diagnostic fixtures;

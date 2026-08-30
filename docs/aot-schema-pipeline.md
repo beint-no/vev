@@ -6,7 +6,7 @@ Vev moves mapping discovery, member access, and query parsing out of runtime exe
 
 ## 1. Source analysis
 
-The annotation processor reads source-level Jakarta Persistence metadata without loading entity classes. It rejects implicit names and access strategies, then resolves explicit record components, identifiers, column flags, Java types, and Vev-specific safety metadata into a closed intermediate model.
+The annotation processor reads selected source-level Jakarta Persistence annotations without loading mapped classes. Jakarta Persistence 4 forbids records as entities, so Vev deliberately interprets those annotations on its required immutable records as nonconforming source metadata. It rejects implicit names and access strategies, then resolves explicit record components, identifiers, column flags, Java types, and Vev-specific safety metadata into a closed intermediate model.
 
 The model is valid only when every encountered Jakarta Persistence or Hibernate annotation and every accepted annotation attribute is either implemented or explicitly rejected. Other provider namespaces are not a compatibility surface and must not be assumed to affect generated behavior. Unresolved Java types fail compilation.
 
@@ -22,9 +22,9 @@ For each accepted entity, the processor emits deterministic source containing:
 - a deterministic mapping fingerprint and table/tenant metadata used by runtime checks;
 - no environment-specific values or credentials.
 
-Generated plan and registry names use a Vev-specific `Vev` suffix instead of Jakarta's static-metamodel `_` suffix, so Vev and a Jakarta/Hibernate metamodel processor can coexist during a staged migration. The Vev processor claims only the `@VevModel` trigger annotation; it inspects the listed entity annotations transitively without taking ownership of them from other processors.
+Generated plan and registry names use a Vev-specific `Vev` suffix instead of Jakarta's static-metamodel `_` suffix. Vev and a Jakarta/Hibernate metamodel processor may coexist in one build only for distinct source types; a Vev record cannot simultaneously be a Jakarta/Hibernate entity. The Vev processor claims only the `@VevModel` trigger annotation; it inspects the listed mapping annotations transitively without taking ownership of them from other processors.
 
-The processor does not emit a DDL manifest, migration, general query AST, or user-extensible SQL plan. The only current multi-row query factory is the PostgreSQL runtime's bounded `scanById`; arbitrary implementations of the public query interface are rejected at execution.
+The processor does not emit a DDL manifest, migration, general query AST, or user-extensible SQL plan. The only current multi-row query family is the PostgreSQL runtime's bounded `scanById` plus typed exclusive-key continuation through `scanByIdAfter`; arbitrary implementations of the public query interface are rejected at execution.
 
 Generated output must be reproducible for identical sources, compiler options, and dependency versions. Timestamps, absolute paths, host names, and iteration-order accidents do not belong in generated artifacts.
 

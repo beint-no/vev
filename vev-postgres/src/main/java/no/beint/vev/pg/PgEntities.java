@@ -124,19 +124,25 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     @Override
     public <R> Rows<R> many(BoundedQuery<M, R> query) {
         guard.checkUsable();
-        if (!(Objects.requireNonNull(query, "query") instanceof PgIdScan<?, ?> rawScan)) {
+        if (!(Objects.requireNonNull(query, "query") instanceof PgIdScan<?, ?, ?> rawScan)) {
             throw new IllegalArgumentException("Only structurally generated PostgreSQL queries are executable");
         }
         @SuppressWarnings("unchecked")
-        PgIdScan<M, R> scan = (PgIdScan<M, R>) rawScan;
-        @SuppressWarnings("unchecked")
-        PgPlan<M, R, Object, T> entityPlan =
-                (PgPlan<M, R, Object, T>) model.frozenPlan(scan.plan());
+        PgIdScan<M, R, Object> scan = (PgIdScan<M, R, Object>) rawScan;
+        PgPlan<M, R, Object, T> entityPlan = model.frozenPlan(scan.plan());
         int limit = scan.limit().value();
         List<R> values = new ArrayList<>(limit);
-        try (PreparedStatement statement = prepare(entityPlan.sql().scanById())) {
+        String sql = scan.hasAfterExclusive()
+                ? entityPlan.sql().scanByIdAfter()
+                : entityPlan.sql().scanById();
+        try (PreparedStatement statement = prepare(sql)) {
             bindTenant(entityPlan, statement, 1);
-            statement.setInt(2, Math.addExact(limit, 1));
+            int limitIndex = 2;
+            if (scan.hasAfterExclusive()) {
+                bindUnknown(entityPlan.keyCodec(), statement, 2, scan.afterExclusive());
+                limitIndex = 3;
+            }
+            statement.setInt(limitIndex, Math.addExact(limit, 1));
             statement.setFetchSize(Math.addExact(limit, 1));
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (values.size() < limit && resultSet.next()) {
@@ -644,7 +650,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     @SuppressWarnings("unchecked")
     private static void bindUnknown(PgCodec<?> codec, PreparedStatement statement, int index, Object value)
             throws SQLException {
-        if (value != null && !codec.javaType().isInstance(value)) {
+        if (value != null && value.getClass() != codec.javaType()) {
             throw new IllegalArgumentException("Value does not match the generated PostgreSQL codec");
         }
         ((PgCodec<Object>) codec).bind(statement, index, value);

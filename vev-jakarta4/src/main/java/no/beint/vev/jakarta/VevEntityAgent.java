@@ -12,10 +12,13 @@ import jakarta.persistence.EntityTransaction;
 import jakarta.persistence.FindOption;
 import jakarta.persistence.LockModeType;
 import jakarta.persistence.OptimisticLockException;
+import jakarta.persistence.PersistenceException;
+import jakarta.persistence.PessimisticLockScope;
 import jakarta.persistence.Statement;
 import jakarta.persistence.StatementOrTypedQuery;
 import jakarta.persistence.StatementReference;
 import jakarta.persistence.StoredProcedureQuery;
+import jakarta.persistence.Timeout;
 import jakarta.persistence.TypedQuery;
 import jakarta.persistence.TypedQueryReference;
 import jakarta.persistence.criteria.CriteriaBuilder;
@@ -41,13 +44,15 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * Thread-confined, callback-scoped Jakarta Persistence {@link EntityAgent} over Vev's immutable typed runtime.
+ * Thread-confined, callback-scoped {@link EntityAgent}-shaped facade over Vev's immutable typed runtime.
  *
- * <p>The adapter implements a deliberately narrow safe profile: detached get/find operations, bounded multi-find,
- * cache bypass, and optimistic versioned delete. Session state, dirty checking, lazy loading, dynamic query strings,
- * runtime Criteria trees, entity graphs, stored procedures, raw connections, and manual transactions are rejected.
- * Mutations that would discard Vev's replacement snapshot or explicit outcome are also rejected; use
- * {@link WriteEntities} for those operations.</p>
+ * <p>This class implements the milestone interface so selected migration calls can be evaluated, but it is
+ * deliberately nonconforming and is not supplied by a Jakarta Persistence provider. Its safe profile includes
+ * detached get/find operations, bounded multi-find, cache bypass, assigned-value inserts, and optimistic versioned
+ * delete. Session state, dirty checking, lazy loading, dynamic query strings, runtime Criteria trees, entity graphs,
+ * stored procedures, raw connections, and manual transactions are rejected. Inserts are accepted only when
+ * PostgreSQL returns the exact input snapshot. Mutations that would discard Vev's replacement snapshot or explicit
+ * outcome are rejected; use {@link WriteEntities} for those operations.</p>
  *
  * <p>Instances are created by {@link VevEntityAgents}, are valid only on the callback's thread, and are closed when
  * the callback exits.</p>
@@ -64,6 +69,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     private CacheRetrieveMode cacheRetrieveMode = CacheRetrieveMode.BYPASS;
     private CacheStoreMode cacheStoreMode = CacheStoreMode.BYPASS;
     private OptimisticLockException optimisticFailure;
+    private boolean insertDidNotCompleteVerified;
     private volatile boolean open = true;
 
     VevEntityAgent(PgModel<M, Tenant> model, WriteEntities<M> entities, Tenant tenantKey) {
@@ -160,16 +166,17 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     @Override
     public void insert(Object entity) {
         requireOpen();
-        throw immutableMutationUnsupported(plan(entity.getClass()));
+        insertTyped(planForEntity(entity), entity);
     }
 
     @Override
     public void insertMultiple(List<?> values) {
         requireOpen();
-        List<?> entities = boundedSnapshot(values, "entity");
-        for (Object entity : entities) {
-            insert(entity);
+        List<?> entitySnapshot = boundedSnapshot(values, "entity");
+        if (entitySnapshot.isEmpty()) {
+            return;
         }
+        insertMultipleTyped(planForEntity(entitySnapshot.getFirst()), entitySnapshot);
     }
 
     @Override
@@ -296,12 +303,13 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
 
     @Override
     public void setProperty(String propertyName, Object value) {
-        throw unsupported("Stringly typed runtime properties are intentionally absent from the Vev safe profile");
+        requireOpen();
+        Objects.requireNonNull(propertyName, "propertyName");
     }
 
     @Override
     public Map<String, Object> getProperties() {
-        requireOpen();
+        requireOwner();
         return Map.of();
     }
 
@@ -412,7 +420,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         if (type.isInstance(this)) {
             return type.cast(this);
         }
-        throw unsupported("Vev EntityAgent cannot be unwrapped to " + type.getName());
+        throw new PersistenceException("Vev EntityAgent cannot be unwrapped to " + type.getName());
     }
 
     @Override
@@ -528,6 +536,65 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         }
     }
 
+    private <E, K> void insertTyped(PgEntityPlan<M, E, K, Tenant> plan, Object value) {
+        E entity = requireInsertEntity(plan, value);
+        insertDidNotCompleteVerified = true;
+        E inserted = entities.insert(plan, entity);
+        verifyInsertedSnapshot(plan, entity, inserted);
+        insertDidNotCompleteVerified = false;
+    }
+
+    private <E, K> void insertMultipleTyped(PgEntityPlan<M, E, K, Tenant> plan, List<?> values) {
+        List<E> typedValues = new ArrayList<>(values.size());
+        for (Object value : values) {
+            PgEntityPlan<M, Object, Object, Tenant> valuePlan = planForEntity(value);
+            if (valuePlan.javaType() != plan.javaType()) {
+                throw new IllegalArgumentException("EntityAgent insert batch must contain one entity type");
+            }
+            typedValues.add(requireInsertEntity(plan, value));
+        }
+        Batch<E> input = Batch.copyOf(typedValues);
+        insertDidNotCompleteVerified = true;
+        Batch<E> inserted = entities.insertMultiple(plan, input);
+        if (input.size() != inserted.size()) {
+            throw newInsertSnapshotFailure(plan);
+        }
+        for (int index = 0; index < input.size(); index++) {
+            verifyInsertedSnapshot(plan, input.get(index), inserted.get(index));
+        }
+        insertDidNotCompleteVerified = false;
+    }
+
+    private <E, K> E requireInsertEntity(PgEntityPlan<M, E, K, Tenant> plan, Object value) {
+        E entity = plan.javaType().cast(value);
+        requireEntityTenant(plan, entity);
+        K key = plan.keyOf(entity);
+        if (key == null) {
+            throw new IllegalArgumentException("Assigned identifier insert requires a non-null identifier");
+        }
+        if (!plan.keyType().isInstance(key)) {
+            throw new IllegalArgumentException(
+                    "Identifier for " + plan.logicalName() + " must be " + plan.keyType().getName());
+        }
+        return entity;
+    }
+
+    private <E, K> void verifyInsertedSnapshot(PgEntityPlan<M, E, K, Tenant> plan, E input, E inserted) {
+        for (int index = 0; index < plan.columns().size(); index++) {
+            Object returnedValue = plan.columnValue(inserted, index);
+            Object inputValue = plan.columnValue(input, index);
+            if (!Objects.equals(returnedValue, inputValue)) {
+                throw newInsertSnapshotFailure(plan);
+            }
+        }
+    }
+
+    private PersistenceException newInsertSnapshotFailure(PgEntityPlan<M, ?, ?, Tenant> plan) {
+        insertDidNotCompleteVerified = true;
+        return new PersistenceException(
+                "PostgreSQL returned a different immutable snapshot after inserting " + plan.logicalName());
+    }
+
     private UnsupportedOperationException immutableMutationUnsupported(PgEntityPlan<M, ?, ?, Tenant> plan) {
         return new UnsupportedOperationException(
                 plan.logicalName() + " is immutable; use Vev's typed mutation API which returns the new value");
@@ -551,14 +618,24 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
 
     private void validateFindOptions(FindOption... findOptions) {
         requireOpen();
-        Objects.requireNonNull(findOptions, "findOptions");
+        if (findOptions == null) {
+            return;
+        }
         for (FindOption option : findOptions) {
-            Objects.requireNonNull(option, "findOption");
+            if (option == null) {
+                continue;
+            }
             if (option instanceof LockModeType lockMode) {
                 requireNoLock(lockMode);
-            } else if (option == CacheRetrieveMode.BYPASS || option == CacheStoreMode.BYPASS) {
-                continue;
-            } else {
+            } else if (option instanceof CacheRetrieveMode retrieveMode) {
+                if (retrieveMode != CacheRetrieveMode.BYPASS) {
+                    throw unsupported("Vev EntityAgent has no shared cache and requires CacheRetrieveMode.BYPASS");
+                }
+            } else if (option instanceof CacheStoreMode storeMode) {
+                if (storeMode != CacheStoreMode.BYPASS) {
+                    throw unsupported("Vev EntityAgent has no shared cache and requires CacheStoreMode.BYPASS");
+                }
+            } else if (option instanceof Timeout || option instanceof PessimisticLockScope) {
                 throw unsupported("Unsupported EntityAgent find option: " + option.getClass().getName());
             }
         }
@@ -579,12 +656,20 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         if (optimisticFailure != null) {
             throw new IllegalStateException("Vev EntityAgent transaction must roll back after optimistic failure");
         }
+        if (insertDidNotCompleteVerified) {
+            throw new IllegalStateException(
+                    "Vev EntityAgent transaction must roll back after an insert did not complete with a verified snapshot");
+        }
     }
 
     void requireCommittable() {
         requireOwner();
         if (optimisticFailure != null) {
             throw optimisticFailure;
+        }
+        if (insertDidNotCompleteVerified) {
+            throw new PersistenceException(
+                    "Vev EntityAgent transaction must roll back after an insert did not complete with a verified snapshot");
         }
     }
 

@@ -2,9 +2,11 @@
 
 > Vev is not currently a drop-in Hibernate replacement.
 
-Reusing Jakarta annotations can reduce source migration, but annotations are only one part of ORM behavior. Applications may depend on session identity, flush timing, proxies, cascades, JPQL, repository proxies, callbacks, lock modes, provider annotations, or exception behavior without making those dependencies obvious.
+Jakarta Persistence 4 forbids records as entities, while Vev deliberately requires immutable records. Vev reuses selected Jakarta annotations only as nonconforming source metadata. An existing Hibernate/Jakarta entity cannot become a Vev mapping in place or be managed by both implementations; migration requires a separate or rewritten record model.
 
-The current experiment consumes a closed Jakarta Persistence `4.0.0-M6` annotation subset and has not passed the Jakarta Persistence TCK. Compatibility with Hibernate ORM 8.0.0.Beta1 is evaluated operation by operation, not inferred from shared annotations.
+Reusing some annotation spellings can reduce mechanical mapping work, but annotations are only one part of ORM behavior. Applications may depend on session identity, flush timing, proxies, cascades, JPQL, repository proxies, callbacks, lock modes, provider annotations, or exception behavior without making those dependencies obvious.
+
+The current experiment consumes a closed selection of Jakarta Persistence `4.0.0-M6` annotations, is deliberately nonconforming, and has not passed the Jakarta Persistence TCK. The `vev-jakarta4` module is an `EntityAgent`-shaped facade whose selected behavior is evaluated operation by operation; it is not a Jakarta provider implementation. Comparisons with Hibernate ORM 8.0.0.Beta1 are not evidence of source-model or provider compatibility.
 
 ## Candidate selection
 
@@ -23,7 +25,7 @@ If an aggregate does not fit the supported profile, leave it on the existing pro
 
 1. Inventory entity annotations, provider annotations, repositories, JPQL/HQL, Criteria, `EntityManager` use, locks, callbacks, and transactional call sites.
 2. Select one bounded aggregate and reduce its mapped-table constraints to Vev's verified primary-key, `NOT NULL`, and row-security profile.
-3. Add Vev processing and treat every rejection as a compatibility decision.
+3. Introduce a separate immutable Vev record model, add Vev processing, and treat every rejection as a compatibility decision. A Jakarta/Hibernate processor may remain in the same build for the distinct legacy entity types.
 4. Review generated metadata and the runtime's fixed SQL/schema contract in CI.
 5. Run differential reads against disposable representative synthetic schemas; compare canonical values and row counts.
 6. Observe shadow reads before changing the authoritative read path.
@@ -39,7 +41,7 @@ Do not dual-write two persistence implementations inside one request unless atom
 | Managed identity and dirty checking | Explicit stateless reads and version-qualified writes |
 | Lazy proxies | Explicit follow-up queries or application composition |
 | Cascade and orphan removal | Explicit service operations; relationship and business constraints on mapped tables are not accepted yet |
-| JPQL/HQL/Criteria | Generated point/batch operations and the bounded ID scan; a broader typed query compiler is future work |
+| JPQL/HQL/Criteria | Generated point/batch operations and an ID-ordered bounded scan with typed exclusive-key continuation; a broader typed query compiler is future work |
 | Spring Data repository proxy | Explicit agent integration; no current registrar promise |
 | Lifecycle callbacks | Explicit application behavior |
 | Provider tenant filters | An explicitly injected tenant authority, opaque per-tenant scopes, structurally generated tenant predicates, and forced database row security |

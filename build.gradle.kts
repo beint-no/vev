@@ -31,7 +31,7 @@ subprojects {
         "vev-core" -> "Compile-time-safe transaction and entity contracts for Vev"
         "vev-postgres" -> "PostgreSQL 18 runtime for Vev's closed AOT entity model"
         "vev-processor" -> "JDK 26 annotation processor for Vev entity models"
-        "vev-jakarta4" -> "Experimental Jakarta Persistence 4 EntityAgent adapter for Vev"
+        "vev-jakarta4" -> "Experimental nonconforming Jakarta Persistence 4 EntityAgent-shaped facade for Vev"
         "vev-integration-tests" -> "Synthetic PostgreSQL integration verification for Vev"
         "vev-benchmark-vev" -> "JMH benchmark lane for Vev"
         "vev-benchmark-hibernate" -> "JMH comparison lane for Hibernate ORM 8"

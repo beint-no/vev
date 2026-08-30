@@ -8,7 +8,7 @@ import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
-/** Lexical transaction entry points for Vev's narrow Jakarta Persistence {@link EntityAgent} profile. */
+/** Lexical transaction entry points for Vev's deliberately nonconforming {@link EntityAgent}-shaped facade. */
 public final class VevEntityAgents {
     private VevEntityAgents() {
     }

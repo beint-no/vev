@@ -8,6 +8,7 @@ final class PgSql {
     private final String find;
     private final String findMultiple;
     private final String scanById;
+    private final String scanByIdAfter;
     private final String insert;
     private final String update;
     private final String upsert;
@@ -17,6 +18,7 @@ final class PgSql {
             String find,
             String findMultiple,
             String scanById,
+            String scanByIdAfter,
             String insert,
             String update,
             String upsert,
@@ -24,6 +26,7 @@ final class PgSql {
         this.find = find;
         this.findMultiple = findMultiple;
         this.scanById = scanById;
+        this.scanByIdAfter = scanByIdAfter;
         this.insert = insert;
         this.update = update;
         this.upsert = upsert;
@@ -53,12 +56,16 @@ final class PgSql {
         String scanById = "SELECT " + selectedColumns + " FROM " + table
                 + " WHERE " + quoted(tenant.name()) + " = ?"
                 + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
+        String scanByIdAfter = "SELECT " + selectedColumns + " FROM " + table
+                + " WHERE " + quoted(tenant.name()) + " = ?"
+                + " AND " + quoted(id.name()) + " > ?"
+                + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
 
         String insert = "INSERT INTO " + table + " (" + quotedColumns(columns) + ") VALUES ("
                 + placeholders(columns.size()) + ") RETURNING " + selectedColumns;
 
         if (!(plan instanceof PgVersionPlan<?, ?, ?, ?, ?>)) {
-            return new PgSql(find, findMultiple, scanById, insert, null, null, null);
+            return new PgSql(find, findMultiple, scanById, scanByIdAfter, insert, null, null, null);
         }
 
         PgColumn version = column(columns, PgColumn.Role.VERSION);
@@ -69,6 +76,7 @@ final class PgSql {
                 find,
                 findMultiple,
                 scanById,
+                scanByIdAfter,
                 insert,
                 update(table, columns, mutableColumns, id, tenant, version),
                 upsert(table, columns, mutableColumns, id, tenant, version),
@@ -85,6 +93,10 @@ final class PgSql {
 
     String scanById() {
         return scanById;
+    }
+
+    String scanByIdAfter() {
+        return scanByIdAfter;
     }
 
     String insert() {

@@ -122,7 +122,7 @@ public record PgColumn(
             }
             return;
         }
-        if (!codec.javaType().isInstance(value)) {
+        if (value.getClass() != codec.javaType()) {
             throw new IllegalArgumentException(name + " does not match its generated PostgreSQL codec");
         }
         if (value instanceof String text) {

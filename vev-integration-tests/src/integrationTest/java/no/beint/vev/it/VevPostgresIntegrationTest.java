@@ -3,7 +3,9 @@ package no.beint.vev.it;
 import jakarta.persistence.CacheRetrieveMode;
 import jakarta.persistence.EntityAgent;
 import jakarta.persistence.EntityNotFoundException;
+import jakarta.persistence.FindOption;
 import jakarta.persistence.OptimisticLockException;
+import jakarta.persistence.PersistenceException;
 import jakarta.persistence.Timeout;
 import no.beint.vev.Batch;
 import no.beint.vev.BoundedQuery;
@@ -338,6 +340,14 @@ final class VevPostgresIntegrationTest {
             assertThrows(IllegalArgumentException.class, () -> transaction.entities().insert(
                     AccountVev.INSTANCE,
                     new Account(
+                            id("decimal-subclass"),
+                            7,
+                            0L,
+                            "subclass@example.test",
+                            new HostileBigDecimal("1.0000"))));
+            assertThrows(IllegalArgumentException.class, () -> transaction.entities().insert(
+                    AccountVev.INSTANCE,
+                    new Account(
                             id("excessive-precision"),
                             7,
                             0L,
@@ -618,15 +628,48 @@ final class VevPostgresIntegrationTest {
         UUID firstId = UUID.fromString("00000000-0000-0000-0000-000000000001");
         UUID secondId = UUID.fromString("00000000-0000-0000-0000-000000000002");
         UUID thirdId = UUID.fromString("00000000-0000-0000-0000-000000000003");
+        UUID fourthId = UUID.fromString("00000000-0000-0000-0000-000000000004");
+        UUID fifthId = UUID.fromString("00000000-0000-0000-0000-000000000005");
         insert(account(firstId, 7, 0, "first@example.test", "1.00"), TENANT_7);
         insert(account(secondId, 7, 0, "second@example.test", "2.00"), TENANT_7);
         insert(account(thirdId, 7, 0, "third@example.test", "3.00"), TENANT_7);
+        insert(account(fourthId, 7, 0, "fourth@example.test", "4.00"), TENANT_7);
+        insert(account(fifthId, 7, 0, "fifth@example.test", "5.00"), TENANT_7);
+        insert(account(firstId, 8, 0, "tenant-eight-first@example.test", "8.00"), TENANT_8);
+        insert(account(thirdId, 8, 0, "tenant-eight-third@example.test", "8.00"), TENANT_8);
 
         vev.read(TENANT_7, transaction -> {
             Rows<Account> rows = transaction.entities().many(
                     PgQueries.scanById(AccountVev.INSTANCE, new QueryLimit(2)));
             assertEquals(List.of(firstId, secondId), rows.values().stream().map(Account::id).toList());
             assertTrue(rows.hasMore());
+
+            Rows<Account> remaining = transaction.entities().many(
+                    PgQueries.scanByIdAfter(AccountVev.INSTANCE.key(secondId), new QueryLimit(2)));
+            assertEquals(List.of(thirdId, fourthId), remaining.values().stream().map(Account::id).toList());
+            assertTrue(remaining.hasMore());
+
+            Rows<Account> finalPage = transaction.entities().many(
+                    PgQueries.scanByIdAfter(AccountVev.INSTANCE.key(fourthId), new QueryLimit(2)));
+            assertEquals(List.of(fifthId), finalPage.values().stream().map(Account::id).toList());
+            assertFalse(finalPage.hasMore());
+
+            Rows<Account> emptyPage = transaction.entities().many(
+                    PgQueries.scanByIdAfter(AccountVev.INSTANCE.key(fifthId), new QueryLimit(2)));
+            assertTrue(emptyPage.values().isEmpty());
+            assertFalse(emptyPage.hasMore());
+
+            return null;
+        });
+
+        vev.read(TENANT_8, transaction -> {
+            Rows<Account> tenantRelativeContinuation = transaction.entities().many(
+                    PgQueries.scanByIdAfter(AccountVev.INSTANCE.key(firstId), new QueryLimit(2)));
+            assertEquals(
+                    List.of(thirdId),
+                    tenantRelativeContinuation.values().stream().map(Account::id).toList());
+            assertFalse(tenantRelativeContinuation.hasMore());
+            assertEquals(8, tenantRelativeContinuation.values().getFirst().tenantId());
 
             BoundedQuery<IntegrationModelVev.Model, Account> forged = new BoundedQuery<>() {
                 @Override
@@ -707,10 +750,13 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
-    void jakartaEntityAgentProvidesDetachedReadsAndRejectsUnsafeSurface() {
+    void jakartaEntityAgentProvidesDetachedReadsAndSafeAssignedValueInserts() {
         UUID accountId = id("agent");
         insert(account(accountId, 7, 0, "agent@example.test", "5.00"), TENANT_7);
         UUID missing = id("agent-missing");
+        Account inserted = account(id("agent-insert"), 7, 0, "immutable@example.test", "1.00");
+        Account batchFirst = account(id("agent-insert-batch-first"), 7, 0, "first@example.test", "2.00");
+        Account batchSecond = account(id("agent-insert-batch-second"), 7, 0, "second@example.test", "3.00");
 
         VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
             Account first = agent.get(Account.class, accountId);
@@ -722,30 +768,94 @@ final class VevPostgresIntegrationTest {
             assertThrows(EntityNotFoundException.class, () ->
                     agent.getMultiple(Account.class, List.of(accountId, missing)));
             assertThrows(UnsupportedOperationException.class, () -> agent.createQuery("from Account"));
-            assertThrows(UnsupportedOperationException.class, () -> agent.insert(
-                    account(id("agent-insert"), 7, 0, "immutable@example.test", "1.00")));
+            agent.insert(inserted);
+            agent.insertMultiple(List.of(batchFirst, batchSecond));
+            assertEquals(inserted, agent.get(Account.class, inserted.id()));
+            assertEquals(batchFirst, agent.get(Account.class, batchFirst.id()));
+            assertEquals(batchSecond, agent.get(Account.class, batchSecond.id()));
             assertSame(values, agent.fetch(values));
             return null;
         });
 
-        assertFalse(vev.read(TENANT_7, transaction ->
-                transaction.entities().find(AccountVev.INSTANCE.key(id("agent-insert")))).isPresent());
+        assertEquals(inserted, find(inserted.id(), TENANT_7));
+        assertEquals(batchFirst, find(batchFirst.id(), TENANT_7));
+        assertEquals(batchSecond, find(batchSecond.id(), TENANT_7));
     }
 
     @Test
-    void jakartaEntityAgentRejectsCrossTenantDetachedDeletesBeforeSql() {
+    void jakartaEntityAgentPrevalidatesDetachedMutationsBeforeSql() {
         UUID accountId = id("agent-cross-tenant-delete");
         Account tenantSeven = insert(account(accountId, 7, 0, "seven@example.test", "7.00"), TENANT_7);
         Account tenantEight = insert(account(accountId, 8, 0, "eight@example.test", "8.00"), TENANT_8);
+        Account validBeforeWrongTenant = account(
+                id("agent-batch-valid-before-wrong-tenant"), 7, 0, "valid@example.test", "9.00");
+        Account wrongTenant = account(
+                id("agent-batch-wrong-tenant"), 8, 0, "wrong@example.test", "10.00");
+        Account validBeforeDifferentType = account(
+                id("agent-batch-valid-before-different-type"), 7, 0, "mixed@example.test", "11.00");
+        AuditEvent differentType = new AuditEvent(
+                id("agent-batch-different-type"),
+                7,
+                Instant.parse("2026-08-30T12:34:56.123456Z"),
+                LocalDateTime.parse("2026-08-30T12:34:56.123456"),
+                LocalDate.parse("2026-08-30"),
+                "ACCOUNT_OPENED");
+        Account validBeforeWrongModel = account(
+                id("agent-batch-valid-before-wrong-model"), 7, 0, "model@example.test", "12.00");
 
         VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
             assertThrows(IllegalArgumentException.class, () -> agent.delete(tenantEight));
+            assertThrows(IllegalArgumentException.class, () ->
+                    agent.insertMultiple(List.of(validBeforeWrongTenant, wrongTenant)));
+            assertNull(agent.find(Account.class, validBeforeWrongTenant.id()));
+            assertThrows(IllegalArgumentException.class, () ->
+                    agent.insertMultiple(List.of(validBeforeDifferentType, differentType)));
+            assertNull(agent.find(Account.class, validBeforeDifferentType.id()));
+            assertThrows(IllegalArgumentException.class, () ->
+                    agent.insertMultiple(List.of(validBeforeWrongModel, new WrongModel())));
+            assertNull(agent.find(Account.class, validBeforeWrongModel.id()));
             assertEquals(tenantSeven, agent.get(Account.class, accountId));
             return null;
         });
 
         assertEquals(tenantSeven, find(accountId, TENANT_7));
         assertEquals(tenantEight, find(accountId, TENANT_8));
+        boolean wrongTenantPrefixInserted = vev.read(TENANT_7, transaction -> transaction.entities()
+                .find(AccountVev.INSTANCE.key(validBeforeWrongTenant.id())).isPresent());
+        boolean differentTypePrefixInserted = vev.read(TENANT_7, transaction -> transaction.entities()
+                .find(AccountVev.INSTANCE.key(validBeforeDifferentType.id())).isPresent());
+        boolean wrongModelPrefixInserted = vev.read(TENANT_7, transaction -> transaction.entities()
+                .find(AccountVev.INSTANCE.key(validBeforeWrongModel.id())).isPresent());
+        assertFalse(wrongTenantPrefixInserted);
+        assertFalse(differentTypePrefixInserted);
+        assertFalse(wrongModelPrefixInserted);
+    }
+
+    @Test
+    void jakartaEntityAgentCaughtInvalidInsertMakesTheTransactionUncommittable() {
+        Account valid = account(
+                id("agent-before-invalid-insert"), 7, 0, "valid@example.test", "1.0000");
+        Account invalid = new Account(
+                id("agent-invalid-insert"),
+                7,
+                0L,
+                "invalid@example.test",
+                new BigDecimal("2.000"));
+
+        PersistenceException failure = assertThrows(PersistenceException.class, () ->
+                VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
+                    agent.insert(valid);
+                    assertThrows(IllegalArgumentException.class, () -> agent.insert(invalid));
+                    assertThrows(IllegalStateException.class, () -> agent.get(Account.class, valid.id()));
+                    return null;
+                }));
+
+        assertEquals(
+                "Vev EntityAgent transaction must roll back after an insert did not complete with a verified snapshot",
+                failure.getMessage());
+        boolean validInsertCommitted = vev.read(TENANT_7, transaction ->
+                transaction.entities().find(AccountVev.INSTANCE.key(valid.id())).isPresent());
+        assertFalse(validInsertCommitted);
     }
 
     @Test
@@ -786,7 +896,7 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
-    void jakartaEntityAgentFailsClosedForUnknownOptionsAndTimeouts() {
+    void jakartaEntityAgentHandlesKnownAndVendorOptionsSafely() {
         Account account = insert(account(
                 id("agent-options"), 7, 0, "options@example.test", "3.0000"), TENANT_7);
 
@@ -797,6 +907,14 @@ final class VevPostgresIntegrationTest {
                     agent.find(Account.class, account.id(), Timeout.ms(1)));
             assertThrows(UnsupportedOperationException.class, () ->
                     agent.setCacheRetrieveMode(CacheRetrieveMode.USE));
+            assertEquals(account, agent.find(Account.class, account.id(), new FutureFindOption()));
+            assertEquals(account, agent.find(Account.class, account.id(), (FindOption[]) null));
+            assertEquals(account, agent.find(Account.class, account.id(), (FindOption) null));
+            agent.setProperty("future.vendor.hint", new Object());
+            assertTrue(agent.getProperties().isEmpty());
+            assertThrows(NullPointerException.class, () -> agent.setProperty(null, new Object()));
+            assertSame(agent, agent.unwrap(EntityAgent.class));
+            assertThrows(PersistenceException.class, () -> agent.unwrap(String.class));
             assertEquals(account, agent.get(Account.class, account.id()));
             return null;
         });
@@ -831,6 +949,22 @@ final class VevPostgresIntegrationTest {
 
         EntityAgent closedAgent = escaped.get();
         assertFalse(closedAgent.isOpen());
+        assertTrue(closedAgent.getProperties().isEmpty());
+        CompletableFuture<Throwable> closedForeignThreadOutcome = new CompletableFuture<>();
+        Thread.ofVirtual().start(() -> {
+            try {
+                closedAgent.getProperties();
+                closedForeignThreadOutcome.complete(new AssertionError("Foreign thread use unexpectedly succeeded"));
+            } catch (Throwable failure) {
+                closedForeignThreadOutcome.complete(failure);
+            }
+        });
+        IllegalStateException closedForeignThreadFailure = assertInstanceOf(
+                IllegalStateException.class,
+                closedForeignThreadOutcome.join());
+        assertEquals(
+                "Vev EntityAgent belongs to a different thread",
+                closedForeignThreadFailure.getMessage());
         IllegalStateException closedFailure = assertThrows(
                 IllegalStateException.class,
                 closedAgent::getOptions);
@@ -1116,5 +1250,26 @@ final class VevPostgresIntegrationTest {
     }
 
     private static final class FutureEntityAgentOption implements EntityAgent.Option {
+    }
+
+    private static final class FutureFindOption implements FindOption {
+    }
+
+    private static final class HostileBigDecimal extends BigDecimal {
+        private static final long serialVersionUID = 1L;
+
+        private HostileBigDecimal(String value) {
+            super(value);
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            throw new AssertionError("Application equality must not run");
+        }
+
+        @Override
+        public int hashCode() {
+            return super.hashCode();
+        }
     }
 }

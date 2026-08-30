@@ -59,7 +59,7 @@ The JMH class contains:
 - `EntityAgent.find()` for `(id=7777, tenant_id=7)`;
 - `EntityAgent.findMultiple()` for ids 1 through 31 plus missing id 20001;
 - `EntityAgent.findMultiple()` for ids 1 through 255 plus missing id 20001;
-- an ordered, tenant-qualified scan with `setMaxResults(257)` over a known-larger 10,000-row dataset, materializing 256 results and consuming the extra row as `hasMore` evidence.
+- an ordered, tenant-qualified scan with `setMaxResults(257)` over a known-larger 10,000-row dataset, materializing all 257 results and consuming the extra list entry as `hasMore` evidence.
 
 `findMultiple()` is intentional: the Jakarta 4 contract preserves input positions and returns `null` for the missing id, whereas `getMultiple()` must throw when any requested row is absent.
 
