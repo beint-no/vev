@@ -266,8 +266,12 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 verifyPostgresVersion(connection);
                 stage = BootstrapStage.RUNTIME_ROLE;
                 DatabaseIdentity identity = verifyRuntimeRole(connection);
-                stage = BootstrapStage.SCHEMA_FINGERPRINT;
-                verifySchemaFingerprint(connection);
+                stage = BootstrapStage.FINGERPRINT_RELATION;
+                verifyFingerprintRelation(connection);
+                stage = BootstrapStage.FINGERPRINT_PRIVILEGES;
+                verifyFingerprintPrivileges(connection);
+                stage = BootstrapStage.FINGERPRINT_VALUE;
+                verifyFingerprintValue(connection);
                 stage = BootstrapStage.TENANT_ISOLATION;
                 verifyTenantIsolation(connection);
                 stage = BootstrapStage.BOOTSTRAP_CONTEXT;
@@ -291,7 +295,9 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         VERIFIER_CONFIGURATION("verifier configuration"),
         POSTGRESQL_VERSION("PostgreSQL version verification"),
         RUNTIME_ROLE("runtime role verification"),
-        SCHEMA_FINGERPRINT("schema fingerprint verification"),
+        FINGERPRINT_RELATION("fingerprint relation verification"),
+        FINGERPRINT_PRIVILEGES("fingerprint privilege verification"),
+        FINGERPRINT_VALUE("fingerprint value verification"),
         TENANT_ISOLATION("tenant isolation verification"),
         BOOTSTRAP_CONTEXT("bootstrap context verification");
 
@@ -550,8 +556,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         }
     }
 
-    private void verifySchemaFingerprint(Connection connection) throws SQLException {
-        verifyFingerprintRelation(connection);
+    private static void verifyFingerprintPrivileges(Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT pg_catalog.has_table_privilege(current_user, 'public.vev_schema_fingerprint', 'SELECT'),
                        pg_catalog.has_table_privilege(
@@ -582,6 +587,9 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 throw new IllegalStateException("Application role must have read-only access to the Vev schema fingerprint");
             }
         }
+    }
+
+    private void verifyFingerprintValue(Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT model_name, fingerprint FROM public.vev_schema_fingerprint WHERE model_name = ?")) {
             statement.setString(1, model.identity().name());

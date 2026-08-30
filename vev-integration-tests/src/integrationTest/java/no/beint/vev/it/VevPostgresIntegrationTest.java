@@ -212,7 +212,7 @@ final class VevPostgresIntegrationTest {
                             IntegrationModelVev.POSTGRES,
                             authority));
 
-            assertEquals("Vev rejected PostgreSQL during schema fingerprint verification", failure.getMessage());
+            assertEquals("Vev rejected PostgreSQL during fingerprint value verification", failure.getMessage());
             assertNull(failure.getCause());
             assertEquals(0, failure.getSuppressed().length);
             assertFalse(failure.toString().contains("sensitive-fixture-value"));
