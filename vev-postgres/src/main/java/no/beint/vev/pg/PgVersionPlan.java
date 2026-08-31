@@ -1,6 +1,5 @@
 package no.beint.vev.pg;
 
-import no.beint.vev.VersionedKey;
 import no.beint.vev.pg.spi.PgVersionedEntityPlan;
 
 import java.util.Objects;
@@ -29,7 +28,4 @@ final class PgVersionPlan<M, E, K, T, V> extends PgPlan<M, E, K, T> {
         return versionedSource.versionOf(entity);
     }
 
-    VersionedKey<M, E, K, V> versionedKey(K key, V expectedVersion) {
-        return versionedSource.versionedKey(key, expectedVersion);
-    }
 }

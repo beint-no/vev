@@ -45,10 +45,17 @@ public class VevBenchmark {
     private static final int TENANT_ID = 7;
     private static final long FIND_ONE_ID = 7_777L;
     private static final int SCAN_LIMIT = 256;
+    private static final String INDEXED_EMAIL_VALUE = "account-7777@example.test";
+    private static final int INDEXED_EMAIL_LIMIT = 1;
+    private static final int INDEXED_ACTIVE_LIMIT = 32;
     private static final TenantAuthority<BenchmarkModelVev.Model, Integer> TENANT_AUTHORITY =
             BenchmarkModelVev.newTenantAuthority();
     private static final BoundedQuery<BenchmarkModelVev.Model, Account> ACCOUNT_SCAN =
             PgQueries.scanById(AccountVev.INSTANCE, new QueryLimit(SCAN_LIMIT));
+    private static final BoundedQuery<BenchmarkModelVev.Model, Account> ACCOUNT_BY_EMAIL =
+            PgQueries.equal(AccountVev.EMAIL, INDEXED_EMAIL_VALUE, new QueryLimit(INDEXED_EMAIL_LIMIT));
+    private static final BoundedQuery<BenchmarkModelVev.Model, Account> ACTIVE_ACCOUNTS =
+            PgQueries.equal(AccountVev.ACTIVE, true, new QueryLimit(INDEXED_ACTIVE_LIMIT));
     private static final String RAW_COLUMNS = "\"id\", \"tenant_id\", \"version\", \"email\", \"balance\", \"active\"";
     private static final String RAW_FIND_SQL = "SELECT " + RAW_COLUMNS
             + " FROM \"vev_bench\".\"account\" WHERE \"id\" = ? AND \"tenant_id\" = ?";
@@ -62,6 +69,12 @@ public class VevBenchmark {
             + " AND \"__vev_row\".\"tenant_id\" = ? ORDER BY \"__vev_requested\".\"ordinality\"";
     private static final String RAW_SCAN_SQL = "SELECT " + RAW_COLUMNS
             + " FROM \"vev_bench\".\"account\" WHERE \"tenant_id\" = ? ORDER BY \"id\" LIMIT ?";
+    private static final String RAW_INDEXED_EMAIL_SQL = "SELECT " + RAW_COLUMNS
+            + " FROM \"vev_bench\".\"account\" WHERE \"tenant_id\" = ? AND \"email\" = ?"
+            + " ORDER BY \"id\" LIMIT ?";
+    private static final String RAW_INDEXED_ACTIVE_SQL = "SELECT " + RAW_COLUMNS
+            + " FROM \"vev_bench\".\"account\" WHERE \"tenant_id\" = ? AND \"active\" = ?"
+            + " ORDER BY \"id\" LIMIT ?";
 
     private HikariDataSource dataSource;
     private PgVev<BenchmarkModelVev.Model, Integer> vev;
@@ -88,6 +101,8 @@ public class VevBenchmark {
         verifyChecksum("findMultiple32", findMultipleValue(keys32), rawFindMultipleValue(rawKeys32));
         verifyChecksum("findMultiple256", findMultipleValue(keys256), rawFindMultipleValue(rawKeys256));
         verifyChecksum("boundedScan", boundedScanValue(), rawBoundedScanValue());
+        verifyChecksum("indexedEmail", indexedEmailValue(), rawIndexedEmailValue());
+        verifyChecksum("indexedActive32", indexedActive32Value(), rawIndexedActive32Value());
     }
 
     @TearDown(Level.Trial)
@@ -123,6 +138,16 @@ public class VevBenchmark {
     }
 
     @Benchmark
+    public long indexedEmail() {
+        return indexedEmailValue();
+    }
+
+    @Benchmark
+    public long indexedActive32() {
+        return indexedActive32Value();
+    }
+
+    @Benchmark
     public long rawTransactionOnly() throws SQLException {
         return rawTransactionOnlyValue();
     }
@@ -147,6 +172,16 @@ public class VevBenchmark {
         return rawBoundedScanValue();
     }
 
+    @Benchmark
+    public long rawIndexedEmail() throws SQLException {
+        return rawIndexedEmailValue();
+    }
+
+    @Benchmark
+    public long rawIndexedActive32() throws SQLException {
+        return rawIndexedActive32Value();
+    }
+
     private long transactionOnlyValue() {
         return vev.read(tenant, transaction -> transaction.tenant().tenantId().longValue());
     }
@@ -164,6 +199,14 @@ public class VevBenchmark {
 
     private long boundedScanValue() {
         return vev.read(tenant, transaction -> checksum(transaction.entities().many(ACCOUNT_SCAN)));
+    }
+
+    private long indexedEmailValue() {
+        return vev.read(tenant, transaction -> checksum(transaction.entities().many(ACCOUNT_BY_EMAIL)));
+    }
+
+    private long indexedActive32Value() {
+        return vev.read(tenant, transaction -> checksum(transaction.entities().many(ACTIVE_ACCOUNTS)));
     }
 
     private long rawTransactionOnlyValue() throws SQLException {
@@ -233,6 +276,47 @@ public class VevBenchmark {
             checksum = mix(checksum, count);
             return mix(checksum, hasMore ? 1 : 0);
         });
+    }
+
+    private long rawIndexedEmailValue() throws SQLException {
+        return rawRead(connection -> rawIndexedChecksum(
+                connection,
+                RAW_INDEXED_EMAIL_SQL,
+                INDEXED_EMAIL_LIMIT,
+                statement -> statement.setString(2, INDEXED_EMAIL_VALUE)));
+    }
+
+    private long rawIndexedActive32Value() throws SQLException {
+        return rawRead(connection -> rawIndexedChecksum(
+                connection,
+                RAW_INDEXED_ACTIVE_SQL,
+                INDEXED_ACTIVE_LIMIT,
+                statement -> statement.setBoolean(2, true)));
+    }
+
+    private static long rawIndexedChecksum(
+            Connection connection,
+            String sql,
+            int limit,
+            RawIndexedValueBinder valueBinder) throws SQLException {
+        long checksum = 1;
+        int count = 0;
+        boolean hasMore;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setInt(1, TENANT_ID);
+            valueBinder.bind(statement);
+            statement.setInt(3, Math.addExact(limit, 1));
+            statement.setFetchSize(Math.addExact(limit, 1));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (count < limit && resultSet.next()) {
+                    checksum = mix(checksum, checksum(readAccount(resultSet, 1)));
+                    count++;
+                }
+                hasMore = resultSet.next();
+            }
+        }
+        checksum = mix(checksum, count);
+        return mix(checksum, hasMore ? 1 : 0);
     }
 
     private long rawRead(RawWork work) throws SQLException {
@@ -316,5 +400,10 @@ public class VevBenchmark {
     @FunctionalInterface
     private interface RawWork {
         long run(Connection connection) throws SQLException;
+    }
+
+    @FunctionalInterface
+    private interface RawIndexedValueBinder {
+        void bind(PreparedStatement statement) throws SQLException;
     }
 }

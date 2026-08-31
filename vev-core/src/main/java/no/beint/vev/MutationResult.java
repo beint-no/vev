@@ -3,7 +3,7 @@ package no.beint.vev;
 import java.util.Objects;
 
 /**
- * Exhaustive optimistic result of an explicit update or upsert.
+ * Exhaustive optimistic result of an explicit update.
  *
  * @param <M> closed-model marker type
  * @param <E> entity snapshot type
@@ -27,12 +27,11 @@ public sealed interface MutationResult<M, E, K, V>
     V expectedVersion();
 
     /**
-     * Contains an applied mutation and its detached replacement snapshot.
+     * Contains an applied update and its detached replacement snapshot.
      *
      * @param key type-bound entity key
      * @param expectedVersion version required by the caller
      * @param version stored version after the mutation
-     * @param effect database effect that was applied
      * @param entity detached replacement snapshot
      * @param <M> closed-model marker type
      * @param <E> entity snapshot type
@@ -43,7 +42,6 @@ public sealed interface MutationResult<M, E, K, V>
             EntityKey<M, E, K> key,
             V expectedVersion,
             V version,
-            MutationEffect effect,
             E entity) implements MutationResult<M, E, K, V> {
         /**
          * Validates an applied mutation outcome.
@@ -51,14 +49,12 @@ public sealed interface MutationResult<M, E, K, V>
          * @param key type-bound entity key
          * @param expectedVersion version required by the caller
          * @param version stored version after the mutation
-         * @param effect database effect that was applied
          * @param entity detached replacement snapshot
          */
         public Applied {
             key = Objects.requireNonNull(key, "key");
             expectedVersion = Objects.requireNonNull(expectedVersion, "expectedVersion");
             version = Objects.requireNonNull(version, "version");
-            effect = Objects.requireNonNull(effect, "effect");
             entity = Objects.requireNonNull(entity, "entity");
         }
     }

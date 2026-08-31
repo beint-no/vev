@@ -6,6 +6,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import no.beint.vev.TenantKey;
+import no.beint.vev.VevIndex;
 
 import java.math.BigDecimal;
 import java.util.UUID;
@@ -16,6 +17,7 @@ public record Account(
         @Id @Column(name = "id", nullable = false) UUID id,
         @TenantKey @Column(name = "tenant_id", nullable = false) Integer tenantId,
         @Version @Column(name = "version", nullable = false) Long version,
-        @Column(name = "email", length = 255) String email,
+        @VevIndex(name = "account_email_vev_idx")
+        @Column(name = "email", nullable = true, length = 255) String email,
         @Column(name = "balance", nullable = false, precision = 19, scale = 4) BigDecimal balance) {
 }

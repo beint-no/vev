@@ -89,6 +89,22 @@ final class BenchmarkSetupSafetyTest {
     }
 
     @Test
+    void runtimeTargetMustExactlyMatchPreparedFixture() {
+        String prepared = "jdbc:postgresql://127.0.0.1:5432/vev_bench";
+        assertDoesNotThrow(() -> BenchmarkDatabase.requirePreparedFixtureTarget(prepared, prepared));
+        assertThrows(
+                IllegalStateException.class,
+                () -> BenchmarkDatabase.requirePreparedFixtureTarget(
+                        prepared,
+                        "jdbc:postgresql://127.0.0.1:5433/vev_bench"));
+        assertThrows(
+                IllegalStateException.class,
+                () -> BenchmarkDatabase.requirePreparedFixtureTarget(
+                        prepared,
+                        "jdbc:postgresql://localhost:5432/vev_bench"));
+    }
+
+    @Test
     void exactFixtureMarkerIsRequired() {
         assertDoesNotThrow(() -> BenchmarkDatabase.requireExactOwnershipMarker(
                 "database vev_bench",
@@ -109,24 +125,18 @@ final class BenchmarkSetupSafetyTest {
     }
 
     @Test
-    void trustedSearchPathRejectsRetainedTemporaryStateAndAmbiguousResults() {
-        assertDoesNotThrow(() -> BenchmarkDatabase.requireTrustedSearchPathResult(
-                "pg_catalog", "pg_catalog", 0, false, false));
-        assertThrows(
-                IllegalStateException.class,
-                () -> BenchmarkDatabase.requireTrustedSearchPathResult(
-                        "pg_catalog", "pg_catalog", 16_384, false, false));
-        assertThrows(
-                IllegalStateException.class,
-                () -> BenchmarkDatabase.requireTrustedSearchPathResult(
-                        "pg_catalog", "pg_catalog", 0, true, false));
-        assertThrows(
-                IllegalStateException.class,
-                () -> BenchmarkDatabase.requireTrustedSearchPathResult(
-                        "public, pg_catalog", "pg_catalog", 0, false, false));
-        assertThrows(
-                IllegalStateException.class,
-                () -> BenchmarkDatabase.requireTrustedSearchPathResult(
-                        "pg_catalog", "pg_catalog", 0, false, true));
+    void immutablePgjdbcSessionBaselineIsExact() {
+        assertDoesNotThrow(() -> BenchmarkDatabase.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "UTF8", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDatabase.requireTrustedSessionBaselineValues(
+                "public, pg_catalog", "UTF8", "UTF8", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDatabase.requireTrustedSessionBaselineValues(
+                "pg_catalog", "LATIN1", "UTF8", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDatabase.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "LATIN1", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDatabase.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "UTF8", "off", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDatabase.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "UTF8", "on", "off"));
     }
 }

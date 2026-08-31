@@ -89,6 +89,22 @@ final class BenchmarkSetupSafetyTest {
     }
 
     @Test
+    void runtimeTargetMustExactlyMatchPreparedFixture() {
+        var prepared = "jdbc:postgresql://127.0.0.1:5432/vev_bench";
+        assertDoesNotThrow(() -> BenchmarkDatabaseConfiguration.requirePreparedFixtureTarget(prepared, prepared));
+        assertThrows(
+                IllegalStateException.class,
+                () -> BenchmarkDatabaseConfiguration.requirePreparedFixtureTarget(
+                        prepared,
+                        "jdbc:postgresql://127.0.0.1:5433/vev_bench"));
+        assertThrows(
+                IllegalStateException.class,
+                () -> BenchmarkDatabaseConfiguration.requirePreparedFixtureTarget(
+                        prepared,
+                        "jdbc:postgresql://localhost:5432/vev_bench"));
+    }
+
+    @Test
     void exactFixtureMarkerIsRequired() {
         assertDoesNotThrow(() -> BenchmarkDataset.requireExactOwnershipMarker(
                 "database vev_bench",
@@ -128,5 +144,21 @@ final class BenchmarkSetupSafetyTest {
                 IllegalStateException.class,
                 () -> BenchmarkDataset.requireTrustedSearchPathResult(
                         "pg_catalog", "pg_catalog", 0, false, true));
+    }
+
+    @Test
+    void immutablePgjdbcSessionBaselineIsExact() {
+        assertDoesNotThrow(() -> BenchmarkDataset.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "UTF8", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDataset.requireTrustedSessionBaselineValues(
+                "public, pg_catalog", "UTF8", "UTF8", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDataset.requireTrustedSessionBaselineValues(
+                "pg_catalog", "LATIN1", "UTF8", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDataset.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "LATIN1", "on", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDataset.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "UTF8", "off", "on"));
+        assertThrows(IllegalStateException.class, () -> BenchmarkDataset.requireTrustedSessionBaselineValues(
+                "pg_catalog", "UTF8", "UTF8", "on", "off"));
     }
 }

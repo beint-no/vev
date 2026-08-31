@@ -77,14 +77,11 @@ final class CoreValuesTest {
     }
 
     @Test
-    void entityAndVersionKeysValidateRuntimeTypeErasureBoundaries() {
+    void entityKeysValidateRuntimeTypeErasureBoundaries() {
         EntityKey<TestModel, TestEntity, Long> key = ENTITY.key(7L);
-        VersionedKey<TestModel, TestEntity, Long, Integer> versionedKey = ENTITY.versionedKey(7L, 4);
 
         assertEquals(7L, key.value());
-        assertEquals(4, versionedKey.expectedVersion());
         assertThrows(IllegalArgumentException.class, () -> rawKey(ENTITY, "wrong"));
-        assertThrows(IllegalArgumentException.class, () -> rawVersionedKey(key, "wrong"));
     }
 
     @Test
@@ -148,11 +145,6 @@ final class CoreValuesTest {
     @SuppressWarnings({"rawtypes", "unchecked"})
     private static EntityKey<?, ?, ?> rawKey(EntityType<?, ?, ?> entityType, Object value) {
         return new EntityKey(entityType, value);
-    }
-
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private static VersionedKey<?, ?, ?, ?> rawVersionedKey(EntityKey<?, ?, ?> key, Object version) {
-        return new VersionedKey(key, version);
     }
 
     @SuppressWarnings({"rawtypes", "unchecked"})

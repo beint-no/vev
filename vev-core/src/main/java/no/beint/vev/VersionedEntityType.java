@@ -15,15 +15,4 @@ public interface VersionedEntityType<M, E, K, V> extends EntityType<M, E, K> {
      * @return exact non-primitive version-token class
      */
     Class<V> versionType();
-
-    /**
-     * Creates a version-qualified mutation target.
-     *
-     * @param key primary-key value
-     * @param expectedVersion version that must still be stored
-     * @return validated version-qualified key
-     */
-    default VersionedKey<M, E, K, V> versionedKey(K key, V expectedVersion) {
-        return new VersionedKey<>(key(key), expectedVersion);
-    }
 }

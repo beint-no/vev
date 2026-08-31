@@ -2,17 +2,14 @@ package no.beint.vev.pg;
 
 import no.beint.vev.Batch;
 import no.beint.vev.BoundedQuery;
-import no.beint.vev.DeleteResult;
 import no.beint.vev.EntityKey;
 import no.beint.vev.EntityLookup;
 import no.beint.vev.EntityType;
-import no.beint.vev.MutationEffect;
 import no.beint.vev.MutationResult;
 import no.beint.vev.ReadEntities;
 import no.beint.vev.Rows;
 import no.beint.vev.TenantScope;
 import no.beint.vev.VersionedEntityType;
-import no.beint.vev.VersionedKey;
 import no.beint.vev.WriteEntities;
 import no.beint.vev.spi.TransactionGuard;
 
@@ -22,9 +19,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 final class PgEntities<M, T> implements WriteEntities<M> {
     private final Connection connection;
@@ -124,12 +123,22 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     @Override
     public <R> Rows<R> many(BoundedQuery<M, R> query) {
         guard.checkUsable();
-        if (!(Objects.requireNonNull(query, "query") instanceof PgIdScan<?, ?, ?> rawScan)) {
-            throw new IllegalArgumentException("Only structurally generated PostgreSQL queries are executable");
+        Objects.requireNonNull(query, "query");
+        if (query instanceof PgIdScan<?, ?, ?> rawScan) {
+            @SuppressWarnings("unchecked")
+            PgIdScan<M, R, Object> scan = (PgIdScan<M, R, Object>) rawScan;
+            return executeIdScan(scan);
         }
-        @SuppressWarnings("unchecked")
-        PgIdScan<M, R, Object> scan = (PgIdScan<M, R, Object>) rawScan;
-        PgPlan<M, R, Object, T> entityPlan = model.frozenPlan(scan.plan());
+        if (query instanceof PgIndexScan<?, ?, ?, ?> rawScan) {
+            @SuppressWarnings("unchecked")
+            PgIndexScan<M, R, Object, Object> scan = (PgIndexScan<M, R, Object, Object>) rawScan;
+            return executeIndexScan(scan);
+        }
+        throw new IllegalArgumentException("Only structurally generated PostgreSQL queries are executable");
+    }
+
+    private <R, K> Rows<R> executeIdScan(PgIdScan<M, R, K> scan) {
+        PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.plan());
         int limit = scan.limit().value();
         List<R> values = new ArrayList<>(limit);
         String sql = scan.hasAfterExclusive()
@@ -148,6 +157,56 @@ final class PgEntities<M, T> implements WriteEntities<M> {
                 while (values.size() < limit && resultSet.next()) {
                     R value = readEntity(entityPlan, resultSet, 1);
                     verifyReturnedEntity(entityPlan, value);
+                    values.add(value);
+                }
+                boolean hasMore = resultSet.next();
+                return new Rows<>(values, scan.limit(), hasMore);
+            }
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL execution failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    private <R, K, V> Rows<R> executeIndexScan(PgIndexScan<M, R, K, V> scan) {
+        PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.index().entityPlan());
+        PgIndexSql statements = entityPlan.indexSql(scan.index());
+        int limit = scan.limit().value();
+        List<R> values = new ArrayList<>(limit);
+        boolean equality = scan.predicate() == PgIndexScan.Predicate.EQUAL;
+        String sql;
+        if (equality) {
+            sql = scan.hasAfterExclusive() ? statements.equalAfter() : statements.equal();
+        } else {
+            sql = scan.hasAfterExclusive() ? statements.isNullAfter() : statements.isNull();
+            if (sql == null) {
+                throw new IllegalArgumentException("IS NULL requires a generated nullable-index token");
+            }
+        }
+        PgColumn indexedColumn = entityPlan.columns().get(scan.index().columnIndex());
+        if (equality) {
+            indexedColumn.validateValue(scan.value());
+        }
+        try (PreparedStatement statement = prepare(sql)) {
+            int parameter = 1;
+            bindTenant(entityPlan, statement, parameter++);
+            if (equality) {
+                bindUnknown(indexedColumn.codec(), statement, parameter++, scan.value());
+            }
+            if (scan.hasAfterExclusive()) {
+                bindUnknown(entityPlan.keyCodec(), statement, parameter++, scan.afterExclusive());
+            }
+            statement.setInt(parameter, Math.addExact(limit, 1));
+            statement.setFetchSize(Math.addExact(limit, 1));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (values.size() < limit && resultSet.next()) {
+                    R value = readEntity(entityPlan, resultSet, 1);
+                    verifyReturnedEntity(entityPlan, value);
+                    verifyIndexPredicate(entityPlan, value, scan, indexedColumn);
                     values.add(value);
                 }
                 boolean hasMore = resultSet.next();
@@ -185,17 +244,32 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgPlan<M, E, K, T> plan = plan(type);
+        Set<K> keys = new HashSet<>(Math.max(16, entities.size() * 2));
         for (E entity : entities) {
             validateInsert(plan, entity);
+            K key = Objects.requireNonNull(plan.keyOf(entity), "entity key");
+            if (!keys.add(key)) {
+                throw new IllegalArgumentException("Insert batch contains duplicate entity keys");
+            }
         }
         if (entities.isEmpty()) {
             return Batch.empty();
         }
         List<E> inserted = new ArrayList<>(entities.size());
-        try (PreparedStatement statement = prepare(plan.sql().insert())) {
-            for (E entity : entities) {
-                statement.clearParameters();
-                inserted.add(executeInsert(plan, statement, entity));
+        try (JdbcArrays arrays = new JdbcArrays(connection);
+             PreparedStatement statement = prepare(plan.sql().insertMultiple())) {
+            int parameter = bindEntityArrays(plan, entities, arrays, statement);
+            statement.setInt(parameter, entities.size());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                for (E expected : entities) {
+                    if (!resultSet.next()) {
+                        throw invariant("Set-based insert returned fewer rows than requested for " + plan.logicalName());
+                    }
+                    E actual = readEntity(plan, resultSet, 1);
+                    verifyInsertedSnapshot(plan, expected, actual);
+                    inserted.add(actual);
+                }
+                requireNoMore(resultSet, "Set-based insert returned extra rows for " + plan.logicalName());
             }
             return Batch.copyOf(inserted);
         } catch (SQLException failure) {
@@ -213,79 +287,67 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             VersionedEntityType<M, E, K, V> type, E entity) {
         requireWrite();
         PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
-        return mutate(plan, entity, false);
+        return mutate(plan, entity);
     }
 
     @Override
-    public <E, K, V> Batch<MutationResult<M, E, K, V>> updateMultiple(
+    public <E, K, V> Batch<MutationResult.Applied<M, E, K, V>> updateMultiple(
             VersionedEntityType<M, E, K, V> type, Batch<E> entities) {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
+        Set<K> keys = new HashSet<>(Math.max(16, entities.size() * 2));
         for (E entity : entities) {
             validateVersionedEntity(plan, entity);
+            K key = Objects.requireNonNull(plan.keyOf(entity), "entity key");
+            if (!keys.add(key)) {
+                throw new IllegalArgumentException("Update batch contains duplicate entity keys");
+            }
         }
-        List<MutationResult<M, E, K, V>> results = new ArrayList<>(entities.size());
-        for (E entity : entities) {
-            results.add(mutate(plan, entity, false));
+        if (entities.isEmpty()) {
+            return Batch.empty();
         }
-        return Batch.copyOf(results);
-    }
-
-    @Override
-    public <E, K, V> MutationResult<M, E, K, V> upsert(
-            VersionedEntityType<M, E, K, V> type, E entity) {
-        requireWrite();
-        PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
-        return mutate(plan, entity, true);
-    }
-
-    @Override
-    public <E, K, V> Batch<MutationResult<M, E, K, V>> upsertMultiple(
-            VersionedEntityType<M, E, K, V> type, Batch<E> entities) {
-        requireWrite();
-        Objects.requireNonNull(entities, "entities");
-        PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
-        for (E entity : entities) {
-            validateVersionedEntity(plan, entity);
+        Batch<MutationResult.Applied<M, E, K, V>> applied = null;
+        try (JdbcArrays arrays = new JdbcArrays(connection);
+             PreparedStatement statement = prepare(plan.sql().updateMultiple())) {
+            int parameter = bindEntityArrays(plan, entities, arrays, statement);
+            statement.setInt(parameter, entities.size());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                List<MutationResult.Applied<M, E, K, V>> results = new ArrayList<>(entities.size());
+                for (int entityIndex = 0; entityIndex < entities.size(); entityIndex++) {
+                    if (!resultSet.next()) {
+                        applied = null;
+                        break;
+                    }
+                    long ordinality = resultSet.getLong(1);
+                    if (resultSet.wasNull() || ordinality != entityIndex + 1L) {
+                        applied = null;
+                        break;
+                    }
+                    E expected = entities.get(entityIndex);
+                    E actual = readEntity(plan, resultSet, 2);
+                    results.add(appliedUpdate(plan, expected, actual));
+                }
+                if (results.size() == entities.size()) {
+                    requireNoMore(resultSet, "Set-based update returned extra rows for " + plan.logicalName());
+                    applied = Batch.copyOf(results);
+                }
+            }
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL execution failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
         }
-        List<MutationResult<M, E, K, V>> results = new ArrayList<>(entities.size());
-        for (E entity : entities) {
-            results.add(mutate(plan, entity, true));
+        if (applied == null) {
+            IllegalStateException rejection = new IllegalStateException(
+                    "Update batch was rejected atomically because one entity was stale or missing");
+            poison(rejection);
+            throw rejection;
         }
-        return Batch.copyOf(results);
-    }
-
-    @Override
-    public <E, K, V> DeleteResult<M, E, K, V> delete(VersionedKey<M, E, K, V> key) {
-        requireWrite();
-        Objects.requireNonNull(key, "key");
-        PgVersionPlan<M, E, K, T, V> plan = versionedPlan(key.key().entityType());
-        return executeDelete(plan, key);
-    }
-
-    @Override
-    public <E, K, V> Batch<DeleteResult<M, E, K, V>> deleteMultiple(
-            Batch<VersionedKey<M, E, K, V>> keys) {
-        requireWrite();
-        Objects.requireNonNull(keys, "keys");
-        for (VersionedKey<M, E, K, V> key : keys) {
-            validateDeleteKey(key);
-        }
-        List<DeleteResult<M, E, K, V>> results = new ArrayList<>(keys.size());
-        for (VersionedKey<M, E, K, V> key : keys) {
-            results.add(delete(key));
-        }
-        return Batch.copyOf(results);
-    }
-
-    private <E, K, V> void validateDeleteKey(VersionedKey<M, E, K, V> key) {
-        Objects.requireNonNull(key, "key");
-        PgVersionPlan<M, E, K, T, V> plan = versionedPlan(key.key().entityType());
-        if (key.key().entityType() != plan.source()) {
-            throw new IllegalArgumentException("Versioned key is not from this generated entity plan");
-        }
-        requireNonNegativeVersion(plan, key.expectedVersion());
+        return applied;
     }
 
     private <E, K> PgPlan<M, E, K, T> plan(EntityType<M, E, K> type) {
@@ -340,81 +402,36 @@ final class PgEntities<M, T> implements WriteEntities<M> {
                 throw invariant("Insert returned no row for " + plan.logicalName());
             }
             E inserted = readEntity(plan, resultSet, 1);
-            verifyReturnedEntity(plan, inserted);
+            verifyInsertedSnapshot(plan, entity, inserted);
             requireNoMore(resultSet, "Insert returned multiple rows for " + plan.logicalName());
             return inserted;
         }
     }
 
     private <E, K, V> MutationResult<M, E, K, V> mutate(
-            PgVersionPlan<M, E, K, T, V> plan, E entity, boolean upsert) {
+            PgVersionPlan<M, E, K, T, V> plan, E entity) {
         validateVersionedEntity(plan, entity);
         K key = Objects.requireNonNull(plan.keyOf(entity), "entity key");
         V expectedVersion = Objects.requireNonNull(plan.versionOf(entity), "entity version");
-        PgSql statements = plan.sql();
-        String sql = upsert ? statements.upsert() : statements.update();
-        try (PreparedStatement statement = prepare(sql)) {
-            if (upsert) {
-                bindUpsert(plan, statement, entity);
-            } else {
-                bindUpdate(plan, statement, entity);
-            }
+        try (PreparedStatement statement = prepare(plan.sql().update())) {
+            bindUpdate(plan, statement, entity);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (resultSet.next()) {
                     int outcome = resultSet.getInt(1);
-                    if (outcome < 0 || outcome > (upsert ? 2 : 1)) {
+                    if (outcome < 0 || outcome > 1) {
                         throw invariant("Mutation returned an unknown outcome for " + plan.logicalName());
                     }
-                    if ((!upsert && outcome == 1) || (upsert && outcome == 2)) {
+                    if (outcome == 1) {
                         requireNoMore(resultSet, "Mutation classification returned multiple rows for " + plan.logicalName());
                         return new MutationResult.Conflict<>(plan.key(key), expectedVersion);
                     }
-                    MutationEffect effect = upsert && outcome == 0
-                            ? MutationEffect.INSERTED
-                            : MutationEffect.UPDATED;
                     E mutated = readEntity(plan, resultSet, 2);
-                    verifyLoaded(plan, mutated, key);
-                    V newVersion = readVersion(plan, mutated);
-                    verifyVersionTransition(plan, expectedVersion, newVersion, effect);
+                    MutationResult.Applied<M, E, K, V> applied = appliedUpdate(plan, entity, mutated);
                     requireNoMore(resultSet, "Mutation returned multiple rows for " + plan.logicalName());
-                    return new MutationResult.Applied<>(plan.key(key), expectedVersion, newVersion, effect, mutated);
+                    return applied;
                 }
             }
             return new MutationResult.Missing<>(plan.key(key), expectedVersion);
-        } catch (SQLException failure) {
-            throw PgVev.databaseFailure(guard, failure);
-        } catch (RuntimeException failure) {
-            throw invariant("Vev PostgreSQL execution failed an internal invariant", failure);
-        } catch (Error failure) {
-            poison(failure);
-            throw failure;
-        }
-    }
-
-    private <E, K, V> DeleteResult<M, E, K, V> executeDelete(
-            PgVersionPlan<M, E, K, T, V> plan, VersionedKey<M, E, K, V> key) {
-        if (key.key().entityType() != plan.source()) {
-            throw new IllegalArgumentException("Versioned key is not from this generated entity plan");
-        }
-        requireNonNegativeVersion(plan, key.expectedVersion());
-        try (PreparedStatement statement = prepare(plan.sql().delete())) {
-            bindUnknown(plan.keyCodec(), statement, 1, key.key().value());
-            bindTenant(plan, statement, 2);
-            bindUnknown(plan.versionCodec(), statement, 3, key.expectedVersion());
-            bindUnknown(plan.keyCodec(), statement, 4, key.key().value());
-            bindTenant(plan, statement, 5);
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (resultSet.next()) {
-                    if (resultSet.getInt(1) == 1) {
-                        requireNoMore(resultSet, "Delete classification returned multiple rows for " + plan.logicalName());
-                        return new DeleteResult.Conflict<>(key.key(), key.expectedVersion());
-                    }
-                    V deletedVersion = readVersion(plan, resultSet, 2);
-                    requireNoMore(resultSet, "Delete returned multiple rows for " + plan.logicalName());
-                    return new DeleteResult.Deleted<>(key.key(), deletedVersion);
-                }
-            }
-            return new DeleteResult.Missing<>(key.key());
         } catch (SQLException failure) {
             throw PgVev.databaseFailure(guard, failure);
         } catch (RuntimeException failure) {
@@ -496,12 +513,11 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private <E, K, V> void verifyVersionTransition(
             PgVersionPlan<M, E, K, T, V> plan,
             V expectedVersion,
-            V returnedVersion,
-            MutationEffect effect) {
+            V returnedVersion) {
         try {
             long expected = ((Number) expectedVersion).longValue();
             long returned = ((Number) returnedVersion).longValue();
-            long required = effect == MutationEffect.INSERTED ? 0L : Math.addExact(expected, 1L);
+            long required = Math.addExact(expected, 1L);
             if (returned != required) {
                 throw new IllegalStateException("Unexpected version transition");
             }
@@ -526,6 +542,71 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             validateDatabaseEntity(plan, entity);
         } catch (RuntimeException failure) {
             throw invariant("Database returned an invalid " + plan.logicalName() + " row", failure);
+        }
+    }
+
+    private <E, K> void verifyInsertedSnapshot(PgPlan<M, E, K, T> plan, E expected, E actual) {
+        try {
+            validateDatabaseEntity(plan, actual);
+            List<PgColumn> columns = plan.columns();
+            for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+                PgColumn column = columns.get(columnIndex);
+                Object actualValue = entityColumnValue(plan, actual, column, columnIndex);
+                Object expectedValue = entityColumnValue(plan, expected, column, columnIndex);
+                if (!Objects.equals(actualValue, expectedValue)) {
+                    throw new IllegalStateException("Inserted snapshot differs from its validated input");
+                }
+            }
+        } catch (RuntimeException failure) {
+            throw invariant("Database returned an unexpected inserted " + plan.logicalName() + " snapshot", failure);
+        }
+    }
+
+    private <E, K, V> MutationResult.Applied<M, E, K, V> appliedUpdate(
+            PgVersionPlan<M, E, K, T, V> plan,
+            E expected,
+            E actual) {
+        try {
+            validateDatabaseEntity(plan, actual);
+            K expectedKey = Objects.requireNonNull(plan.keyOf(expected), "expected entity key");
+            V expectedVersion = Objects.requireNonNull(plan.versionOf(expected), "expected entity version");
+            V actualVersion = Objects.requireNonNull(plan.versionOf(actual), "returned entity version");
+            List<PgColumn> columns = plan.columns();
+            for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+                PgColumn column = columns.get(columnIndex);
+                if (column.role() == PgColumn.Role.VERSION) {
+                    continue;
+                }
+                Object expectedValue = entityColumnValue(plan, expected, column, columnIndex);
+                Object actualValue = entityColumnValue(plan, actual, column, columnIndex);
+                if (!Objects.equals(actualValue, expectedValue)) {
+                    throw new IllegalStateException("Updated snapshot differs from its validated input");
+                }
+            }
+            verifyVersionTransition(plan, expectedVersion, actualVersion);
+            return new MutationResult.Applied<>(plan.key(expectedKey), expectedVersion, actualVersion, actual);
+        } catch (RuntimeException failure) {
+            throw invariant("Database returned an unexpected updated " + plan.logicalName() + " snapshot", failure);
+        }
+    }
+
+    private <E, K, V> void verifyIndexPredicate(
+            PgPlan<M, E, K, T> plan,
+            E entity,
+            PgIndexScan<M, E, K, V> scan,
+            PgColumn indexedColumn) {
+        try {
+            Object actual = plan.columnValue(entity, scan.index().columnIndex());
+            indexedColumn.validateValue(actual);
+            if (scan.predicate() == PgIndexScan.Predicate.IS_NULL) {
+                if (actual != null) {
+                    throw new IllegalStateException("IS NULL index query returned a non-null value");
+                }
+            } else if (actual == null || !actual.equals(scan.value())) {
+                throw new IllegalStateException("Equality index query returned a different value");
+            }
+        } catch (RuntimeException failure) {
+            throw invariant("Database returned a row outside its generated index predicate", failure);
         }
     }
 
@@ -568,23 +649,6 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         return typedPlan.versionOf(entity);
     }
 
-    private <E, K, V> V readVersion(PgVersionPlan<M, E, K, T, V> plan, E entity) {
-        try {
-            return Objects.requireNonNull(plan.versionOf(entity), "returned version");
-        } catch (RuntimeException failure) {
-            throw invariant("Database returned an invalid version for " + plan.logicalName(), failure);
-        }
-    }
-
-    private <E, K, V> V readVersion(
-            PgVersionPlan<M, E, K, T, V> plan, ResultSet resultSet, int column) throws SQLException {
-        try {
-            return Objects.requireNonNull(plan.versionCodec().read(resultSet, column), "returned version");
-        } catch (RuntimeException failure) {
-            throw invariant("Database returned an invalid version for " + plan.logicalName(), failure);
-        }
-    }
-
     private void bindTenant(PgPlan<M, ?, ?, T> plan, PreparedStatement statement, int index) throws SQLException {
         bindUnknown(plan.tenantCodec(), statement, index, tenant.tenantId());
     }
@@ -597,6 +661,25 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             PgColumn column = columns.get(columnIndex);
             bindEntityColumn(plan, statement, parameter++, entity, column, columnIndex);
         }
+    }
+
+    private <E, K> int bindEntityArrays(
+            PgPlan<M, E, K, T> plan,
+            Batch<E> entities,
+            JdbcArrays arrays,
+            PreparedStatement statement) throws SQLException {
+        List<PgColumn> columns = plan.columns();
+        for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+            PgColumn column = columns.get(columnIndex);
+            Object[] values = new Object[entities.size()];
+            for (int entityIndex = 0; entityIndex < entities.size(); entityIndex++) {
+                Object value = entityColumnValue(plan, entities.get(entityIndex), column, columnIndex);
+                column.validateValue(value);
+                values[entityIndex] = column.codec().arrayElement(value);
+            }
+            arrays.bind(statement, columnIndex + 1, column.codec(), values);
+        }
+        return columns.size() + 1;
     }
 
     private <E, K, V> void bindUpdate(
@@ -620,16 +703,6 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         bindTenant(plan, statement, parameter);
     }
 
-    private <E, K, V> void bindUpsert(
-            PgVersionPlan<M, E, K, T, V> plan,
-            PreparedStatement statement,
-            E entity) throws SQLException {
-        List<PgColumn> columns = plan.columns();
-        for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
-            bindEntityColumn(plan, statement, columnIndex + 1, entity, columns.get(columnIndex), columnIndex);
-        }
-    }
-
     private <E, K> void bindEntityColumn(
             PgPlan<M, E, K, T> plan,
             PreparedStatement statement,
@@ -645,6 +718,19 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         };
         column.validateValue(value);
         bindUnknown(column.codec(), statement, parameter, value);
+    }
+
+    private <E, K> Object entityColumnValue(
+            PgPlan<M, E, K, T> plan,
+            E entity,
+            PgColumn column,
+            int columnIndex) {
+        return switch (column.role()) {
+            case ID -> plan.keyOf(entity);
+            case TENANT -> plan.tenantKeyOf(entity);
+            case VERSION -> versionOf((PgVersionPlan<M, ?, ?, T, ?>) plan, entity);
+            case VALUE -> plan.columnValue(entity, columnIndex);
+        };
     }
 
     @SuppressWarnings("unchecked")
@@ -678,6 +764,50 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         } catch (IllegalStateException guardFailure) {
             if (guardFailure != failure) {
                 failure.addSuppressed(new IllegalStateException("Vev transaction capability was already poisoned"));
+            }
+        }
+    }
+
+    private static final class JdbcArrays implements AutoCloseable {
+        private final Connection connection;
+        private final List<Array> arrays = new ArrayList<>();
+
+        private JdbcArrays(Connection connection) {
+            this.connection = Objects.requireNonNull(connection, "connection");
+        }
+
+        private void bind(
+                PreparedStatement statement,
+                int parameter,
+                PgCodec<?> codec,
+                Object[] values) throws SQLException {
+            Array array = connection.createArrayOf(codec.jdbcType(), values);
+            arrays.add(array);
+            statement.setArray(parameter, array);
+        }
+
+        @Override
+        public void close() throws SQLException {
+            Throwable failure = null;
+            for (int index = arrays.size() - 1; index >= 0; index--) {
+                try {
+                    arrays.get(index).free();
+                } catch (SQLException | RuntimeException | Error closeFailure) {
+                    if (failure == null) {
+                        failure = closeFailure;
+                    } else {
+                        failure.addSuppressed(closeFailure);
+                    }
+                }
+            }
+            if (failure instanceof SQLException sqlFailure) {
+                throw sqlFailure;
+            }
+            if (failure instanceof RuntimeException runtimeFailure) {
+                throw runtimeFailure;
+            }
+            if (failure instanceof Error error) {
+                throw error;
             }
         }
     }

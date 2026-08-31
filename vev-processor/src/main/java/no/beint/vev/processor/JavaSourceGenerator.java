@@ -41,6 +41,8 @@ final class JavaSourceGenerator {
                     .append(property.numericScale()).append(")")
                     .append(index + 1 == entity.properties().size() ? ");\n\n" : ",\n");
         }
+        appendIndexTokens(source, entity, modelMarker);
+        appendIndexList(source, entity, modelMarker);
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -52,6 +54,9 @@ final class JavaSourceGenerator {
         method(source, "public String tableName()", "return \"" + escape(entity.tableName()) + "\";");
         method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");
         method(source, "public java.util.List<no.beint.vev.pg.PgColumn> columns()", "return COLUMNS;");
+        method(source, "public java.util.List<no.beint.vev.pg.PgIndex<" + modelMarker + ", "
+                        + entity.qualifiedName() + ", " + entity.id().boxedType() + ", ?>> indexes()",
+                "return INDEXES;");
         source.append("    @Override\n")
                 .append("    public Object columnValue(").append(entity.qualifiedName())
                 .append(" entity, int columnIndex) {\n")
@@ -89,6 +94,45 @@ final class JavaSourceGenerator {
         }
         source.append("}\n");
         return source.toString();
+    }
+
+    private void appendIndexTokens(StringBuilder source, EntityMapping entity, String modelMarker) {
+        for (int columnIndex = 0; columnIndex < entity.properties().size(); columnIndex++) {
+            PropertyMapping property = entity.properties().get(columnIndex);
+            if (!property.indexed()) {
+                continue;
+            }
+            String indexType = property.nullable() ? "PgNullableIndex" : "PgRequiredIndex";
+            source.append("    /** Compile-time query token for PostgreSQL index ")
+                    .append(escape(property.indexName())).append(". */\n")
+                    .append("    public static final no.beint.vev.pg.").append(indexType).append('<')
+                    .append(modelMarker).append(", ")
+                    .append(entity.qualifiedName()).append(", ")
+                    .append(entity.id().boxedType()).append(", ")
+                    .append(property.boxedType()).append("> ")
+                    .append(property.indexFieldName()).append(" = new no.beint.vev.pg.")
+                    .append(indexType).append("<>(INSTANCE, \"")
+                    .append(escape(property.indexName())).append("\", ")
+                    .append(columnIndex).append(", ")
+                    .append(property.boxedType()).append(".class);\n\n");
+        }
+    }
+
+    private void appendIndexList(StringBuilder source, EntityMapping entity, String modelMarker) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgIndex<")
+                .append(modelMarker).append(", ")
+                .append(entity.qualifiedName()).append(", ")
+                .append(entity.id().boxedType()).append(", ?>> INDEXES = java.util.List.of(");
+        List<PropertyMapping> indexes = entity.properties().stream().filter(PropertyMapping::indexed).toList();
+        if (indexes.isEmpty()) {
+            source.append(");\n\n");
+            return;
+        }
+        source.append('\n');
+        for (int index = 0; index < indexes.size(); index++) {
+            source.append("            ").append(indexes.get(index).indexFieldName())
+                    .append(index + 1 == indexes.size() ? ");\n\n" : ",\n");
+        }
     }
 
     String modelRegistry(CompiledModel model) {

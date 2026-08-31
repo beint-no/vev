@@ -23,6 +23,8 @@ final class IntegrationDatabase {
     private static final String OWNER_ROLE = "vev_it_owner";
     private static final String FIXTURE_MARKER = "vev-owned-fixture:vev_it:v1";
     private static final String POSTGRESQL_JDBC_PREFIX = "jdbc:postgresql://";
+    private static final String EXPECTED_ACCOUNT_EMAIL_INDEX =
+            "CREATE INDEX account_email_vev_idx ON vev_it.account USING btree (tenant_id, email, id)";
 
     private final String adminUrl;
     private final String adminUser;
@@ -133,13 +135,113 @@ final class IntegrationDatabase {
         }
     }
 
-    void setSecondaryIndex(boolean enabled) throws SQLException {
+    void setAccountEmailIndexPresent(boolean present) throws SQLException {
+        try (Connection connection = adminConnection();
+            Statement statement = connection.createStatement()) {
+            if (present) {
+                statement.execute("CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email, id)");
+            } else {
+                statement.execute("DROP INDEX IF EXISTS vev_it.account_email_vev_idx");
+            }
+        }
+    }
+
+    void setExtraAccountIndex(boolean present) throws SQLException {
+        try (Connection connection = adminConnection();
+            Statement statement = connection.createStatement()) {
+            if (present) {
+                statement.execute("CREATE INDEX account_balance_extra_idx ON vev_it.account "
+                        + "USING btree (tenant_id, balance, id)");
+            } else {
+                statement.execute("DROP INDEX IF EXISTS vev_it.account_balance_extra_idx");
+            }
+        }
+    }
+
+    void setAccountEmailIndexWrongShape(boolean wrongShape) throws SQLException {
+        try (Connection connection = adminConnection();
+            Statement statement = connection.createStatement()) {
+            statement.execute("DROP INDEX IF EXISTS vev_it.account_email_vev_idx");
+            if (wrongShape) {
+                statement.execute("CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, id, email)");
+            } else {
+                statement.execute("CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email, id)");
+            }
+        }
+    }
+
+    void setAccountEmailIndexUnique(boolean unique) throws SQLException {
+        replaceAccountEmailIndex(unique
+                ? "CREATE UNIQUE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email, id)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexPartial(boolean partial) throws SQLException {
+        replaceAccountEmailIndex(partial
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email, id) WHERE email IS NOT NULL"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexExpression(boolean expression) throws SQLException {
+        replaceAccountEmailIndex(expression
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, pg_catalog.lower(email), id)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexIncludingBalance(boolean includingBalance) throws SQLException {
+        replaceAccountEmailIndex(includingBalance
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email, id) INCLUDE (balance)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexDescending(boolean descending) throws SQLException {
+        replaceAccountEmailIndex(descending
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email DESC, id)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexNullsFirst(boolean nullsFirst) throws SQLException {
+        replaceAccountEmailIndex(nullsFirst
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email NULLS FIRST, id)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexNondefaultCollation(boolean nondefaultCollation) throws SQLException {
+        replaceAccountEmailIndex(nondefaultCollation
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email COLLATE pg_catalog.\"C\", id)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    void setAccountEmailIndexReloptions(boolean reloptions) throws SQLException {
+        replaceAccountEmailIndex(reloptions
+                ? "CREATE INDEX account_email_vev_idx ON vev_it.account "
+                        + "USING btree (tenant_id, email, id) WITH (fillfactor = 90)"
+                : EXPECTED_ACCOUNT_EMAIL_INDEX);
+    }
+
+    private void replaceAccountEmailIndex(String createSql) throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            if (enabled) {
-                statement.execute("CREATE INDEX account_email_secondary ON vev_it.account(email)");
-            } else {
-                statement.execute("DROP INDEX IF EXISTS vev_it.account_email_secondary");
+            statement.execute("DROP INDEX IF EXISTS vev_it.account_email_vev_idx");
+            try {
+                statement.execute(createSql);
+            } catch (SQLException failure) {
+                try {
+                    statement.execute(EXPECTED_ACCOUNT_EMAIL_INDEX);
+                } catch (SQLException restoreFailure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+                throw failure;
             }
         }
     }
@@ -216,11 +318,52 @@ final class IntegrationDatabase {
     }
 
     DataSource applicationDataSource() {
-        return applicationDataSource(null);
+        return applicationDataSource("pg_catalog");
     }
 
     DataSource hostileSearchPathDataSource() {
         return applicationDataSource("vev_hostile,pg_catalog");
+    }
+
+    Connection openAdminTransaction() throws SQLException {
+        Connection connection = adminConnection();
+        try {
+            connection.setAutoCommit(false);
+            return connection;
+        } catch (SQLException | RuntimeException | Error failure) {
+            try {
+                connection.close();
+            } catch (SQLException | RuntimeException | Error closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
+        }
+    }
+
+    void awaitBlockedBatchUpdate(int blockerProcessId) throws SQLException, InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline) {
+            try (Connection connection = adminConnection();
+                 PreparedStatement statement = connection.prepareStatement("""
+                         SELECT EXISTS (
+                             SELECT 1
+                              FROM pg_catalog.pg_stat_activity
+                             WHERE usename = ?
+                                AND pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid)) > 0
+                                AND ? = ANY(pg_catalog.pg_blocking_pids(pid))
+                         )
+                         """)) {
+                statement.setString(1, APPLICATION_USER);
+                statement.setInt(2, blockerProcessId);
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    if (resultSet.next() && resultSet.getBoolean(1)) {
+                        return;
+                    }
+                }
+            }
+            Thread.sleep(Duration.ofMillis(10));
+        }
+        throw new IllegalStateException("Timed out waiting for the concurrent batch update lock");
     }
 
     private DataSource applicationDataSource(String currentSchema) {
@@ -404,41 +547,6 @@ final class IntegrationDatabase {
         return dataSource;
     }
 
-    Connection openApplicationTransaction(int tenantId) throws SQLException {
-        Connection connection = applicationDataSource().getConnection();
-        try {
-            connection.setAutoCommit(false);
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT pg_catalog.set_config('vev.tenant_id', ?, true), "
-                            + "pg_catalog.set_config('row_security', 'on', true)")) {
-                statement.setString(1, Integer.toString(tenantId));
-                statement.executeQuery().close();
-            }
-            return connection;
-        } catch (Throwable failure) {
-            try {
-                connection.close();
-            } catch (Throwable closeFailure) {
-                failure.addSuppressed(closeFailure);
-            }
-            throw failure;
-        }
-    }
-
-    void insertUncommittedAccount(Connection connection, Account account) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                INSERT INTO vev_it.account(id, tenant_id, version, email, balance)
-                VALUES (?, ?, ?, ?, ?)
-                """)) {
-            statement.setObject(1, account.id());
-            statement.setInt(2, account.tenantId());
-            statement.setLong(3, account.version());
-            statement.setString(4, account.email());
-            statement.setBigDecimal(5, account.balance());
-            statement.executeUpdate();
-        }
-    }
-
     void insertInfiniteAuditEvent(UUID id, int tenantId, boolean positive) throws SQLException {
         try (Connection connection = adminConnection();
              PreparedStatement statement = connection.prepareStatement("""
@@ -454,31 +562,6 @@ final class IntegrationDatabase {
             statement.setString(6, positive ? "POSITIVE_INFINITY" : "NEGATIVE_INFINITY");
             statement.executeUpdate();
         }
-    }
-
-    void awaitBlockedUpsert() throws SQLException, InterruptedException {
-        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
-        while (System.nanoTime() < deadline) {
-            try (Connection connection = adminConnection();
-                 PreparedStatement statement = connection.prepareStatement("""
-                         SELECT EXISTS (
-                             SELECT 1
-                               FROM pg_catalog.pg_stat_activity
-                              WHERE usename = ?
-                                AND pg_catalog.cardinality(pg_catalog.pg_blocking_pids(pid)) > 0
-                                AND query LIKE '%__vev_input%'
-                         )
-                         """)) {
-                statement.setString(1, APPLICATION_USER);
-                try (ResultSet resultSet = statement.executeQuery()) {
-                    if (resultSet.next() && resultSet.getBoolean(1)) {
-                        return;
-                    }
-                }
-            }
-            Thread.sleep(Duration.ofMillis(10));
-        }
-        throw new IllegalStateException("Timed out waiting for the concurrent upsert lock");
     }
 
     void setFingerprint(String modelName, String fingerprint) throws SQLException {
@@ -691,6 +774,7 @@ final class IntegrationDatabase {
                         )
                         """,
                 "ALTER TABLE vev_it.account OWNER TO " + OWNER_ROLE,
+                "CREATE INDEX account_email_vev_idx ON vev_it.account USING btree (tenant_id, email, id)",
                 "ALTER TABLE vev_it.account ENABLE ROW LEVEL SECURITY",
                 "ALTER TABLE vev_it.account FORCE ROW LEVEL SECURITY",
                 """
@@ -720,7 +804,7 @@ final class IntegrationDatabase {
                             WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)
                         """,
                 "GRANT USAGE ON SCHEMA vev_it TO " + APPLICATION_USER,
-                "GRANT SELECT, DELETE ON TABLE vev_it.account TO " + APPLICATION_USER,
+                "GRANT SELECT ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT SELECT ON TABLE vev_it.audit_event TO " + APPLICATION_USER,

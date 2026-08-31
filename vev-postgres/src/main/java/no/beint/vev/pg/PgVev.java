@@ -9,6 +9,7 @@ import no.beint.vev.WriteTx;
 import no.beint.vev.WriteWork;
 import no.beint.vev.spi.TransactionGuard;
 import no.beint.vev.spi.TransactionScopes;
+import org.postgresql.PGConnection;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -155,10 +156,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
 
     private void configureUnchecked(Connection connection, TenantScope<M, T> tenant, boolean readOnly) throws SQLException {
         beginFreshTransaction(connection);
+        requireTrustedSessionBaseline(connection);
         connection.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
         connection.setReadOnly(readOnly);
-        installTrustedSearchPath(connection);
-        installUtf8Transport(connection);
+        verifyNoRetainedTempSchema(connection);
         String tenantValue = tenant.tenantId().toString();
         try (PreparedStatement statement = connection.prepareStatement("""
                 WITH configured AS MATERIALIZED (
@@ -166,7 +167,6 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                            pg_catalog.set_config('statement_timeout', ?, true) AS timeout,
                            pg_catalog.set_config('transaction_timeout', ?, true) AS transaction_timeout,
                            pg_catalog.set_config('lock_timeout', ?, true) AS lock_timeout,
-                           pg_catalog.set_config('search_path', 'pg_catalog', true) AS search_path,
                            pg_catalog.set_config('row_security', 'on', true) AS row_security,
                            pg_catalog.set_config('synchronous_commit', 'on', true) AS synchronous_commit,
                            pg_catalog.set_config('TimeZone', 'UTC', true) AS time_zone
@@ -175,7 +175,6 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                        configured.timeout,
                        configured.transaction_timeout,
                        configured.lock_timeout,
-                       configured.search_path,
                        configured.row_security,
                        configured.synchronous_commit,
                        configured.time_zone,
@@ -218,36 +217,35 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()
                         || !tenantValue.equals(resultSet.getString(1))
-                        || !resultSet.getString(2).equals(resultSet.getString(10))
+                        || !resultSet.getString(2).equals(resultSet.getString(9))
                         || "0".equals(resultSet.getString(2))
-                        || !resultSet.getString(3).equals(resultSet.getString(11))
+                        || !resultSet.getString(3).equals(resultSet.getString(10))
                         || "0".equals(resultSet.getString(3))
-                        || !resultSet.getString(4).equals(resultSet.getString(12))
+                        || !resultSet.getString(4).equals(resultSet.getString(11))
                         || "0".equals(resultSet.getString(4))
-                        || !"pg_catalog".equals(resultSet.getString(5))
+                        || !"on".equals(resultSet.getString(5))
                         || !"on".equals(resultSet.getString(6))
-                        || !"on".equals(resultSet.getString(7))
-                        || !"UTC".equals(resultSet.getString(8))
-                        || !tenantValue.equals(resultSet.getString(9))
+                        || !"UTC".equals(resultSet.getString(7))
+                        || !tenantValue.equals(resultSet.getString(8))
+                        || !"UTF8".equals(resultSet.getString(12))
                         || !"UTF8".equals(resultSet.getString(13))
-                        || !"UTF8".equals(resultSet.getString(14))
-                        || !"pg_catalog".equals(resultSet.getString(15))
+                        || !"pg_catalog".equals(resultSet.getString(14))
+                        || !"on".equals(resultSet.getString(15))
                         || !"on".equals(resultSet.getString(16))
-                        || !"on".equals(resultSet.getString(17))
-                        || !"UTC".equals(resultSet.getString(18))
-                        || !(readOnly ? "on" : "off").equals(resultSet.getString(19))
-                        || !"serializable".equals(resultSet.getString(20))
-                        || !databaseIdentity.database().equals(resultSet.getString(21))
-                        || databaseIdentity.databaseOid() != resultSet.getLong(22)
-                        || databaseIdentity.systemIdentifier() != resultSet.getLong(23)
-                        || !databaseIdentity.endpointAddress().equals(resultSet.getString(24))
-                        || databaseIdentity.endpointPort() != resultSet.getInt(25)
-                        || databaseIdentity.postmasterStartEpochMicros() != resultSet.getLong(26)
-                        || resultSet.getBoolean(27)
+                        || !"UTC".equals(resultSet.getString(17))
+                        || !(readOnly ? "on" : "off").equals(resultSet.getString(18))
+                        || !"serializable".equals(resultSet.getString(19))
+                        || !databaseIdentity.database().equals(resultSet.getString(20))
+                        || databaseIdentity.databaseOid() != resultSet.getLong(21)
+                        || databaseIdentity.systemIdentifier() != resultSet.getLong(22)
+                        || !databaseIdentity.endpointAddress().equals(resultSet.getString(23))
+                        || databaseIdentity.endpointPort() != resultSet.getInt(24)
+                        || databaseIdentity.postmasterStartEpochMicros() != resultSet.getLong(25)
+                        || resultSet.getBoolean(26)
+                        || !databaseIdentity.role().equals(resultSet.getString(27))
                         || !databaseIdentity.role().equals(resultSet.getString(28))
-                        || !databaseIdentity.role().equals(resultSet.getString(29))
+                        || !resultSet.getBoolean(29)
                         || !resultSet.getBoolean(30)
-                        || !resultSet.getBoolean(31)
                         || resultSet.next()) {
                     throw new IllegalStateException("Checked-out connection did not preserve Vev's transaction invariants");
                 }
@@ -334,10 +332,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
 
     private void configureVerifier(Connection connection) throws SQLException {
         beginFreshTransaction(connection);
+        requireTrustedSessionBaseline(connection);
         connection.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
         connection.setReadOnly(true);
-        installTrustedSearchPath(connection);
-        installUtf8Transport(connection);
+        verifyNoRetainedTempSchema(connection);
         try (PreparedStatement statement = connection.prepareStatement("""
                 WITH configured AS MATERIALIZED (
                     SELECT pg_catalog.set_config('row_security', 'on', true) AS row_security,
@@ -407,45 +405,26 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         connection.rollback();
     }
 
-    private static void installUtf8Transport(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                WITH configured AS MATERIALIZED (
-                    SELECT pg_catalog.set_config('client_encoding', 'UTF8', true) AS client_encoding
-                )
-                SELECT configured.client_encoding,
-                       pg_catalog.current_setting('client_encoding'),
-                       pg_catalog.current_setting('server_encoding')
-                  FROM configured
-                """);
-             ResultSet resultSet = statement.executeQuery()) {
-            if (!resultSet.next()
-                    || !"UTF8".equals(resultSet.getString(1))
-                    || !"UTF8".equals(resultSet.getString(2))
-                    || !"UTF8".equals(resultSet.getString(3))
-                    || resultSet.next()) {
-                throw new IllegalStateException("Vev requires UTF-8 on every checked-out PostgreSQL connection");
-            }
+    private static void requireTrustedSessionBaseline(Connection connection) throws SQLException {
+        PGConnection postgres = connection.unwrap(PGConnection.class);
+        if (!"pg_catalog".equals(postgres.getParameterStatus("search_path"))
+                || !"UTF8".equals(postgres.getParameterStatus("client_encoding"))
+                || !"UTF8".equals(postgres.getParameterStatus("server_encoding"))
+                || !"on".equals(postgres.getParameterStatus("standard_conforming_strings"))
+                || !"on".equals(postgres.getParameterStatus("integer_datetimes"))) {
+            throw new IllegalStateException(
+                    "Vev requires a dedicated pgjdbc connection with a trusted immutable session baseline");
         }
     }
 
-    private static void installTrustedSearchPath(Connection connection) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("""
-                WITH configured AS MATERIALIZED (
-                    SELECT pg_catalog.set_config('search_path', 'pg_catalog', true) AS search_path
-                )
-                SELECT configured.search_path,
-                       pg_catalog.current_setting('search_path'),
-                       pg_catalog.pg_my_temp_schema()
-                  FROM configured
-                """);
+    private static void verifyNoRetainedTempSchema(Connection connection) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT pg_catalog.pg_my_temp_schema()");
              ResultSet resultSet = statement.executeQuery()) {
             if (!resultSet.next()
-                    || !"pg_catalog".equals(resultSet.getString(1))
-                    || !"pg_catalog".equals(resultSet.getString(2))
-                    || resultSet.getLong(3) != 0
+                    || resultSet.getLong(1) != 0
                     || resultSet.wasNull()
                     || resultSet.next()) {
-                throw new IllegalStateException("Vev could not install a trusted bootstrap search path");
+                throw new IllegalStateException("Vev rejects PostgreSQL sessions which retained a temporary schema");
             }
         }
     }
@@ -979,6 +958,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             || !resultSet.getBoolean(9)
                             || resultSet.getBoolean(10)
                             || resultSet.getBoolean(11)
+                            || resultSet.getBoolean(12)
                             || resultSet.getBoolean(13)
                             || resultSet.getBoolean(14)
                             || resultSet.getBoolean(15)
@@ -998,8 +978,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                                 + plan.schemaName() + '.' + plan.tableName());
                     }
                     boolean versioned = plan instanceof PgVersionPlan<?, ?, ?, ?, ?>;
-                    if (resultSet.getBoolean(12) != versioned
-                            || resultSet.getBoolean(18) != versioned) {
+                    if (resultSet.getBoolean(18) != versioned) {
                         throw new IllegalStateException("Mapped table write privileges do not match its generated mutation profile: "
                                 + plan.schemaName() + '.' + plan.tableName());
                     }
@@ -1273,26 +1252,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyStructuralConstraints(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
-        String secondaryIndexSql = """
-                SELECT pg_catalog.count(*)
-                  FROM pg_catalog.pg_index mapped_index
-                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
-                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-                 WHERE namespace.nspname = ?
-                   AND relation.relname = ?
-                   AND NOT mapped_index.indisprimary
-                """;
-        try (PreparedStatement statement = connection.prepareStatement(secondaryIndexSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next() || resultSet.getInt(1) != 0 || resultSet.next()) {
-                    throw new IllegalStateException(
-                            "Secondary indexes are outside Vev's closed schema profile: "
-                                    + plan.schemaName() + '.' + plan.tableName());
-                }
-            }
-        }
+        verifySecondaryIndexes(connection, plan);
 
         String foreignKeySql = """
                 SELECT pg_catalog.count(*)
@@ -1355,6 +1315,135 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     throw new IllegalStateException(
                             "Executable or additional constraints are outside Vev's closed schema profile: "
                                     + plan.schemaName() + '.' + plan.tableName());
+                }
+            }
+        }
+    }
+
+    private void verifySecondaryIndexes(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
+        String shapeSql = """
+                SELECT index_relation.relname,
+                       access_method.amname = 'btree',
+                       index_namespace.nspname = namespace.nspname,
+                       index_relation.relkind = 'i',
+                       index_relation.relpersistence = 'p',
+                       NOT index_relation.relispartition,
+                       index_relation.reltablespace = 0,
+                       index_relation.reloptions IS NULL,
+                       NOT mapped_index.indisunique,
+                       NOT mapped_index.indisprimary,
+                       NOT mapped_index.indisexclusion,
+                       mapped_index.indimmediate,
+                       mapped_index.indisvalid,
+                       mapped_index.indisready,
+                       mapped_index.indislive,
+                       NOT mapped_index.indcheckxmin,
+                       NOT mapped_index.indisclustered,
+                       NOT mapped_index.indisreplident,
+                       NOT mapped_index.indnullsnotdistinct,
+                       mapped_index.indexprs IS NULL,
+                       mapped_index.indpred IS NULL,
+                       mapped_index.indnkeyatts = 3,
+                       mapped_index.indnatts = 3,
+                       index_constraint.oid IS NULL
+                  FROM pg_catalog.pg_index mapped_index
+                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
+                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+                  JOIN pg_catalog.pg_class index_relation ON index_relation.oid = mapped_index.indexrelid
+                  JOIN pg_catalog.pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
+                  JOIN pg_catalog.pg_am access_method ON access_method.oid = index_relation.relam
+                  LEFT JOIN pg_catalog.pg_constraint index_constraint
+                    ON index_constraint.conindid = mapped_index.indexrelid
+                 WHERE namespace.nspname = ?
+                   AND relation.relname = ?
+                   AND NOT mapped_index.indisprimary
+                 ORDER BY index_relation.relname
+                """;
+        List<PgIndex<M, ?, ?, ?>> expected = new ArrayList<>(plan.indexes());
+        expected.sort(java.util.Comparator.comparing(PgIndex::indexName));
+        try (PreparedStatement statement = connection.prepareStatement(shapeSql)) {
+            statement.setString(1, plan.schemaName());
+            statement.setString(2, plan.tableName());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                for (PgIndex<M, ?, ?, ?> index : expected) {
+                    if (!resultSet.next() || !index.indexName().equals(resultSet.getString(1))) {
+                        throw new IllegalStateException("Mapped secondary-index set does not match generated model: "
+                                + plan.schemaName() + '.' + plan.tableName());
+                    }
+                    for (int column = 2; column <= 24; column++) {
+                        if (!resultSet.getBoolean(column)) {
+                            throw new IllegalStateException("Mapped PostgreSQL index shape is unsafe: "
+                                    + plan.schemaName() + '.' + index.indexName());
+                        }
+                    }
+                    verifySecondaryIndexKeys(connection, plan, index);
+                }
+                if (resultSet.next()) {
+                    throw new IllegalStateException("Undeclared PostgreSQL secondary index exists: "
+                            + plan.schemaName() + '.' + resultSet.getString(1));
+                }
+            }
+        }
+    }
+
+    private void verifySecondaryIndexKeys(
+            Connection connection,
+            PgPlan<M, ?, ?, T> plan,
+            PgIndex<M, ?, ?, ?> index) throws SQLException {
+        String keysSql = """
+                SELECT attribute.attname,
+                       operator_namespace.nspname = 'pg_catalog',
+                       operator_class.opcdefault,
+                       (mapped_index.indcollation::pg_catalog.oid[])[key_position.position]
+                           = attribute.attcollation,
+                       (mapped_index.indoption::pg_catalog.int2[])[key_position.position] = 0
+                  FROM pg_catalog.pg_index mapped_index
+                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
+                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+                  JOIN pg_catalog.pg_class index_relation ON index_relation.oid = mapped_index.indexrelid
+                  JOIN pg_catalog.pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
+                  CROSS JOIN LATERAL pg_catalog.generate_subscripts(
+                      mapped_index.indkey::pg_catalog.int2[], 1) AS key_position(position)
+                  JOIN pg_catalog.pg_attribute attribute
+                    ON attribute.attrelid = relation.oid
+                   AND attribute.attnum = (mapped_index.indkey::pg_catalog.int2[])[key_position.position]
+                  JOIN pg_catalog.pg_opclass operator_class
+                    ON operator_class.oid = (mapped_index.indclass::pg_catalog.oid[])[key_position.position]
+                  JOIN pg_catalog.pg_namespace operator_namespace
+                    ON operator_namespace.oid = operator_class.opcnamespace
+                 WHERE namespace.nspname = ?
+                   AND relation.relname = ?
+                   AND index_namespace.nspname = ?
+                   AND index_relation.relname = ?
+                 ORDER BY key_position.position
+                """;
+        String idColumn = plan.columns().stream()
+                .filter(column -> column.role() == PgColumn.Role.ID)
+                .map(PgColumn::name)
+                .findFirst()
+                .orElseThrow();
+        String valueColumn = plan.columns().get(index.columnIndex()).name();
+        List<String> expectedColumns = List.of(plan.tenantColumn(), valueColumn, idColumn);
+        try (PreparedStatement statement = connection.prepareStatement(keysSql)) {
+            statement.setString(1, plan.schemaName());
+            statement.setString(2, plan.tableName());
+            statement.setString(3, plan.schemaName());
+            statement.setString(4, index.indexName());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                for (String expectedColumn : expectedColumns) {
+                    if (!resultSet.next()
+                            || !expectedColumn.equals(resultSet.getString(1))
+                            || !resultSet.getBoolean(2)
+                            || !resultSet.getBoolean(3)
+                            || !resultSet.getBoolean(4)
+                            || !resultSet.getBoolean(5)) {
+                        throw new IllegalStateException("Mapped PostgreSQL index keys do not match generated query: "
+                                + plan.schemaName() + '.' + index.indexName());
+                    }
+                }
+                if (resultSet.next()) {
+                    throw new IllegalStateException("Mapped PostgreSQL index has undeclared key columns: "
+                            + plan.schemaName() + '.' + index.indexName());
                 }
             }
         }

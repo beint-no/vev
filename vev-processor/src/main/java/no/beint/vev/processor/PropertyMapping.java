@@ -16,8 +16,14 @@ record PropertyMapping(
         int numericScale,
         boolean id,
         boolean tenant,
-        boolean version) {
+        boolean version,
+        String indexName,
+        String indexFieldName) {
     String quotedColumn() {
         return '"' + columnName + '"';
+    }
+
+    boolean indexed() {
+        return !indexName.isEmpty();
     }
 }
