@@ -55,6 +55,96 @@ public final class PgQueries {
         return new PgIdScan<>(plan, afterExclusive.value(), Objects.requireNonNull(limit, "limit"));
     }
 
+    /**
+     * Creates a tenant-scoped indexed equality page ordered by ascending primary key.
+     *
+     * @param index generated and live-attested index token
+     * @param value exact non-null indexed value
+     * @param limit maximum number of snapshots to return
+     * @param <M> closed-model marker type
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> indexed value type
+     * @return opaque bounded equality query
+     */
+    public static <M, E, K, V> BoundedQuery<M, E> equal(
+            PgIndex<M, E, K, V> index,
+            V value,
+            QueryLimit limit) {
+        PgIndex<M, E, K, V> generated = generatedIndex(index);
+        requireValue(generated, value);
+        return new PgIndexScan<>(
+                generated, PgIndexScan.Predicate.EQUAL, value, null, Objects.requireNonNull(limit, "limit"));
+    }
+
+    /**
+     * Creates an indexed equality page after an exclusive generated primary key.
+     *
+     * <p>Execute related pages in one lexical transaction when they must share one PostgreSQL snapshot.</p>
+     *
+     * @param index generated and live-attested index token
+     * @param value exact non-null indexed value
+     * @param afterExclusive type-bound exclusive primary key
+     * @param limit maximum number of snapshots to return
+     * @param <M> closed-model marker type
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> indexed value type
+     * @return opaque bounded equality continuation query
+     */
+    public static <M, E, K, V> BoundedQuery<M, E> equalAfter(
+            PgIndex<M, E, K, V> index,
+            V value,
+            EntityKey<M, E, K> afterExclusive,
+            QueryLimit limit) {
+        PgIndex<M, E, K, V> generated = generatedIndex(index);
+        requireValue(generated, value);
+        K key = requireKey(generated, afterExclusive);
+        return new PgIndexScan<>(
+                generated, PgIndexScan.Predicate.EQUAL, value, key, Objects.requireNonNull(limit, "limit"));
+    }
+
+    /**
+     * Creates a tenant-scoped {@code IS NULL} page for a generated nullable index.
+     *
+     * @param index generated nullable index token
+     * @param limit maximum number of snapshots to return
+     * @param <M> closed-model marker type
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> indexed value type
+     * @return opaque bounded null query
+     */
+    public static <M, E, K, V> BoundedQuery<M, E> isNull(
+            PgNullableIndex<M, E, K, V> index,
+            QueryLimit limit) {
+        PgNullableIndex<M, E, K, V> generated = generatedNullableIndex(index);
+        return new PgIndexScan<>(
+                generated, PgIndexScan.Predicate.IS_NULL, null, null, Objects.requireNonNull(limit, "limit"));
+    }
+
+    /**
+     * Creates a nullable-index page after an exclusive generated primary key.
+     *
+     * @param index generated nullable index token
+     * @param afterExclusive type-bound exclusive primary key
+     * @param limit maximum number of snapshots to return
+     * @param <M> closed-model marker type
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> indexed value type
+     * @return opaque bounded null-query continuation
+     */
+    public static <M, E, K, V> BoundedQuery<M, E> isNullAfter(
+            PgNullableIndex<M, E, K, V> index,
+            EntityKey<M, E, K> afterExclusive,
+            QueryLimit limit) {
+        PgNullableIndex<M, E, K, V> generated = generatedNullableIndex(index);
+        K key = requireKey(generated, afterExclusive);
+        return new PgIndexScan<>(
+                generated, PgIndexScan.Predicate.IS_NULL, null, key, Objects.requireNonNull(limit, "limit"));
+    }
+
     private static <M, E, K> PgEntityPlan<M, E, K, ?> generatedPlan(EntityType<M, E, K> entityType) {
         Objects.requireNonNull(entityType, "entityType");
         if (!(entityType instanceof PgEntityPlan<?, ?, ?, ?> rawPlan)) {
@@ -63,5 +153,31 @@ public final class PgQueries {
         @SuppressWarnings("unchecked")
         PgEntityPlan<M, E, K, ?> plan = (PgEntityPlan<M, E, K, ?>) rawPlan;
         return plan;
+    }
+
+    private static <M, E, K, V> PgIndex<M, E, K, V> generatedIndex(PgIndex<M, E, K, V> index) {
+        return Objects.requireNonNull(index, "index");
+    }
+
+    private static <M, E, K, V> PgNullableIndex<M, E, K, V> generatedNullableIndex(
+            PgNullableIndex<M, E, K, V> index) {
+        return Objects.requireNonNull(index, "index");
+    }
+
+    private static <M, E, K, V> void requireValue(PgIndex<M, E, K, V> index, V value) {
+        Objects.requireNonNull(value, "value");
+        if (value.getClass() != index.valueType()) {
+            throw new IllegalArgumentException("Query value does not match the exact generated PostgreSQL codec");
+        }
+    }
+
+    private static <M, E, K, V> K requireKey(
+            PgIndex<M, E, K, V> index,
+            EntityKey<M, E, K> afterExclusive) {
+        Objects.requireNonNull(afterExclusive, "afterExclusive");
+        if (afterExclusive.entityType() != index.entityPlan()) {
+            throw new IllegalArgumentException("Continuation key is not from the indexed generated entity plan");
+        }
+        return afterExclusive.value();
     }
 }

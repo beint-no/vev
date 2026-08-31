@@ -11,7 +11,6 @@ import jakarta.persistence.EntityNotFoundException;
 import jakarta.persistence.EntityTransaction;
 import jakarta.persistence.FindOption;
 import jakarta.persistence.LockModeType;
-import jakarta.persistence.OptimisticLockException;
 import jakarta.persistence.PersistenceException;
 import jakarta.persistence.PessimisticLockScope;
 import jakarta.persistence.Statement;
@@ -27,9 +26,7 @@ import jakarta.persistence.criteria.CriteriaStatement;
 import jakarta.persistence.metamodel.Metamodel;
 import jakarta.persistence.sql.ResultSetMapping;
 import no.beint.vev.Batch;
-import no.beint.vev.DeleteResult;
 import no.beint.vev.EntityLookup;
-import no.beint.vev.VersionedKey;
 import no.beint.vev.WriteEntities;
 import no.beint.vev.pg.PgModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
@@ -48,11 +45,11 @@ import java.util.Set;
  *
  * <p>This class implements the milestone interface so selected migration calls can be evaluated, but it is
  * deliberately nonconforming and is not supplied by a Jakarta Persistence provider. Its safe profile includes
- * detached get/find operations, bounded multi-find, cache bypass, assigned-value inserts, and optimistic versioned
- * delete. Session state, dirty checking, lazy loading, dynamic query strings, runtime Criteria trees, entity graphs,
- * stored procedures, raw connections, and manual transactions are rejected. Inserts are accepted only when
- * PostgreSQL returns the exact input snapshot. Mutations that would discard Vev's replacement snapshot or explicit
- * outcome are rejected; use {@link WriteEntities} for those operations.</p>
+ * detached get/find operations, bounded multi-find, cache bypass, and assigned-value inserts. Session state, dirty
+ * checking, lazy loading, dynamic query strings, runtime Criteria trees, entity graphs, physical delete,
+ * create-capable upsert, stored procedures, raw connections, and manual transactions are rejected. Inserts are
+ * accepted only when PostgreSQL returns the exact input snapshot. Mutations that would discard Vev's replacement
+ * snapshot or explicit outcome are rejected; use {@link WriteEntities} for versioned updates.</p>
  *
  * <p>Instances are created by {@link VevEntityAgents}, are valid only on the callback's thread, and are closed when
  * the callback exits.</p>
@@ -68,7 +65,6 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     private final Map<Class<?>, Option> options = new LinkedHashMap<>();
     private CacheRetrieveMode cacheRetrieveMode = CacheRetrieveMode.BYPASS;
     private CacheStoreMode cacheStoreMode = CacheStoreMode.BYPASS;
-    private OptimisticLockException optimisticFailure;
     private boolean insertDidNotCompleteVerified;
     private volatile boolean open = true;
 
@@ -197,32 +193,27 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     @Override
     public void delete(Object entity) {
         requireOpen();
-        deleteTyped(versionedPlan(entity), entity);
+        throw unsupported(
+                "Physical delete is absent from Vev; model lifecycle retirement as an explicit versioned update");
     }
 
     @Override
     public void deleteMultiple(List<?> values) {
         requireOpen();
-        List<?> entities = boundedSnapshot(values, "entity");
-        if (!entities.isEmpty()) {
-            throw unsupported(
-                    "Ordered Jakarta batch delete can expose partial effects; use Vev's typed deleteMultiple outcomes");
-        }
+        throw unsupported(
+                "Physical delete is absent from Vev; model lifecycle retirement as an explicit versioned update");
     }
 
     @Override
     public void upsert(Object entity) {
         requireOpen();
-        throw immutableMutationUnsupported(versionedPlan(entity));
+        throw unsupported("Create-capable upsert is absent from Vev; choose insert or versioned update explicitly");
     }
 
     @Override
     public void upsertMultiple(List<?> values) {
         requireOpen();
-        List<?> entities = boundedSnapshot(values, "entity");
-        for (Object entity : entities) {
-            upsert(entity);
-        }
+        throw unsupported("Create-capable upsert is absent from Vev; choose insert or versioned update explicitly");
     }
 
     @Override
@@ -515,20 +506,6 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         return id;
     }
 
-    @SuppressWarnings("unchecked")
-    private <E, K, V> void deleteTyped(PgVersionedEntityPlan<M, E, K, Tenant, V> plan, Object value) {
-        E entity = plan.javaType().cast(value);
-        requireEntityTenant(plan, entity);
-        K key = Objects.requireNonNull(plan.keyOf(entity), "entity identifier");
-        V version = Objects.requireNonNull(plan.versionOf(entity), "entity version");
-        VersionedKey<M, E, K, V> versionedKey = plan.versionedKey(key, version);
-        DeleteResult<M, E, K, V> result = entities.delete(versionedKey);
-        if (!(result instanceof DeleteResult.Deleted<?, ?, ?, ?>)) {
-            optimisticFailure = new OptimisticLockException("Optimistic delete failed for " + plan.logicalName());
-            throw optimisticFailure;
-        }
-    }
-
     private <E, K> void requireEntityTenant(PgEntityPlan<M, E, K, Tenant> plan, E entity) {
         Object entityTenant = Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
         if (!tenantKey.equals(entityTenant)) {
@@ -653,9 +630,6 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         if (!open) {
             throw new IllegalStateException("Vev EntityAgent is closed");
         }
-        if (optimisticFailure != null) {
-            throw new IllegalStateException("Vev EntityAgent transaction must roll back after optimistic failure");
-        }
         if (insertDidNotCompleteVerified) {
             throw new IllegalStateException(
                     "Vev EntityAgent transaction must roll back after an insert did not complete with a verified snapshot");
@@ -664,9 +638,6 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
 
     void requireCommittable() {
         requireOwner();
-        if (optimisticFailure != null) {
-            throw optimisticFailure;
-        }
         if (insertDidNotCompleteVerified) {
             throw new PersistenceException(
                     "Vev EntityAgent transaction must roll back after an insert did not complete with a verified snapshot");

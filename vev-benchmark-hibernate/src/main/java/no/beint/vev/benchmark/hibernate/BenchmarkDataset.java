@@ -9,10 +9,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Executor;
+import org.postgresql.PGConnection;
 
 final class BenchmarkDataset {
     static final String SCHEMA_NAME = "vev_bench";
     static final String TABLE_NAME = "account";
+    static final String UPDATE_TABLE_NAME = "update_account";
     static final int TENANT_ID = 7;
     static final int ROW_COUNT = 10_000;
     static final int FETCH_SIZE = 256;
@@ -21,12 +23,15 @@ final class BenchmarkDataset {
     static final int FIND_MULTIPLE_32_PRESENT_COUNT = 31;
     static final int FIND_MULTIPLE_256_PRESENT_COUNT = 255;
     static final int SCAN_SIZE = 256;
+    static final String INDEXED_EMAIL_VALUE = "account-7777@example.test";
+    static final int INDEXED_EMAIL_LIMIT = 1;
+    static final int INDEXED_ACTIVE_LIMIT = 32;
     static final int STATEMENT_TIMEOUT_MILLISECONDS = 30_000;
     static final int TRANSACTION_TIMEOUT_MILLISECONDS = 120_000;
     static final int NETWORK_TIMEOUT_MILLISECONDS = 180_000;
     static final String MODEL_NAME = "no.beint.vev.benchmark.BenchmarkModel";
     static final String MODEL_FINGERPRINT =
-            "sha256:8e4130992b0b6d472b47061e21a3de98381bb2b6a42d431b3c89e0fd3283b791";
+            "sha256:7227fca5a880759306c997d7118a47553364860b65292b23d74946c981193e89";
     static final String FIXTURE_OWNERSHIP_MARKER = "vev-owned-fixture:vev_bench:v1";
 
     private static final int POSTGRESQL_18_VERSION_NUMBER = 180_000;
@@ -69,9 +74,10 @@ final class BenchmarkDataset {
             installTrustedSearchPath(connection);
             installUtf8Transport(connection);
             var databaseIdentity = readDatabaseIdentity(connection);
-            applyTransactionContext(connection, databaseIdentity);
+            applyTransactionContext(connection, databaseIdentity, true);
             var summary = verifyJdbcRows(connection);
-            verifyTransactionContext(connection, databaseIdentity);
+            BatchUpdateWorkload.stateChecksum(0L, readUpdateRows(connection));
+            verifyTransactionContext(connection, databaseIdentity, true);
             connection.rollback();
             return summary;
         }
@@ -84,11 +90,78 @@ final class BenchmarkDataset {
             installTrustedSearchPath(connection);
             installUtf8Transport(connection);
             var databaseIdentity = readDatabaseIdentity(connection);
-            applyTransactionContext(connection, databaseIdentity);
-            verifyTransactionContext(connection, databaseIdentity);
+            applyTransactionContext(connection, databaseIdentity, true);
+            verifyTransactionContext(connection, databaseIdentity, true);
             connection.rollback();
             return databaseIdentity;
         }
+    }
+
+    static void resetUpdateRows(BenchmarkDatabaseConfiguration configuration) throws SQLException {
+        try (var connection = configuration.openConnection(false)) {
+            assertPostgreSql18(connection);
+            prepareWriteConnection(connection);
+            installTrustedSearchPath(connection);
+            installUtf8Transport(connection);
+            var databaseIdentity = readDatabaseIdentity(connection);
+            applyTransactionContext(connection, databaseIdentity, false);
+            try {
+                try (var statement = connection.prepareStatement("""
+                        UPDATE vev_bench.update_account
+                           SET version = 0,
+                               balance = ((200000 + id)::pg_catalog.numeric / 100)::pg_catalog.numeric(19, 4)
+                         WHERE tenant_id = ?
+                        """)) {
+                    statement.setInt(1, TENANT_ID);
+                    if (statement.executeUpdate() != BatchUpdateWorkload.SIZE) {
+                        throw new IllegalStateException("Update fixture reset did not affect exactly 32 rows");
+                    }
+                }
+                BatchUpdateWorkload.stateChecksum(0L, readUpdateRows(connection));
+                verifyTransactionContext(connection, databaseIdentity, false);
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                rollbackAfterFailure(connection, failure);
+                throw failure;
+            }
+        }
+    }
+
+    static void verifyUpdateRows(BenchmarkDatabaseConfiguration configuration, long version) throws SQLException {
+        try (var connection = configuration.openConnection(true)) {
+            assertPostgreSql18(connection);
+            prepareReadConnection(connection);
+            installTrustedSearchPath(connection);
+            installUtf8Transport(connection);
+            var databaseIdentity = readDatabaseIdentity(connection);
+            applyTransactionContext(connection, databaseIdentity, true);
+            BatchUpdateWorkload.stateChecksum(version, readUpdateRows(connection));
+            verifyTransactionContext(connection, databaseIdentity, true);
+            connection.rollback();
+        }
+    }
+
+    static List<BenchmarkUpdateAccount> readUpdateRows(Connection connection) throws SQLException {
+        var accounts = new ArrayList<BenchmarkUpdateAccount>(BatchUpdateWorkload.SIZE);
+        try (var statement = connection.prepareStatement("""
+                SELECT id, tenant_id, version, balance
+                  FROM vev_bench.update_account
+                 WHERE tenant_id = ?
+                 ORDER BY id
+                """)) {
+            statement.setInt(1, TENANT_ID);
+            statement.setFetchSize(BatchUpdateWorkload.SIZE);
+            try (var rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    accounts.add(new BenchmarkUpdateAccount(
+                            rows.getLong(1),
+                            rows.getInt(2),
+                            rows.getLong(3),
+                            rows.getBigDecimal(4)));
+                }
+            }
+        }
+        return List.copyOf(accounts);
     }
 
     static BenchmarkAccountId identifier(long id) {
@@ -132,6 +205,14 @@ final class BenchmarkDataset {
         return accounts;
     }
 
+    static List<BenchmarkAccount> expectedActiveAccounts(int count) {
+        var accounts = new ArrayList<BenchmarkAccount>(count);
+        for (long id = 2; accounts.size() < count; id += 2) {
+            accounts.add(expectedAccount(id));
+        }
+        return List.copyOf(accounts);
+    }
+
     static long benchmarkChecksum(BenchmarkAccount account) {
         if (account == null) {
             throw new IllegalStateException("Benchmark query returned no account");
@@ -172,6 +253,20 @@ final class BenchmarkDataset {
         return mix(checksum, accounts.size() > SCAN_SIZE ? 1 : 0);
     }
 
+    static long indexedPageChecksum(List<BenchmarkAccount> accounts, int limit) {
+        if (limit < 1 || accounts.size() > Math.addExact(limit, 1)) {
+            throw new IllegalStateException(
+                    "Hibernate indexed page returned " + accounts.size() + " rows for limit " + limit);
+        }
+        long checksum = 1;
+        int returned = Math.min(accounts.size(), limit);
+        for (int index = 0; index < returned; index++) {
+            checksum = mix(checksum, benchmarkChecksum(accounts.get(index)));
+        }
+        checksum = mix(checksum, returned);
+        return mix(checksum, accounts.size() > limit ? 1 : 0);
+    }
+
     static DatasetSummary summarize(List<BenchmarkAccount> accounts) {
         long checksum = COLLECTION_CHECKSUM_SEED;
         long identifierSum = 0;
@@ -200,6 +295,14 @@ final class BenchmarkDataset {
     }
 
     static void prepareReadConnection(Connection connection) throws SQLException {
+        prepareConnection(connection, true);
+    }
+
+    static void prepareWriteConnection(Connection connection) throws SQLException {
+        prepareConnection(connection, false);
+    }
+
+    private static void prepareConnection(Connection connection, boolean readOnly) throws SQLException {
         connection.setNetworkTimeout(NETWORK_TIMEOUT_EXECUTOR, NETWORK_TIMEOUT_MILLISECONDS);
         if (connection.getNetworkTimeout() != NETWORK_TIMEOUT_MILLISECONDS) {
             throw new IllegalStateException("Hibernate benchmark connection did not preserve the network deadline");
@@ -207,7 +310,7 @@ final class BenchmarkDataset {
         connection.setAutoCommit(false);
         connection.rollback();
         connection.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
-        connection.setReadOnly(true);
+        connection.setReadOnly(readOnly);
     }
 
     static void installUtf8Transport(Connection connection) throws SQLException {
@@ -273,7 +376,47 @@ final class BenchmarkDataset {
         }
     }
 
-    static void applyTransactionContext(Connection connection, DatabaseIdentity databaseIdentity) throws SQLException {
+    static void requireTrustedSessionBaseline(Connection connection) throws SQLException {
+        PGConnection postgres = connection.unwrap(PGConnection.class);
+        requireTrustedSessionBaselineValues(
+                postgres.getParameterStatus("search_path"),
+                postgres.getParameterStatus("client_encoding"),
+                postgres.getParameterStatus("server_encoding"),
+                postgres.getParameterStatus("standard_conforming_strings"),
+                postgres.getParameterStatus("integer_datetimes"));
+    }
+
+    static void requireTrustedSessionBaselineValues(
+            String searchPath,
+            String clientEncoding,
+            String serverEncoding,
+            String standardConformingStrings,
+            String integerDatetimes) {
+        if (!"pg_catalog".equals(searchPath)
+                || !"UTF8".equals(clientEncoding)
+                || !"UTF8".equals(serverEncoding)
+                || !"on".equals(standardConformingStrings)
+                || !"on".equals(integerDatetimes)) {
+            throw new IllegalStateException("Hibernate benchmark requires Vev's immutable pgjdbc session baseline");
+        }
+    }
+
+    static void verifyNoRetainedTempSchema(Connection connection) throws SQLException {
+        try (var statement = connection.prepareStatement("SELECT pg_catalog.pg_my_temp_schema()");
+             var result = statement.executeQuery()) {
+            if (!result.next()
+                    || result.getLong(1) != 0
+                    || result.wasNull()
+                    || result.next()) {
+                throw new IllegalStateException("Hibernate benchmark rejects sessions which retained a temporary schema");
+            }
+        }
+    }
+
+    static void applyTransactionContext(
+            Connection connection,
+            DatabaseIdentity databaseIdentity,
+            boolean readOnly) throws SQLException {
         String tenantValue = Integer.toString(TENANT_ID);
         try (var statement = connection.prepareStatement("""
                 WITH configured AS MATERIALIZED (
@@ -281,7 +424,6 @@ final class BenchmarkDataset {
                            pg_catalog.set_config('statement_timeout', '30000ms', true) AS timeout,
                            pg_catalog.set_config('transaction_timeout', '120000ms', true) AS transaction_timeout,
                            pg_catalog.set_config('lock_timeout', '30000ms', true) AS lock_timeout,
-                           pg_catalog.set_config('search_path', 'pg_catalog', true) AS search_path,
                            pg_catalog.set_config('row_security', 'on', true) AS row_security,
                            pg_catalog.set_config('synchronous_commit', 'on', true) AS synchronous_commit,
                            pg_catalog.set_config('TimeZone', 'UTC', true) AS time_zone
@@ -290,7 +432,6 @@ final class BenchmarkDataset {
                        configured.timeout,
                        configured.transaction_timeout,
                        configured.lock_timeout,
-                       configured.search_path,
                        configured.row_security,
                        configured.synchronous_commit,
                        configured.time_zone,
@@ -330,36 +471,35 @@ final class BenchmarkDataset {
             try (var result = statement.executeQuery()) {
                 if (!result.next()
                         || !tenantValue.equals(result.getString(1))
-                        || !result.getString(2).equals(result.getString(10))
+                        || !result.getString(2).equals(result.getString(9))
                         || "0".equals(result.getString(2))
-                        || !result.getString(3).equals(result.getString(11))
+                        || !result.getString(3).equals(result.getString(10))
                         || "0".equals(result.getString(3))
-                        || !result.getString(4).equals(result.getString(12))
+                        || !result.getString(4).equals(result.getString(11))
                         || "0".equals(result.getString(4))
-                        || !"pg_catalog".equals(result.getString(5))
+                        || !"on".equals(result.getString(5))
                         || !"on".equals(result.getString(6))
-                        || !"on".equals(result.getString(7))
-                        || !"UTC".equals(result.getString(8))
-                        || !tenantValue.equals(result.getString(9))
+                        || !"UTC".equals(result.getString(7))
+                        || !tenantValue.equals(result.getString(8))
+                        || !"UTF8".equals(result.getString(12))
                         || !"UTF8".equals(result.getString(13))
-                        || !"UTF8".equals(result.getString(14))
-                        || !"pg_catalog".equals(result.getString(15))
+                        || !"pg_catalog".equals(result.getString(14))
+                        || !"on".equals(result.getString(15))
                         || !"on".equals(result.getString(16))
-                        || !"on".equals(result.getString(17))
-                        || !"UTC".equals(result.getString(18))
-                        || !"on".equals(result.getString(19))
-                        || !"serializable".equals(result.getString(20))
-                        || !databaseIdentity.database().equals(result.getString(21))
-                        || databaseIdentity.databaseOid() != result.getLong(22)
-                        || databaseIdentity.systemIdentifier() != result.getLong(23)
-                        || !Objects.equals(databaseIdentity.endpointAddress(), result.getString(24))
-                        || databaseIdentity.endpointPort() != result.getInt(25)
-                        || databaseIdentity.postmasterStartEpochMicros() != result.getLong(26)
-                        || result.getBoolean(27)
+                        || !"UTC".equals(result.getString(17))
+                        || !(readOnly ? "on" : "off").equals(result.getString(18))
+                        || !"serializable".equals(result.getString(19))
+                        || !databaseIdentity.database().equals(result.getString(20))
+                        || databaseIdentity.databaseOid() != result.getLong(21)
+                        || databaseIdentity.systemIdentifier() != result.getLong(22)
+                        || !Objects.equals(databaseIdentity.endpointAddress(), result.getString(23))
+                        || databaseIdentity.endpointPort() != result.getInt(24)
+                        || databaseIdentity.postmasterStartEpochMicros() != result.getLong(25)
+                        || result.getBoolean(26)
+                        || !databaseIdentity.role().equals(result.getString(27))
                         || !databaseIdentity.role().equals(result.getString(28))
-                        || !databaseIdentity.role().equals(result.getString(29))
+                        || !result.getBoolean(29)
                         || !result.getBoolean(30)
-                        || !result.getBoolean(31)
                         || result.next()) {
                     throw new IllegalStateException("PostgreSQL did not apply the benchmark transaction context");
                 }
@@ -367,7 +507,10 @@ final class BenchmarkDataset {
         }
     }
 
-    static void verifyTransactionContext(Connection connection, DatabaseIdentity databaseIdentity) throws SQLException {
+    static void verifyTransactionContext(
+            Connection connection,
+            DatabaseIdentity databaseIdentity,
+            boolean readOnly) throws SQLException {
         if (connection.getNetworkTimeout() != NETWORK_TIMEOUT_MILLISECONDS) {
             throw new IllegalStateException("Hibernate benchmark connection escaped the network deadline");
         }
@@ -411,7 +554,7 @@ final class BenchmarkDataset {
                     || !"UTF8".equals(result.getString(6))
                     || !"pg_catalog".equals(result.getString(7))
                     || !"on".equals(result.getString(8))
-                    || !"on".equals(result.getString(9))
+                    || !(readOnly ? "on" : "off").equals(result.getString(9))
                     || !"serializable".equals(result.getString(10))
                     || !"on".equals(result.getString(11))
                     || !"UTC".equals(result.getString(12))
@@ -639,16 +782,48 @@ final class BenchmarkDataset {
                     )
                     """);
             statement.execute("ALTER TABLE vev_bench.account OWNER TO " + BenchmarkDatabaseConfiguration.OWNER_ROLE);
+            statement.execute("CREATE INDEX account_email_vev_idx ON vev_bench.account "
+                    + "USING btree (tenant_id, email, id)");
+            statement.execute("CREATE INDEX account_active_vev_idx ON vev_bench.account "
+                    + "USING btree (tenant_id, active, id)");
+            statement.execute("""
+                    CREATE TABLE vev_bench.update_account (
+                        id bigint NOT NULL,
+                        tenant_id integer NOT NULL,
+                        version bigint NOT NULL,
+                        balance numeric(19,4) NOT NULL,
+                        PRIMARY KEY (tenant_id, id)
+                    ) WITH (fillfactor = 50)
+                    """);
+            statement.execute("ALTER TABLE vev_bench.update_account OWNER TO "
+                    + BenchmarkDatabaseConfiguration.OWNER_ROLE);
             statement.execute("""
                     CREATE POLICY account_tenant ON vev_bench.account
                     FOR ALL TO vev_bench_app
                     USING (tenant_id = pg_catalog.current_setting('vev.tenant_id', true)::pg_catalog.int4)
                     WITH CHECK (tenant_id = pg_catalog.current_setting('vev.tenant_id', true)::pg_catalog.int4)
                     """);
+            statement.execute("""
+                    CREATE POLICY update_account_tenant ON vev_bench.update_account
+                    FOR ALL TO vev_bench_app
+                    USING (tenant_id = pg_catalog.current_setting('vev.tenant_id', true)::pg_catalog.int4)
+                    WITH CHECK (tenant_id = pg_catalog.current_setting('vev.tenant_id', true)::pg_catalog.int4)
+                    """);
             statement.execute("ALTER TABLE vev_bench.account ENABLE ROW LEVEL SECURITY");
             statement.execute("ALTER TABLE vev_bench.account FORCE ROW LEVEL SECURITY");
+            statement.execute("ALTER TABLE vev_bench.update_account ENABLE ROW LEVEL SECURITY");
+            statement.execute("ALTER TABLE vev_bench.update_account FORCE ROW LEVEL SECURITY");
             statement.execute("GRANT USAGE ON SCHEMA vev_bench TO vev_bench_app");
-            statement.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON vev_bench.account TO vev_bench_app");
+            statement.execute("GRANT SELECT ON vev_bench.account TO vev_bench_app");
+            statement.execute("GRANT INSERT (id, tenant_id, version, email, balance, active) "
+                    + "ON vev_bench.account TO vev_bench_app");
+            statement.execute("GRANT UPDATE (version, email, balance, active) "
+                    + "ON vev_bench.account TO vev_bench_app");
+            statement.execute("GRANT SELECT ON vev_bench.update_account TO vev_bench_app");
+            statement.execute("GRANT INSERT (id, tenant_id, version, balance) "
+                    + "ON vev_bench.update_account TO vev_bench_app");
+            statement.execute("GRANT UPDATE (version, balance) "
+                    + "ON vev_bench.update_account TO vev_bench_app");
             statement.execute("DROP TABLE IF EXISTS public.vev_schema_fingerprint");
             statement.execute("""
                     CREATE TABLE public.vev_schema_fingerprint (
@@ -668,7 +843,8 @@ final class BenchmarkDataset {
 
     private static void replaceRows(Connection connection) throws SQLException {
         try (var truncate = connection.createStatement()) {
-            truncate.execute("TRUNCATE TABLE " + SCHEMA_NAME + "." + TABLE_NAME);
+            truncate.execute("TRUNCATE TABLE " + SCHEMA_NAME + "." + TABLE_NAME
+                    + ", " + SCHEMA_NAME + "." + UPDATE_TABLE_NAME);
         }
         try (var insert = connection.prepareStatement("""
                 INSERT INTO vev_bench.account
@@ -686,6 +862,19 @@ final class BenchmarkDataset {
                 insert.executeBatch();
             }
         }
+        try (var insert = connection.prepareStatement("""
+                INSERT INTO vev_bench.update_account (id, tenant_id, version, balance)
+                VALUES (?, ?, ?, ?)
+                """)) {
+            for (BenchmarkUpdateAccount account : BatchUpdateWorkload.state(0L)) {
+                insert.setLong(1, account.id());
+                insert.setInt(2, account.tenantId());
+                insert.setLong(3, account.version());
+                insert.setBigDecimal(4, account.balance());
+                insert.addBatch();
+            }
+            insert.executeBatch();
+        }
     }
 
     private static void bindInsert(PreparedStatement insert, BenchmarkAccount account) throws SQLException {
@@ -700,6 +889,7 @@ final class BenchmarkDataset {
     private static void analyzeTable(Connection connection) throws SQLException {
         try (var statement = connection.createStatement()) {
             statement.execute("ANALYZE " + SCHEMA_NAME + "." + TABLE_NAME);
+            statement.execute("ANALYZE " + SCHEMA_NAME + "." + UPDATE_TABLE_NAME);
         }
     }
 

@@ -5,7 +5,7 @@ plugins {
 
 dependencies {
     api(project(":vev-core"))
-    runtimeOnly("org.postgresql:postgresql:42.7.13")
+    api("org.postgresql:postgresql:42.7.13")
 
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")

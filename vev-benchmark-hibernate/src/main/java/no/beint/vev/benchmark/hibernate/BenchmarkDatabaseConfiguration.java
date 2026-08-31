@@ -29,12 +29,23 @@ final class BenchmarkDatabaseConfiguration {
 
     static BenchmarkDatabaseConfiguration fromEnvironment() {
         var adminConfiguration = BenchmarkAdminConfiguration.fromEnvironment();
+        var preparedJdbcUrl = adminConfiguration.runtimeJdbcUrl();
+        var runtimeJdbcUrl = nonBlankEnvironmentVariableOrDefault(
+                JDBC_URL_ENVIRONMENT_VARIABLE,
+                preparedJdbcUrl);
+        requirePreparedFixtureTarget(preparedJdbcUrl, runtimeJdbcUrl);
         return new BenchmarkDatabaseConfiguration(
-                nonBlankEnvironmentVariableOrDefault(
-                        JDBC_URL_ENVIRONMENT_VARIABLE,
-                        adminConfiguration.runtimeJdbcUrl()),
+                runtimeJdbcUrl,
                 nonBlankEnvironmentVariableOrDefault(JDBC_USER_ENVIRONMENT_VARIABLE, APPLICATION_USER),
                 environmentVariableOrDefault(JDBC_PASSWORD_ENVIRONMENT_VARIABLE, APPLICATION_PASSWORD));
+    }
+
+    static void requirePreparedFixtureTarget(String preparedJdbcUrl, String runtimeJdbcUrl) {
+        if (!preparedJdbcUrl.equals(runtimeJdbcUrl)) {
+            throw new IllegalStateException(
+                    "VEV_BENCH_JDBC_URL must exactly match the vev_bench URL derived from "
+                            + "VEV_BENCH_ADMIN_JDBC_URL");
+        }
     }
 
     Connection openConnection(boolean readOnly) throws SQLException {
@@ -57,7 +68,7 @@ final class BenchmarkDatabaseConfiguration {
         }
     }
 
-    HikariDataSource openReadOnlyPool(int poolSize) {
+    HikariDataSource openPool(int poolSize) {
         var poolConfiguration = new HikariConfig();
         poolConfiguration.setPoolName("vev-hibernate-benchmark");
         poolConfiguration.setJdbcUrl(jdbcUrl);
@@ -67,7 +78,7 @@ final class BenchmarkDatabaseConfiguration {
         poolConfiguration.setMaximumPoolSize(poolSize);
         poolConfiguration.setAutoCommit(false);
         poolConfiguration.setTransactionIsolation("TRANSACTION_SERIALIZABLE");
-        poolConfiguration.setConnectionInitSql("SET search_path = public");
+        poolConfiguration.addDataSourceProperty("currentSchema", "pg_catalog");
         poolConfiguration.setConnectionTimeout(10_000);
         poolConfiguration.setInitializationFailTimeout(10_000);
         poolConfiguration.setRegisterMbeans(false);

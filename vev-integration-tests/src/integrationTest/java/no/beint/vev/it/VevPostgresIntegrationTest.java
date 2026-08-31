@@ -4,15 +4,12 @@ import jakarta.persistence.CacheRetrieveMode;
 import jakarta.persistence.EntityAgent;
 import jakarta.persistence.EntityNotFoundException;
 import jakarta.persistence.FindOption;
-import jakarta.persistence.OptimisticLockException;
 import jakarta.persistence.PersistenceException;
 import jakarta.persistence.Timeout;
 import no.beint.vev.Batch;
 import no.beint.vev.BoundedQuery;
-import no.beint.vev.DeleteResult;
 import no.beint.vev.EntityLookup;
 import no.beint.vev.ModelIdentity;
-import no.beint.vev.MutationEffect;
 import no.beint.vev.MutationResult;
 import no.beint.vev.QueryLimit;
 import no.beint.vev.Rows;
@@ -20,6 +17,7 @@ import no.beint.vev.TenantAuthority;
 import no.beint.vev.TenantScope;
 import no.beint.vev.WriteEntities;
 import no.beint.vev.jakarta.VevEntityAgents;
+import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
 import no.beint.vev.pg.PgVev;
 import org.junit.jupiter.api.BeforeAll;
@@ -33,6 +31,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -41,13 +40,11 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -103,6 +100,289 @@ final class VevPostgresIntegrationTest {
         assertEquals(sharedId, first.id());
         assertEquals(sharedId, third.id());
         assertNotSame(first, third);
+    }
+
+    @Test
+    void batchInsertPreservesInputOrderAndRejectsDuplicateKeysAtomicallyBeforeSql() {
+        Account third = account(
+                UUID.fromString("00000000-0000-0000-0000-000000000003"),
+                7,
+                0,
+                "third@example.test",
+                "3.0000");
+        Account first = account(
+                UUID.fromString("00000000-0000-0000-0000-000000000001"),
+                7,
+                0,
+                "first@example.test",
+                "1.0000");
+        Account second = account(
+                UUID.fromString("00000000-0000-0000-0000-000000000002"),
+                7,
+                0,
+                "second@example.test",
+                "2.0000");
+        Batch<Account> input = Batch.copyOf(List.of(third, first, second));
+
+        Batch<Account> inserted = vev.write(TENANT_7, transaction ->
+                transaction.entities().insertMultiple(AccountVev.INSTANCE, input));
+
+        assertEquals(input, inserted);
+        assertEquals(List.of(third.id(), first.id(), second.id()),
+                inserted.values().stream().map(Account::id).toList());
+
+        UUID duplicateId = id("duplicate-batch-key");
+        Account duplicateFirst = account(duplicateId, 7, 0, "duplicate-first@example.test", "4.0000");
+        Account duplicateSecond = account(duplicateId, 7, 0, "duplicate-second@example.test", "5.0000");
+        Account validAfterRejection = account(
+                id("valid-after-duplicate-batch-key"),
+                7,
+                0,
+                "valid-after-rejection@example.test",
+                "6.0000");
+
+        vev.write(TENANT_7, transaction -> {
+            assertThrows(IllegalArgumentException.class, () -> transaction.entities().insertMultiple(
+                    AccountVev.INSTANCE,
+                    Batch.copyOf(List.of(duplicateFirst, duplicateSecond))));
+            assertTrue(transaction.entities().find(AccountVev.INSTANCE.key(duplicateId)).isEmpty());
+            transaction.entities().insert(AccountVev.INSTANCE, validAfterRejection);
+            return null;
+        });
+
+        assertTrue(vev.read(TENANT_7, transaction ->
+                transaction.entities().find(AccountVev.INSTANCE.key(duplicateId)).isEmpty()).booleanValue());
+        assertEquals(validAfterRejection, find(validAfterRejection.id(), TENANT_7));
+    }
+
+    @Test
+    void setBasedBatchUpdateUsesOneStatementAndReturnsExactSnapshotsInInputOrder() {
+        Account third = account(
+                UUID.fromString("00000000-0000-0000-0000-000000000013"),
+                7,
+                0,
+                "third-before@example.test",
+                "3.0000");
+        Account first = account(
+                UUID.fromString("00000000-0000-0000-0000-000000000011"),
+                7,
+                0,
+                "first-before@example.test",
+                "1.0000");
+        Account second = account(
+                UUID.fromString("00000000-0000-0000-0000-000000000012"),
+                7,
+                0,
+                "second-before@example.test",
+                "2.0000");
+        Batch<Account> originals = Batch.copyOf(List.of(third, first, second));
+        vev.write(TENANT_7, transaction ->
+                transaction.entities().insertMultiple(AccountVev.INSTANCE, originals));
+
+        Batch<Account> requested = Batch.copyOf(List.of(
+                account(third.id(), 7, 0, "third-after@example.test", "13.0000"),
+                account(first.id(), 7, 0, null, "11.0000"),
+                account(second.id(), 7, 0, "second-after@example.test", "12.0000")));
+        AtomicInteger batchUpdateStatements = new AtomicInteger();
+        TenantAuthority<IntegrationModelVev.Model, Integer> authority =
+                IntegrationModelVev.newTenantAuthority();
+        PgVev<IntegrationModelVev.Model, Integer> countedRuntime = new PgVev<>(
+                batchUpdateCountingDataSource(database.applicationDataSource(), batchUpdateStatements),
+                IntegrationModelVev.POSTGRES,
+                authority);
+        TenantScope<IntegrationModelVev.Model, Integer> tenant = authority.scope(7);
+
+        Batch<MutationResult.Applied<IntegrationModelVev.Model, Account, UUID, Long>> applied =
+                countedRuntime.write(tenant, transaction ->
+                        transaction.entities().updateMultiple(AccountVev.INSTANCE, requested));
+
+        assertEquals(1, batchUpdateStatements.get());
+        assertEquals(requested.size(), applied.size());
+        for (int index = 0; index < requested.size(); index++) {
+            Account input = requested.get(index);
+            Account expected = new Account(
+                    input.id(), input.tenantId(), 1L, input.email(), input.balance());
+            MutationResult.Applied<IntegrationModelVev.Model, Account, UUID, Long> result = applied.get(index);
+            assertSame(AccountVev.INSTANCE, result.key().entityType());
+            assertEquals(input.id(), result.key().value());
+            assertEquals(0L, result.expectedVersion());
+            assertEquals(1L, result.version());
+            assertEquals(expected, result.entity());
+            assertEquals(expected, find(input.id(), TENANT_7));
+        }
+    }
+
+    @Test
+    void staleOrMissingBatchMemberLeavesEveryRowUnchanged() {
+        Account first = account(id("batch-update-atomic-first"), 7, 0, "first@example.test", "1.0000");
+        Account second = account(id("batch-update-atomic-second"), 7, 0, "second@example.test", "2.0000");
+        vev.write(TENANT_7, transaction -> transaction.entities().insertMultiple(
+                AccountVev.INSTANCE,
+                Batch.copyOf(List.of(first, second))));
+        Account validFirst = account(first.id(), 7, 0, "first-changed@example.test", "11.0000");
+        Account staleSecond = account(second.id(), 7, 1, "second-stale@example.test", "12.0000");
+
+        IllegalStateException staleFailure = assertThrows(IllegalStateException.class, () ->
+                vev.write(TENANT_7, transaction -> transaction.entities().updateMultiple(
+                        AccountVev.INSTANCE,
+                        Batch.copyOf(List.of(validFirst, staleSecond)))));
+
+        assertEquals(
+                "Update batch was rejected atomically because one entity was stale or missing",
+                staleFailure.getMessage());
+        assertEquals(first, find(first.id(), TENANT_7));
+        assertEquals(second, find(second.id(), TENANT_7));
+
+        Account missing = account(
+                id("batch-update-atomic-missing"), 7, 0, "missing@example.test", "13.0000");
+        IllegalStateException missingFailure = assertThrows(IllegalStateException.class, () ->
+                vev.write(TENANT_7, transaction -> transaction.entities().updateMultiple(
+                        AccountVev.INSTANCE,
+                        Batch.copyOf(List.of(validFirst, missing)))));
+
+        assertEquals(
+                "Update batch was rejected atomically because one entity was stale or missing",
+                missingFailure.getMessage());
+        assertEquals(first, find(first.id(), TENANT_7));
+        assertEquals(second, find(second.id(), TENANT_7));
+        assertTrue(vev.read(TENANT_7, transaction ->
+                transaction.entities().find(AccountVev.INSTANCE.key(missing.id())).isEmpty()).booleanValue());
+    }
+
+    @Test
+    void duplicateBatchUpdateKeysAreRejectedBeforeSqlWithoutPoisoning() {
+        Account original = insert(account(
+                id("batch-update-duplicate"), 7, 0, "before@example.test", "1.0000"), TENANT_7);
+        Account duplicateFirst = account(original.id(), 7, 0, "first@example.test", "2.0000");
+        Account duplicateSecond = account(original.id(), 7, 0, "second@example.test", "3.0000");
+        AtomicInteger batchUpdateStatements = new AtomicInteger();
+        TenantAuthority<IntegrationModelVev.Model, Integer> authority =
+                IntegrationModelVev.newTenantAuthority();
+        PgVev<IntegrationModelVev.Model, Integer> countedRuntime = new PgVev<>(
+                batchUpdateCountingDataSource(database.applicationDataSource(), batchUpdateStatements),
+                IntegrationModelVev.POSTGRES,
+                authority);
+        TenantScope<IntegrationModelVev.Model, Integer> tenant = authority.scope(7);
+
+        countedRuntime.write(tenant, transaction -> {
+            assertThrows(IllegalArgumentException.class, () -> transaction.entities().updateMultiple(
+                    AccountVev.INSTANCE,
+                    Batch.copyOf(List.of(duplicateFirst, duplicateSecond))));
+            assertEquals(0, batchUpdateStatements.get());
+            assertEquals(original, transaction.entities().find(AccountVev.INSTANCE.key(original.id())).orElseThrow());
+            return null;
+        });
+
+        assertEquals(0, batchUpdateStatements.get());
+        assertEquals(original, find(original.id(), TENANT_7));
+    }
+
+    @Test
+    void caughtRejectedBatchPoisonsAndRollsBackEarlierWrites() {
+        Account first = account(id("caught-batch-first"), 7, 0, "first@example.test", "1.0000");
+        Account second = account(id("caught-batch-second"), 7, 0, "second@example.test", "2.0000");
+        vev.write(TENANT_7, transaction -> transaction.entities().insertMultiple(
+                AccountVev.INSTANCE,
+                Batch.copyOf(List.of(first, second))));
+        Account earlierWrite = account(
+                id("caught-batch-earlier-write"), 7, 0, "earlier@example.test", "3.0000");
+        Account validFirst = account(first.id(), 7, 0, "first-changed@example.test", "11.0000");
+        Account staleSecond = account(second.id(), 7, 1, "second-stale@example.test", "12.0000");
+
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, transaction -> {
+            transaction.entities().insert(AccountVev.INSTANCE, earlierWrite);
+            assertThrows(IllegalStateException.class, () -> transaction.entities().updateMultiple(
+                    AccountVev.INSTANCE,
+                    Batch.copyOf(List.of(validFirst, staleSecond))));
+            assertThrows(IllegalStateException.class, () ->
+                    transaction.entities().find(AccountVev.INSTANCE.key(first.id())));
+            return null;
+        }));
+
+        assertEquals(first, find(first.id(), TENANT_7));
+        assertEquals(second, find(second.id(), TENANT_7));
+        assertTrue(vev.read(TENANT_7, transaction ->
+                transaction.entities().find(AccountVev.INSTANCE.key(earlierWrite.id())).isEmpty()).booleanValue());
+    }
+
+    @Test
+    void jdbcArrayCleanupFailurePoisonsAndRollsBackSuccessfulBatchUpdate() {
+        Account first = account(id("array-cleanup-first"), 7, 0, "first@example.test", "1.0000");
+        Account second = account(id("array-cleanup-second"), 7, 0, "second@example.test", "2.0000");
+        vev.write(TENANT_7, transaction -> transaction.entities().insertMultiple(
+                AccountVev.INSTANCE,
+                Batch.copyOf(List.of(first, second))));
+        Batch<Account> requested = Batch.copyOf(List.of(
+                account(first.id(), 7, 0, "first-changed@example.test", "11.0000"),
+                account(second.id(), 7, 0, "second-changed@example.test", "12.0000")));
+        AtomicInteger cleanupFailures = new AtomicInteger();
+        TenantAuthority<IntegrationModelVev.Model, Integer> authority =
+                IntegrationModelVev.newTenantAuthority();
+        PgVev<IntegrationModelVev.Model, Integer> cleanupFailureRuntime = new PgVev<>(
+                arrayCleanupFailureDataSource(database.applicationDataSource(), cleanupFailures),
+                IntegrationModelVev.POSTGRES,
+                authority);
+        TenantScope<IntegrationModelVev.Model, Integer> tenant = authority.scope(7);
+
+        assertThrows(IllegalStateException.class, () -> cleanupFailureRuntime.write(tenant, transaction ->
+                transaction.entities().updateMultiple(AccountVev.INSTANCE, requested)));
+
+        assertEquals(1, cleanupFailures.get());
+        assertEquals(first, find(first.id(), TENANT_7));
+        assertEquals(second, find(second.id(), TENANT_7));
+    }
+
+    @Test
+    void concurrentRowChangeBetweenBatchPreflightAndLockFailsClosed() throws Exception {
+        Account first = account(id("concurrent-batch-first"), 7, 0, "first@example.test", "1.0000");
+        Account second = account(id("concurrent-batch-second"), 7, 0, "second@example.test", "2.0000");
+        vev.write(TENANT_7, transaction -> transaction.entities().insertMultiple(
+                AccountVev.INSTANCE,
+                Batch.copyOf(List.of(first, second))));
+        Batch<Account> requested = Batch.copyOf(List.of(
+                account(first.id(), 7, 0, "first-changed@example.test", "11.0000"),
+                account(second.id(), 7, 0, "second-changed@example.test", "12.0000")));
+
+        CompletableFuture<Throwable> updateOutcome;
+        try (Connection blocker = database.openAdminTransaction();
+             var processIdStatement = blocker.prepareStatement("SELECT pg_catalog.pg_backend_pid()");
+             var statement = blocker.prepareStatement("""
+                     UPDATE vev_it.account
+                        SET version = version + 1
+                     WHERE tenant_id = ?
+                        AND id = ?
+                        AND version = ?
+                     """)) {
+            int blockerProcessId;
+            try (var resultSet = processIdStatement.executeQuery()) {
+                assertTrue(resultSet.next());
+                blockerProcessId = resultSet.getInt(1);
+            }
+            statement.setInt(1, 7);
+            statement.setObject(2, second.id());
+            statement.setLong(3, 0L);
+            assertEquals(1, statement.executeUpdate());
+            updateOutcome = CompletableFuture.supplyAsync(() -> {
+                try {
+                    vev.write(TENANT_7, transaction ->
+                            transaction.entities().updateMultiple(AccountVev.INSTANCE, requested));
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            }, command -> Thread.ofVirtual().name("vev-concurrent-batch-update").start(command));
+            database.awaitBlockedBatchUpdate(blockerProcessId);
+            blocker.commit();
+        }
+
+        IllegalStateException serializationFailure = assertInstanceOf(
+                IllegalStateException.class,
+                updateOutcome.get(10, TimeUnit.SECONDS));
+        assertTrue(serializationFailure.getMessage().contains("SQLSTATE 40001"));
+        assertEquals(first, find(first.id(), TENANT_7));
+        assertEquals(
+                account(second.id(), 7, 1, second.email(), second.balance().toPlainString()),
+                find(second.id(), TENANT_7));
     }
 
     @Test
@@ -269,7 +549,6 @@ final class VevPostgresIntegrationTest {
             if (!(applied instanceof MutationResult.Applied<?, ?, ?, ?> update)) {
                 throw new AssertionError("Expected applied update");
             }
-            assertEquals(MutationEffect.UPDATED, update.effect());
             assertEquals(1L, update.version());
             assertEquals("second@example.test", assertInstanceOf(Account.class, update.entity()).email());
 
@@ -282,7 +561,7 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
-    void nullableEmailRoundTripsThroughInsertFindUpdateAndUpsert() {
+    void nullableEmailRoundTripsThroughInsertFindAndUpdate() {
         UUID accountId = id("nullable-email");
         Account inserted = insert(account(accountId, 7, 0, null, "1.0000"), TENANT_7);
 
@@ -300,19 +579,6 @@ final class VevPostgresIntegrationTest {
 
         assertEquals(1L, updated.version());
         assertNull(updated.email());
-        assertNull(find(accountId, TENANT_7).email());
-
-        Account upserted = vev.write(TENANT_7, transaction -> {
-            Account changed = new Account(
-                    updated.id(), updated.tenantId(), updated.version(), null, new BigDecimal("3.0000"));
-            MutationResult<IntegrationModelVev.Model, Account, UUID, Long> result =
-                    transaction.entities().upsert(AccountVev.INSTANCE, changed);
-            MutationResult.Applied<?, ?, ?, ?> applied = assertInstanceOf(MutationResult.Applied.class, result);
-            return assertInstanceOf(Account.class, applied.entity());
-        });
-
-        assertEquals(2L, upserted.version());
-        assertNull(upserted.email());
         assertNull(find(accountId, TENANT_7).email());
     }
 
@@ -467,6 +733,11 @@ final class VevPostgresIntegrationTest {
             assertThrows(IllegalArgumentException.class, () -> transaction.entities().update(
                     AccountVev.INSTANCE,
                     account(overflowId, 7, Long.MAX_VALUE, "overflow@example.test", "1.0000")));
+            assertThrows(IllegalArgumentException.class, () -> transaction.entities().updateMultiple(
+                    AccountVev.INSTANCE,
+                    Batch.copyOf(List.of(
+                            account(overflowId, 7, Long.MAX_VALUE, "batch-overflow@example.test", "1.0000"),
+                            account(id("batch-after-overflow"), 7, 0, "batch-valid@example.test", "1.0000")))));
             Account inserted = transaction.entities().insert(
                     AccountVev.INSTANCE,
                     account(validId, 7, 0, "valid-after-overflow@example.test", "2.0000"));
@@ -513,114 +784,6 @@ final class VevPostgresIntegrationTest {
 
         assertTrue(vev.read(TENANT_7, transaction ->
                 transaction.entities().find(AccountVev.INSTANCE.key(accountId))).isPresent());
-    }
-
-    @Test
-    void atomicUpsertDistinguishesInsertAndUpdate() {
-        UUID accountId = id("upsert");
-        Account initial = account(accountId, 7, 0, "created@example.test", "4.00");
-
-        Account inserted = vev.write(TENANT_7, transaction -> {
-            MutationResult<IntegrationModelVev.Model, Account, UUID, Long> result =
-                    transaction.entities().upsert(AccountVev.INSTANCE, initial);
-            if (!(result instanceof MutationResult.Applied<?, ?, ?, ?> applied)) {
-                throw new AssertionError("Expected applied upsert");
-            }
-            assertEquals(MutationEffect.INSERTED, applied.effect());
-            return assertInstanceOf(Account.class, applied.entity());
-        });
-
-        vev.write(TENANT_7, transaction -> {
-            Account changed = new Account(
-                    inserted.id(), inserted.tenantId(), inserted.version(), "updated@example.test", inserted.balance());
-            MutationResult<IntegrationModelVev.Model, Account, UUID, Long> result =
-                    transaction.entities().upsert(AccountVev.INSTANCE, changed);
-            if (!(result instanceof MutationResult.Applied<?, ?, ?, ?> applied)) {
-                throw new AssertionError("Expected applied upsert");
-            }
-            assertEquals(MutationEffect.UPDATED, applied.effect());
-            assertEquals(1L, applied.version());
-            return null;
-        });
-
-        vev.write(TENANT_7, transaction -> {
-            MutationResult<IntegrationModelVev.Model, Account, UUID, Long> stale = transaction.entities().upsert(
-                    AccountVev.INSTANCE,
-                    new Account(accountId, 7, 0L, "stale@example.test", inserted.balance()));
-            assertInstanceOf(MutationResult.Conflict.class, stale);
-
-            UUID missingId = id("upsert-missing-nonzero-version");
-            MutationResult<IntegrationModelVev.Model, Account, UUID, Long> missing = transaction.entities().upsert(
-                    AccountVev.INSTANCE,
-                    account(missingId, 7, 4, "must-not-resurrect@example.test", "4.00"));
-            assertInstanceOf(MutationResult.Missing.class, missing);
-            assertTrue(transaction.entities().find(AccountVev.INSTANCE.key(missingId)).isEmpty());
-            return null;
-        });
-    }
-
-    @Test
-    void concurrentInvisibleInsertAbortsTheSerializableTransaction() throws Exception {
-        UUID accountId = id("concurrent-upsert");
-        Account winner = account(accountId, 7, 0, "winner@example.test", "7.0000");
-        Account contender = account(accountId, 7, 0, "contender@example.test", "8.0000");
-
-        try (Connection winningTransaction = database.openApplicationTransaction(7);
-             var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            database.insertUncommittedAccount(winningTransaction, winner);
-            Future<MutationResult<IntegrationModelVev.Model, Account, UUID, Long>> future = executor.submit(() ->
-                    vev.write(TENANT_7, transaction ->
-                            transaction.entities().upsert(AccountVev.INSTANCE, contender)));
-            database.awaitBlockedUpsert();
-            winningTransaction.commit();
-
-            ExecutionException failure = assertThrows(
-                    ExecutionException.class,
-                    () -> future.get(5, TimeUnit.SECONDS));
-            IllegalStateException serializationFailure =
-                    assertInstanceOf(IllegalStateException.class, failure.getCause());
-            assertEquals("PostgreSQL operation failed [SQLSTATE 40001]", serializationFailure.getMessage());
-        }
-
-        assertEquals(winner, find(accountId, TENANT_7));
-    }
-
-    @Test
-    void versionedDeleteDistinguishesConflictAndSuccess() {
-        UUID accountId = id("delete");
-        Account inserted = insert(account(accountId, 7, 0, "delete@example.test", "9.00"), TENANT_7);
-
-        vev.write(TENANT_7, transaction -> {
-            DeleteResult<IntegrationModelVev.Model, Account, UUID, Long> conflict = transaction.entities().delete(
-                    AccountVev.INSTANCE.versionedKey(accountId, inserted.version() + 1));
-            assertInstanceOf(DeleteResult.Conflict.class, conflict);
-
-            DeleteResult<IntegrationModelVev.Model, Account, UUID, Long> deleted = transaction.entities().delete(
-                    AccountVev.INSTANCE.versionedKey(accountId, inserted.version()));
-            assertInstanceOf(DeleteResult.Deleted.class, deleted);
-            return null;
-        });
-
-        assertFalse(vev.read(TENANT_7, transaction -> transaction.entities().find(AccountVev.INSTANCE.key(accountId))).isPresent());
-    }
-
-    @Test
-    void batchDeleteValidatesEveryVersionBeforeIssuingSql() {
-        Account first = insert(account(id("batch-delete-first"), 7, 0, "first@example.test", "1.00"), TENANT_7);
-        Account second = insert(account(id("batch-delete-second"), 7, 0, "second@example.test", "2.00"), TENANT_7);
-
-        vev.write(TENANT_7, transaction -> {
-            assertThrows(IllegalArgumentException.class, () -> transaction.entities().deleteMultiple(Batch.copyOf(List.of(
-                    AccountVev.INSTANCE.versionedKey(first.id(), first.version()),
-                    AccountVev.INSTANCE.versionedKey(second.id(), -1L))
-            )));
-            assertTrue(transaction.entities().find(AccountVev.INSTANCE.key(first.id())).isPresent());
-            assertTrue(transaction.entities().find(AccountVev.INSTANCE.key(second.id())).isPresent());
-            return null;
-        });
-
-        assertEquals(first, find(first.id(), TENANT_7));
-        assertEquals(second, find(second.id(), TENANT_7));
     }
 
     @Test
@@ -694,6 +857,112 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void indexedEqualityQueriesAreBoundedTenantScopedAndKeysetSafe() {
+        UUID firstId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID secondId = UUID.fromString("00000000-0000-0000-0000-000000000002");
+        UUID thirdId = UUID.fromString("00000000-0000-0000-0000-000000000003");
+        UUID fourthId = UUID.fromString("00000000-0000-0000-0000-000000000004");
+        UUID fifthId = UUID.fromString("00000000-0000-0000-0000-000000000005");
+        String sharedEmail = "shared@example.test";
+
+        vev.write(TENANT_7, transaction -> {
+            transaction.entities().insertMultiple(AccountVev.INSTANCE, Batch.copyOf(List.of(
+                    account(firstId, 7, 0, sharedEmail, "1.0000"),
+                    account(secondId, 7, 0, null, "2.0000"),
+                    account(thirdId, 7, 0, sharedEmail, "3.0000"),
+                    account(fourthId, 7, 0, null, "4.0000"),
+                    account(fifthId, 7, 0, sharedEmail, "5.0000"))));
+            return null;
+        });
+        insert(account(firstId, 8, 0, sharedEmail, "8.0000"), TENANT_8);
+        insert(account(secondId, 8, 0, null, "8.0000"), TENANT_8);
+
+        vev.read(TENANT_7, transaction -> {
+            Rows<Account> firstPage = transaction.entities().many(
+                    PgQueries.equal(AccountVev.EMAIL, sharedEmail, new QueryLimit(2)));
+            assertEquals(List.of(firstId, thirdId),
+                    firstPage.values().stream().map(Account::id).toList());
+            assertTrue(firstPage.hasMore());
+
+            Rows<Account> finalPage = transaction.entities().many(PgQueries.equalAfter(
+                    AccountVev.EMAIL,
+                    sharedEmail,
+                    AccountVev.INSTANCE.key(thirdId),
+                    new QueryLimit(2)));
+            assertEquals(List.of(fifthId), finalPage.values().stream().map(Account::id).toList());
+            assertFalse(finalPage.hasMore());
+
+            Rows<Account> firstNullPage = transaction.entities().many(
+                    PgQueries.isNull(AccountVev.EMAIL, new QueryLimit(1)));
+            assertEquals(List.of(secondId),
+                    firstNullPage.values().stream().map(Account::id).toList());
+            assertTrue(firstNullPage.hasMore());
+
+            Rows<Account> finalNullPage = transaction.entities().many(PgQueries.isNullAfter(
+                    AccountVev.EMAIL,
+                    AccountVev.INSTANCE.key(secondId),
+                    new QueryLimit(2)));
+            assertEquals(List.of(fourthId),
+                    finalNullPage.values().stream().map(Account::id).toList());
+            assertFalse(finalNullPage.hasMore());
+            return null;
+        });
+
+        vev.read(TENANT_8, transaction -> {
+            Rows<Account> tenantEquality = transaction.entities().many(
+                    PgQueries.equal(AccountVev.EMAIL, sharedEmail, new QueryLimit(2)));
+            assertEquals(List.of(firstId), tenantEquality.values().stream().map(Account::id).toList());
+            assertFalse(tenantEquality.hasMore());
+
+            Rows<Account> tenantNull = transaction.entities().many(
+                    PgQueries.isNull(AccountVev.EMAIL, new QueryLimit(2)));
+            assertEquals(List.of(secondId), tenantNull.values().stream().map(Account::id).toList());
+            assertFalse(tenantNull.hasMore());
+            return null;
+        });
+    }
+
+    @Test
+    void forgedNullableIndexIsRejectedBeforeSqlWithoutPoisoningTheTransaction() {
+        Account existing = insert(account(
+                id("forged-index-existing"), 7, 0, null, "1.0000"), TENANT_7);
+        PgNullableIndex<IntegrationModelVev.Model, Account, UUID, String> forged = new PgNullableIndex<>(
+                AccountVev.INSTANCE,
+                AccountVev.EMAIL.indexName(),
+                AccountVev.EMAIL.columnIndex(),
+                String.class);
+        BoundedQuery<IntegrationModelVev.Model, Account> forgedQuery =
+                PgQueries.isNull(forged, new QueryLimit(1));
+
+        vev.read(TENANT_7, transaction -> {
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> transaction.entities().many(forgedQuery));
+            assertEquals("Index token is not from this generated Vev model", failure.getMessage());
+            assertEquals(existing, transaction.entities().find(AccountVev.INSTANCE.key(existing.id())).orElseThrow());
+            return null;
+        });
+    }
+
+    @Test
+    void oversizedIndexedEqualityValueIsRejectedBeforeSqlWithoutPoisoningTheTransaction() {
+        Account existing = insert(account(
+                id("oversized-index-existing"), 7, 0, "existing@example.test", "1.0000"), TENANT_7);
+
+        vev.read(TENANT_7, transaction -> {
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> transaction.entities().many(PgQueries.equal(
+                            AccountVev.EMAIL,
+                            "x".repeat(256),
+                            new QueryLimit(1))));
+            assertEquals("email exceeds its generated character bound", failure.getMessage());
+            assertEquals(existing, transaction.entities().find(AccountVev.INSTANCE.key(existing.id())).orElseThrow());
+            return null;
+        });
+    }
+
+    @Test
     void appendOnlyInstantEntityUsesDirectGeneratedCodec() {
         AuditEvent event = new AuditEvent(
                 id("audit"),
@@ -710,6 +979,36 @@ final class VevPostgresIntegrationTest {
 
         assertEquals(event, inserted);
         assertEquals(event, loaded);
+    }
+
+    @Test
+    void setBasedBatchInsertRoundTripsEveryTemporalArrayCodecInInputOrder() {
+        AuditEvent second = new AuditEvent(
+                id("audit-batch-second"),
+                7,
+                Instant.parse("2026-08-30T12:34:57.654321Z"),
+                LocalDateTime.parse("2026-08-30T14:34:57.654321"),
+                LocalDate.parse("2026-08-31"),
+                "SECOND");
+        AuditEvent first = new AuditEvent(
+                id("audit-batch-first"),
+                7,
+                Instant.parse("2026-08-30T12:34:56.123456Z"),
+                LocalDateTime.parse("2026-08-30T14:34:56.123456"),
+                LocalDate.parse("2026-08-30"),
+                "FIRST");
+        Batch<AuditEvent> expected = Batch.copyOf(List.of(second, first));
+
+        Batch<AuditEvent> inserted = vev.write(TENANT_7, transaction ->
+                transaction.entities().insertMultiple(AuditEventVev.INSTANCE, expected));
+        Batch<EntityLookup<IntegrationModelVev.Model, AuditEvent, UUID>> loaded =
+                vev.read(TENANT_7, transaction -> transaction.entities().findMultiple(
+                        AuditEventVev.INSTANCE,
+                        Batch.copyOf(List.of(second.id(), first.id()))));
+
+        assertEquals(expected, inserted);
+        assertEquals(second, ((EntityLookup.Found<?, AuditEvent, ?>) loaded.get(0)).entity());
+        assertEquals(first, ((EntityLookup.Found<?, AuditEvent, ?>) loaded.get(1)).entity());
     }
 
     @Test
@@ -804,7 +1103,6 @@ final class VevPostgresIntegrationTest {
                 id("agent-batch-valid-before-wrong-model"), 7, 0, "model@example.test", "12.00");
 
         VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
-            assertThrows(IllegalArgumentException.class, () -> agent.delete(tenantEight));
             assertThrows(IllegalArgumentException.class, () ->
                     agent.insertMultiple(List.of(validBeforeWrongTenant, wrongTenant)));
             assertNull(agent.find(Account.class, validBeforeWrongTenant.id()));
@@ -859,38 +1157,17 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
-    void jakartaEntityAgentRejectsBatchDeleteBeforeSql() {
+    void jakartaEntityAgentRejectsEveryDeleteBeforeSql() {
         Account first = insert(account(id("agent-batch-first"), 7, 0, "first@example.test", "1.00"), TENANT_7);
         Account second = insert(account(id("agent-batch-second"), 7, 0, "second@example.test", "2.00"), TENANT_7);
         VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
+            assertThrows(UnsupportedOperationException.class, () -> agent.delete(first));
             assertThrows(UnsupportedOperationException.class, () -> agent.deleteMultiple(List.of(first, second)));
             assertEquals(first, agent.get(Account.class, first.id()));
             assertEquals(second, agent.get(Account.class, second.id()));
             return null;
         });
 
-        assertEquals(first, find(first.id(), TENANT_7));
-        assertEquals(second, find(second.id(), TENANT_7));
-    }
-
-    @Test
-    void jakartaEntityAgentCaughtOptimisticFailureRollsBackEveryEarlierEffect() {
-        Account first = insert(account(
-                id("agent-rollback-first"), 7, 0, "first@example.test", "1.0000"), TENANT_7);
-        Account second = insert(account(
-                id("agent-rollback-second"), 7, 0, "second@example.test", "2.0000"), TENANT_7);
-        Account staleSecond = new Account(
-                second.id(), second.tenantId(), second.version() + 1, second.email(), second.balance());
-
-        OptimisticLockException failure = assertThrows(OptimisticLockException.class, () ->
-                VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
-                    agent.delete(first);
-                    assertThrows(OptimisticLockException.class, () -> agent.delete(staleSecond));
-                    assertThrows(IllegalStateException.class, () -> agent.get(Account.class, first.id()));
-                    return null;
-                }));
-
-        assertEquals("Optimistic delete failed for " + Account.class.getName(), failure.getMessage());
         assertEquals(first, find(first.id(), TENANT_7));
         assertEquals(second, find(second.id(), TENANT_7));
     }
@@ -1042,6 +1319,132 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void bootstrapAcceptsTheExactGeneratedIndex() {
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void bootstrapRejectsAMissingGeneratedIndex() throws SQLException {
+        database.setAccountEmailIndexPresent(false);
+        try {
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexPresent(true);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAnExtraIndex() throws SQLException {
+        database.setExtraAccountIndex(true);
+        try {
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setExtraAccountIndex(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAGeneratedIndexWithTheWrongShape() throws SQLException {
+        database.setAccountEmailIndexWrongShape(true);
+        try {
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexWrongShape(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAUniqueGeneratedIndex() throws SQLException {
+        try {
+            database.setAccountEmailIndexUnique(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexUnique(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAPartialGeneratedIndex() throws SQLException {
+        try {
+            database.setAccountEmailIndexPartial(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexPartial(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAnExpressionGeneratedIndex() throws SQLException {
+        try {
+            database.setAccountEmailIndexExpression(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexExpression(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAGeneratedIndexWithAnIncludedColumn() throws SQLException {
+        try {
+            database.setAccountEmailIndexIncludingBalance(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexIncludingBalance(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsADescendingGeneratedIndexKey() throws SQLException {
+        try {
+            database.setAccountEmailIndexDescending(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexDescending(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsANullsFirstGeneratedIndexKey() throws SQLException {
+        try {
+            database.setAccountEmailIndexNullsFirst(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexNullsFirst(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAGeneratedIndexWithANondefaultCollation() throws SQLException {
+        try {
+            database.setAccountEmailIndexNondefaultCollation(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexNondefaultCollation(false);
+        }
+    }
+
+    @Test
+    void bootstrapRejectsAGeneratedIndexWithReloptions() throws SQLException {
+        try {
+            database.setAccountEmailIndexReloptions(true);
+            assertThrows(IllegalStateException.class, () ->
+                    runtime(database.applicationDataSource()));
+        } finally {
+            database.setAccountEmailIndexReloptions(false);
+        }
+    }
+
+    @Test
     void bootstrapRejectsUnsafeStorageConstraintsAndShadowedPolicyFunctions() throws SQLException {
         database.setAccountUnlogged(true);
         try {
@@ -1049,14 +1452,6 @@ final class VevPostgresIntegrationTest {
                     runtime(database.applicationDataSource()));
         } finally {
             database.setAccountUnlogged(false);
-        }
-
-        database.setSecondaryIndex(true);
-        try {
-            assertThrows(IllegalStateException.class, () ->
-                    runtime(database.applicationDataSource()));
-        } finally {
-            database.setSecondaryIndex(false);
         }
 
         database.setForeignKeyTouchingAccount(true);
@@ -1085,7 +1480,7 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
-    void checkoutInstallsTrustedSearchPathBeforeParsingConfiguration() throws SQLException {
+    void checkoutRejectsAnUntrustedSearchPathBeforeParsingConfiguration() throws SQLException {
         database.installHostileBootstrapOperator();
         try {
             assertTrue(database.invokeHostileBootstrapOperatorProbe());
@@ -1094,19 +1489,10 @@ final class VevPostgresIntegrationTest {
 
             TenantAuthority<IntegrationModelVev.Model, Integer> authority =
                     IntegrationModelVev.newTenantAuthority();
-            PgVev<IntegrationModelVev.Model, Integer> hostilePoolRuntime = new PgVev<>(
+            assertThrows(IllegalStateException.class, () -> new PgVev<>(
                     database.hostileSearchPathDataSource(),
                     IntegrationModelVev.POSTGRES,
-                    authority);
-            TenantScope<IntegrationModelVev.Model, Integer> tenant = authority.scope(7);
-            AtomicInteger workInvocations = new AtomicInteger();
-
-            hostilePoolRuntime.write(tenant, transaction -> {
-                workInvocations.incrementAndGet();
-                return null;
-            });
-
-            assertEquals(1, workInvocations.get());
+                    authority));
             assertEquals(0L, database.hostileBootstrapTripwireCount());
         } finally {
             database.removeHostileBootstrapOperator();
@@ -1198,6 +1584,104 @@ final class VevPostgresIntegrationTest {
                         return cleanDataSource.getConnection();
                     }
                     return nonClosing(retainedConnection);
+                });
+    }
+
+    private static DataSource batchUpdateCountingDataSource(
+            DataSource delegate,
+            AtomicInteger batchUpdateStatements) {
+        return (DataSource) Proxy.newProxyInstance(
+                VevPostgresIntegrationTest.class.getClassLoader(),
+                new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (method.getName().equals("getConnection")
+                                && result instanceof Connection connection) {
+                            return batchUpdateCountingConnection(connection, batchUpdateStatements);
+                        }
+                        return result;
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+    }
+
+    private static Connection batchUpdateCountingConnection(
+            Connection delegate,
+            AtomicInteger batchUpdateStatements) {
+        return (Connection) Proxy.newProxyInstance(
+                VevPostgresIntegrationTest.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                (proxy, method, arguments) -> {
+                    if (method.getName().equals("prepareStatement")
+                            && arguments != null
+                            && arguments.length > 0
+                            && arguments[0] instanceof String sql
+                            && sql.contains("AS (UPDATE \"vev_it\".\"account\" AS \"__vev_target\"")) {
+                        batchUpdateStatements.incrementAndGet();
+                    }
+                    try {
+                        return method.invoke(delegate, arguments);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+    }
+
+    private static DataSource arrayCleanupFailureDataSource(
+            DataSource delegate,
+            AtomicInteger cleanupFailures) {
+        return (DataSource) Proxy.newProxyInstance(
+                VevPostgresIntegrationTest.class.getClassLoader(),
+                new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (method.getName().equals("getConnection")
+                                && result instanceof Connection connection) {
+                            return arrayCleanupFailureConnection(connection, cleanupFailures);
+                        }
+                        return result;
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+    }
+
+    private static Connection arrayCleanupFailureConnection(
+            Connection delegate,
+            AtomicInteger cleanupFailures) {
+        return (Connection) Proxy.newProxyInstance(
+                VevPostgresIntegrationTest.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (method.getName().equals("createArrayOf") && result instanceof Array array) {
+                            return arrayWithOneCleanupFailure(array, cleanupFailures);
+                        }
+                        return result;
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
+    }
+
+    private static Array arrayWithOneCleanupFailure(Array delegate, AtomicInteger cleanupFailures) {
+        return (Array) Proxy.newProxyInstance(
+                VevPostgresIntegrationTest.class.getClassLoader(),
+                new Class<?>[]{Array.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (method.getName().equals("free") && cleanupFailures.compareAndSet(0, 1)) {
+                            throw new SQLException("synthetic JDBC array cleanup failure");
+                        }
+                        return result;
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
                 });
     }
 

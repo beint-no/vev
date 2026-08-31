@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "no.beint.vev"
-version = "0.1.0-SNAPSHOT"
+version = "0.2.0-SNAPSHOT"
 
 val publicModules = setOf("vev-core", "vev-postgres", "vev-processor", "vev-jakarta4")
 

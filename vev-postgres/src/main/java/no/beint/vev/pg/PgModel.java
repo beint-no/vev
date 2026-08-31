@@ -3,6 +3,7 @@ package no.beint.vev.pg;
 import no.beint.vev.EntityType;
 import no.beint.vev.ModelIdentity;
 import no.beint.vev.QueryLimit;
+import no.beint.vev.VevIndex;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
 
@@ -73,6 +74,7 @@ public final class PgModel<M, T> {
         Map<EntityType<M, ?, ?>, PgPlan<M, ?, ?, T>> byIdentity = new IdentityHashMap<>();
         Map<Class<?>, PgPlan<M, ?, ?, T>> byJavaType = new java.util.HashMap<>();
         Set<String> mappedTables = new HashSet<>();
+        Set<String> mappedIndexes = new HashSet<>();
         Set<String> logicalNames = new HashSet<>();
         Class<T> discoveredTenantType = null;
         for (PgPlan<M, ?, ?, T> plan : snapshots) {
@@ -92,10 +94,24 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException("Multiple entity plans map the same PostgreSQL table: "
                         + plan.schemaName() + '.' + plan.tableName());
             }
+            for (PgIndex<M, ?, ?, ?> index : plan.indexes()) {
+                String qualifiedIndex = plan.schemaName() + '.' + index.indexName();
+                if (!mappedIndexes.add(qualifiedIndex)) {
+                    throw new IllegalArgumentException(
+                            "Duplicate PostgreSQL index name in schema " + plan.schemaName() + ": "
+                                    + index.indexName());
+                }
+            }
             if (discoveredTenantType == null) {
                 discoveredTenantType = plan.tenantCodec().javaType();
             } else if (discoveredTenantType != plan.tenantCodec().javaType()) {
                 throw new IllegalArgumentException("All entities in one Vev model must use the same tenant key type");
+            }
+        }
+        for (String mappedIndex : mappedIndexes) {
+            if (mappedTables.contains(mappedIndex)) {
+                throw new IllegalArgumentException(
+                        "Generated PostgreSQL index collides with a mapped relation: " + mappedIndex);
             }
         }
         this.tenantType = Objects.requireNonNull(discoveredTenantType, "tenantType");
@@ -201,6 +217,65 @@ public final class PgModel<M, T> {
             throw new IllegalArgumentException(
                     "Append-only entity plan must not expose a version column: " + plan.logicalName());
         }
+        validateIndexes(plan, id, tenant);
+    }
+
+    private static void validateIndexes(PgPlan<?, ?, ?, ?> plan, PgColumn id, PgColumn tenant) {
+        Set<String> names = new HashSet<>();
+        Set<Integer> indexedColumns = new HashSet<>();
+        for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
+            requireIdentifier(index.indexName(), "index", plan.logicalName());
+            if (!names.add(index.indexName())) {
+                throw new IllegalArgumentException(
+                        "Duplicate generated index name for " + plan.logicalName() + ": " + index.indexName());
+            }
+            if (index.entityPlan() != plan.source()) {
+                throw new IllegalArgumentException(
+                        "Generated index does not belong to its captured entity plan: " + index.indexName());
+            }
+            int columnIndex = index.columnIndex();
+            if (columnIndex < 0 || columnIndex >= plan.columns().size() || !indexedColumns.add(columnIndex)) {
+                throw new IllegalArgumentException(
+                        "Generated index has an invalid or duplicate component position: " + index.indexName());
+            }
+            PgColumn value = plan.columns().get(columnIndex);
+            if (value.role() != PgColumn.Role.VALUE) {
+                throw new IllegalArgumentException(
+                        "Generated indexes may target only ordinary value columns: " + index.indexName());
+            }
+            if (index.valueType() != value.codec().javaType()) {
+                throw new IllegalArgumentException(
+                        "Generated index value type does not match its PostgreSQL codec: " + index.indexName());
+            }
+            boolean nullableToken = index instanceof PgNullableIndex<?, ?, ?, ?>;
+            if (nullableToken != value.nullable()) {
+                throw new IllegalArgumentException(
+                        "Generated index nullability does not match its mapped column: " + index.indexName());
+            }
+            if (value.codec() == PgCodecs.STRING
+                    && value.maximumLength() > VevIndex.MAXIMUM_STRING_LENGTH) {
+                throw new IllegalArgumentException(
+                        "Indexed String columns must not exceed " + VevIndex.MAXIMUM_STRING_LENGTH
+                                + " code points: " + index.indexName());
+            }
+            long maximumKeyBytes = Math.addExact(
+                    Math.addExact(maximumIndexKeyBytes(id), maximumIndexKeyBytes(tenant)),
+                    maximumIndexKeyBytes(value));
+            if (maximumKeyBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
+                throw new IllegalArgumentException(
+                        "Generated index can exceed Vev's conservative B-tree key budget: " + index.indexName());
+            }
+        }
+    }
+
+    private static long maximumIndexKeyBytes(PgColumn column) {
+        if (column.codec() == PgCodecs.STRING) {
+            return Math.multiplyExact(4L, column.maximumLength());
+        }
+        if (column.codec() == PgCodecs.BIG_DECIMAL) {
+            return Math.addExact(64L, Math.multiplyExact(2L, column.numericPrecision()));
+        }
+        return 64L;
     }
 
     private static PgColumn uniqueRole(

@@ -3,6 +3,7 @@ package no.beint.vev.pg.spi;
 import no.beint.vev.EntityType;
 import no.beint.vev.pg.PgCodec;
 import no.beint.vev.pg.PgColumn;
+import no.beint.vev.pg.PgIndex;
 
 import java.util.List;
 
@@ -65,6 +66,13 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * @return stable, non-empty ordered column list
      */
     List<PgColumn> columns();
+
+    /**
+     * Returns the complete generated secondary-index requirements for this entity.
+     *
+     * @return stable immutable index-token list
+     */
+    List<PgIndex<M, E, K, ?>> indexes();
 
     /**
      * Reads one mapped value from a detached entity snapshot.

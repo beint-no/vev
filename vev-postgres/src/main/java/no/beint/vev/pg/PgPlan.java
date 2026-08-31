@@ -2,12 +2,15 @@ package no.beint.vev.pg;
 
 import no.beint.vev.EntityKey;
 import no.beint.vev.ModelIdentity;
+import no.beint.vev.VevIndex;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
 import no.beint.vev.pg.spi.PgVersionedEntityPlan;
 
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 class PgPlan<M, E, K, T> {
@@ -22,6 +25,8 @@ class PgPlan<M, E, K, T> {
     private final String tableName;
     private final String tenantColumn;
     private final List<PgColumn> columns;
+    private final List<PgIndex<M, E, K, ?>> indexes;
+    private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
 
     PgPlan(PgEntityPlan<M, E, K, T> source) {
@@ -44,6 +49,16 @@ class PgPlan<M, E, K, T> {
             boundedColumns.add(Objects.requireNonNull(column, "column"));
         }
         this.columns = List.copyOf(boundedColumns);
+        List<PgIndex<M, E, K, ?>> boundedIndexes = new ArrayList<>(VevIndex.MAXIMUM_INDEXES_PER_ENTITY);
+        for (PgIndex<M, E, K, ?> index : Objects.requireNonNull(source.indexes(), "indexes")) {
+            if (boundedIndexes.size() == VevIndex.MAXIMUM_INDEXES_PER_ENTITY) {
+                throw new IllegalArgumentException("Entity plan exceeds Vev's "
+                        + VevIndex.MAXIMUM_INDEXES_PER_ENTITY + "-index safety bound");
+            }
+            boundedIndexes.add(Objects.requireNonNull(index, "index"));
+        }
+        this.indexes = List.copyOf(boundedIndexes);
+        this.indexSql = new IdentityHashMap<>();
     }
 
     static PgPlan<?, ?, ?, ?> capture(PgEntityPlan<?, ?, ?, ?> source) {
@@ -106,6 +121,10 @@ class PgPlan<M, E, K, T> {
         return columns;
     }
 
+    List<PgIndex<M, E, K, ?>> indexes() {
+        return indexes;
+    }
+
     Object columnValue(E entity, int columnIndex) {
         return source.columnValue(entity, columnIndex);
     }
@@ -131,9 +150,20 @@ class PgPlan<M, E, K, T> {
             throw new IllegalStateException("PostgreSQL SQL was already compiled for " + logicalName);
         }
         sql = Objects.requireNonNull(compiledSql, "compiledSql");
+        for (PgIndex<M, E, K, ?> index : indexes) {
+            indexSql.put(index, compiledSql.index(index));
+        }
     }
 
     PgSql sql() {
         return Objects.requireNonNull(sql, "sql");
+    }
+
+    PgIndexSql indexSql(PgIndex<M, E, K, ?> index) {
+        PgIndexSql statements = indexSql.get(Objects.requireNonNull(index, "index"));
+        if (statements == null) {
+            throw new IllegalArgumentException("Index token is not from this generated Vev model");
+        }
+        return statements;
     }
 }

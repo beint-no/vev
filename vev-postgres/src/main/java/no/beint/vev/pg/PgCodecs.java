@@ -44,7 +44,8 @@ public final class PgCodecs {
                 java.time.OffsetDateTime value = resultSet.getObject(index, java.time.OffsetDateTime.class);
                 return value == null ? null : value.toInstant();
             },
-            (statement, index, value) -> statement.setObject(index, value.atOffset(java.time.ZoneOffset.UTC)));
+            (statement, index, value) -> statement.setObject(index, value.atOffset(java.time.ZoneOffset.UTC)),
+            value -> value.atOffset(java.time.ZoneOffset.UTC));
     private static final Set<PgCodec<?>> STANDARD = Set.of(
             BOOLEAN, INTEGER, LONG, SHORT, STRING, UUID, BIG_DECIMAL,
             LOCAL_DATE, LOCAL_DATE_TIME, INSTANT);
@@ -62,6 +63,15 @@ public final class PgCodecs {
             SqlReader<T> reader,
             SqlBinder<T> binder) {
         return new PgCodec<>(javaType, arrayElementType, reader::read, binder::bind);
+    }
+
+    private static <T> PgCodec<T> codec(
+            Class<T> javaType,
+            String arrayElementType,
+            SqlReader<T> reader,
+            SqlBinder<T> binder,
+            java.util.function.Function<T, Object> arrayElement) {
+        return new PgCodec<>(javaType, arrayElementType, reader::read, binder::bind, arrayElement);
     }
 
     private static <T> PgCodec<T> objectCodec(Class<T> javaType, String arrayElementType) {

@@ -17,7 +17,7 @@ Availability attacks, a compromised application process, a malicious JDBC driver
 - application code fabricates a tenant value or scope, crosses generated models, or reuses one authority across database runtimes;
 - a task inherits a connection or tenant context across a concurrent boundary;
 - arbitrary native SQL bypasses generated predicates;
-- a secondary uniqueness rule, exclusion constraint, or foreign key adds unmodeled cross-tenant semantics;
+- an undeclared, unique, malformed, partial, or expression index, exclusion constraint, or foreign key adds unmodeled cross-tenant semantics;
 - connection pooling leaks session state such as `search_path`, role, or row-security variables;
 - diagnostics expose tenant data or bound values.
 
@@ -31,13 +31,13 @@ Tenant isolation must be structural, not an optional query filter:
 4. Every generated read and write shape contains the tenant predicate where row ownership matters.
 5. Inserts validate that the immutable entity tenant equals the active tenant before binding either value; a different entity tenant fails before SQL.
 6. The active tenant scope is immutable and pinned for the lexical transaction. A change poisons the transaction.
-7. Batch and bulk operations retain the same invariant and remain bounded.
+7. Batch and bulk operations retain the same invariant and remain bounded. Batch insert rejects duplicate entity keys before one typed-array statement; batch update rejects duplicates before its one guarded typed-array statement and rolls back the complete lexical transaction if one row is stale, missing, or returned unexpectedly.
 8. Native SQL is excluded from the tenant-safe profile unless a separate compiler can prove equivalent constraints.
-9. Ordinary inheritance, secondary indexes, and foreign keys touching mapped tables are rejected until their full tenant and execution semantics are generated and attested.
-10. Every connection first installs and reads back a transaction-local `pg_catalog`-only path and rejects a retained `pg_temp` schema using a fully qualified parse-safe statement, then independently installs and verifies the remaining context and re-attests it immediately before commit. Pool state is never trusted as already clean.
+9. An accepted secondary index is generated from `@VevIndex`, is non-unique, and is live-attested with exact `(tenant, indexed value, id)` B-tree keys. Undeclared or differently shaped indexes, ordinary inheritance, check/unique constraints, and foreign keys touching mapped tables are rejected.
+10. A dedicated pgjdbc pool must establish an exact `pg_catalog`/UTF-8 baseline before checkout. Vev fails a changed baseline or retained `pg_temp` schema instead of mutating `search_path`, then independently installs and verifies the remaining transaction context and re-attests it immediately before commit. Avoiding path changes preserves pgjdbc prepared-query caching; pooled state is still verified, never assumed clean.
 11. Logs, exceptions, and telemetry record operation categories and SQLSTATE where permitted, never SQL text, entity values, tenant values, or bound values.
 
-The current runtime requires PostgreSQL row-level security as defense in depth, including a forced, exact role-specific policy and least-privilege grants. Vev must not use RLS as an excuse to omit generated tenant predicates, and generated predicates do not replace those database controls.
+The current runtime requires PostgreSQL row-level security as defense in depth, including a forced, exact role-specific policy and least-privilege grants. The application role has no physical `DELETE` privilege; lifecycle retirement is a versioned update. Vev must not use RLS as an excuse to omit generated tenant predicates, and generated predicates do not replace those database controls.
 
 ## Required adversarial tests
 
@@ -46,7 +46,7 @@ A tenant-capable release needs automated PostgreSQL tests for:
 - colliding identifiers in two tenants;
 - missing, null, wrong-type, changed, and foreign-authority tenant context;
 - cross-tenant entity insertion and update;
-- point, range, count, existence, batch, bulk, and delete operations;
+- point, generated-index equality/null, range, count, existence, batch, and bulk operations, plus proof that physical delete remains unavailable;
 - continuation after a documented recoverable pre-SQL tenant rejection, and rollback after a poisoned tenant-context failure;
 - transaction suspension/resumption and nested boundaries;
 - virtual-thread and structured-concurrency context propagation;

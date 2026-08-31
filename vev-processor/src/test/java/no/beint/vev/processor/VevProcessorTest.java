@@ -2,6 +2,7 @@ package no.beint.vev.processor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -47,6 +48,12 @@ final class VevProcessorTest {
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
+        assertTrue(accountPlan.contains("public static final no.beint.vev.pg.PgRequiredIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, java.lang.String> DISPLAY_NAME"));
+        assertTrue(accountPlan.contains("new no.beint.vev.pg.PgRequiredIndex<>(INSTANCE, \"account_display_name_idx\", 3, java.lang.String.class)"));
+        assertTrue(accountPlan.contains("public static final no.beint.vev.pg.PgNullableIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, java.lang.String> ALIAS"));
+        assertTrue(accountPlan.contains("new no.beint.vev.pg.PgNullableIndex<>(INSTANCE, \"account_alias_idx\", 5, java.lang.String.class)"));
+        assertTrue(accountPlan.contains("public java.util.List<no.beint.vev.pg.PgIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, ?>> indexes()"));
+        assertTrue(accountPlan.contains("return INDEXES;"));
         assertTrue(accountPlan.contains("public Object columnValue(example.Account entity, int columnIndex)"));
         assertTrue(accountPlan.contains("public example.Account instantiate(Object[] columnValues)"));
         assertFalse(accountPlan.contains("PreparedStatement"));
@@ -73,6 +80,22 @@ final class VevProcessorTest {
     }
 
     @Test
+    void indexMetadataChangesTheClosedModelFingerprint() throws IOException {
+        Map<String, String> changedIndex = new LinkedHashMap<>(positiveSources());
+        changedIndex.computeIfPresent("example/Account.java", (path, source) ->
+                source.replace("account_display_name_idx", "account_display_name_v2_idx"));
+
+        Compilation original = compile(positiveSources());
+        Compilation changed = compile(changedIndex);
+
+        assertTrue(original.success(), original.diagnostics());
+        assertTrue(changed.success(), changed.diagnostics());
+        assertNotEquals(
+                original.generated("example/BillingModelVev.java"),
+                changed.generated("example/BillingModelVev.java"));
+    }
+
+    @Test
     void rejectsEveryImplicitOrUnsafeMappingAtCompilation() throws IOException {
         Map<String, NegativeCase> cases = new LinkedHashMap<>();
         cases.put("implicitTable", new NegativeCase(
@@ -85,6 +108,11 @@ final class VevProcessorTest {
                 recordSource(validTable(), validComponents().replace(
                         "@Id @Column(name = \"id\", nullable = false)", "@Id"), ""),
                 "Implicit column names are forbidden"));
+        cases.put("implicitNullability", new NegativeCase(
+                recordSource(validTable(), validComponents().replace(
+                        "@Column(name = \"display_name\", nullable = false, length = 255)",
+                        "@Column(name = \"display_name\", length = 255)"), ""),
+                "Every mapped component must explicitly declare @Column(nullable = true) or @Column(nullable = false)"));
         cases.put("entityName", new NegativeCase(
                 recordSource(validTable(), validComponents(), "")
                         .replace("@Entity\n", "@Entity(name = \"Broken\")\n"),
@@ -144,8 +172,40 @@ final class VevProcessorTest {
         cases.put("nullableTenant", new NegativeCase(
                 recordSource(validTable(), validComponents().replace(
                         "@Column(name = \"tenant_id\", nullable = false)",
-                        "@Column(name = \"tenant_id\")"), ""),
+                        "@Column(name = \"tenant_id\", nullable = true)"), ""),
                 "Tenant columns must declare @Column(nullable = false)"));
+        cases.put("indexOnIdentifier", new NegativeCase(
+                recordSource(validTable(), validComponents().replace(
+                        "@Id @Column(name = \"id\", nullable = false)",
+                        "@VevIndex(name = \"broken_id_idx\") @Id @Column(name = \"id\", nullable = false)"), ""),
+                "@VevIndex may only map an ordinary VALUE component"));
+        cases.put("invalidIndexName", new NegativeCase(
+                recordSource(validTable(), validComponents().replace(
+                        "@Column(name = \"display_name\", nullable = false, length = 255)",
+                        "@VevIndex(name = \"Bad-Index\") @Column(name = \"display_name\", nullable = false, length = 255)"), ""),
+                "Explicit index identifier \"Bad-Index\" must match"));
+        cases.put("duplicateIndexName", new NegativeCase(
+                recordSource(validTable(), validComponents().replace(
+                        "@Column(name = \"display_name\", nullable = false, length = 255) String displayName",
+                        "@VevIndex(name = \"broken_value_idx\") @Column(name = \"display_name\", nullable = false, length = 255) String displayName,\n"
+                                + "@VevIndex(name = \"broken_value_idx\") @Column(name = \"alias\", nullable = true, length = 64) String alias"), ""),
+                "Duplicate explicit index name \"broken_value_idx\""));
+        cases.put("oversizedIndexedString", new NegativeCase(
+                recordSource(validTable(), validComponents().replace(
+                        "@Column(name = \"display_name\", nullable = false, length = 255)",
+                        "@VevIndex(name = \"broken_display_name_idx\") @Column(name = \"display_name\", nullable = false, length = 257)"), ""),
+                "Indexed String components must declare @Column(length <= 256)"));
+        cases.put("oversizedCompositeIndexKey", new NegativeCase(
+                recordSource(validTable(), validComponents()
+                        .replace("Long id", "String id")
+                        .replace("UUID tenantId", "String tenantId")
+                        .replace("@Column(name = \"id\", nullable = false)",
+                                "@Column(name = \"id\", nullable = false, length = 128)")
+                        .replace("@Column(name = \"tenant_id\", nullable = false)",
+                                "@Column(name = \"tenant_id\", nullable = false, length = 128)")
+                        .replace("@Column(name = \"display_name\", nullable = false, length = 255)",
+                                "@VevIndex(name = \"broken_display_name_idx\") @Column(name = \"display_name\", nullable = false, length = 255)"), ""),
+                "1536-byte retained-key budget"));
         cases.put("missingVersion", new NegativeCase(
                 recordSource(validTable(), validComponents().replace("@Version ", ""), ""),
                 "Mutable Vev entities require exactly one @Version"));
@@ -189,6 +249,25 @@ final class VevProcessorTest {
         cases.put("runtimeStaticField", new NegativeCase(
                 recordSource(validTable(), validComponents(), "static final Object STATE = new Object();"),
                 "Static entity fields must be compile-time constants"));
+        cases.put("instanceMethod", new NegativeCase(
+                recordSource(validTable(), validComponents(), "public String label() { return displayName; }"),
+                "Explicit instance methods are forbidden"));
+        cases.put("customEquals", new NegativeCase(
+                recordSource(validTable(), validComponents(),
+                        "@Override public boolean equals(Object other) { return this == other; }"),
+                "Explicit instance methods are forbidden"));
+        cases.put("customHashCode", new NegativeCase(
+                recordSource(validTable(), validComponents(), "@Override public int hashCode() { return 0; }"),
+                "Explicit instance methods are forbidden"));
+        cases.put("customToString", new NegativeCase(
+                recordSource(validTable(), validComponents(),
+                        "@Override public String toString() { return displayName; }"),
+                "Explicit instance methods are forbidden"));
+        cases.put("reservedIndexToken", new NegativeCase(
+                recordSource(validTable(), validComponents().replace(
+                        "@Column(name = \"display_name\", nullable = false, length = 255) String displayName",
+                        "@VevIndex(name = \"broken_instance_idx\") @Column(name = \"display_name\", nullable = false, length = 255) String instance"), ""),
+                "generates reserved token name INSTANCE"));
 
         for (Map.Entry<String, NegativeCase> entry : cases.entrySet()) {
             Compilation compilation = compile(Map.of(
@@ -198,6 +277,77 @@ final class VevProcessorTest {
             assertTrue(compilation.diagnostics().contains(entry.getValue().diagnostic()),
                     entry.getKey() + " diagnostics were:\n" + compilation.diagnostics());
         }
+    }
+
+    @Test
+    void rejectsMoreThanSixteenCompileTimeIndexes() throws IOException {
+        List<String> components = new ArrayList<>();
+        components.add("@Id @Column(name = \"id\", nullable = false) Long id");
+        components.add("@TenantKey @Column(name = \"tenant_id\", nullable = false) UUID tenantId");
+        components.add("@Version @Column(name = \"version\", nullable = false) int version");
+        for (int index = 0; index < 17; index++) {
+            components.add("@VevIndex(name = \"broken_value_" + index
+                    + "_idx\") @Column(name = \"value_" + index
+                    + "\", nullable = false) int value" + index);
+        }
+
+        Compilation compilation = compile(Map.of(
+                "example/Broken.java", recordSource(validTable(), String.join(",\n", components), ""),
+                "example/BrokenModel.java", brokenModelSource()));
+
+        assertFalse(compilation.success(), "Seventeen indexes unexpectedly compiled");
+        assertTrue(compilation.diagnostics().contains("must not exceed 16 compile-time indexes"),
+                compilation.diagnostics());
+    }
+
+    @Test
+    void rejectsDuplicatePostgresIndexNamesAcrossOneSchema() throws IOException {
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("example/FirstEntity.java", appendOnlyIndexedEntitySource("FirstEntity", "first_entity"));
+        sources.put("example/SecondEntity.java", appendOnlyIndexedEntitySource("SecondEntity", "second_entity"));
+        sources.put("example/SharedIndexModel.java", """
+                package example;
+
+                import no.beint.vev.VevModel;
+
+                @VevModel(entities = {FirstEntity.class, SecondEntity.class})
+                public final class SharedIndexModel {
+                    private SharedIndexModel() {
+                    }
+                }
+                """);
+
+        Compilation compilation = compile(sources);
+
+        assertFalse(compilation.success(), "A schema-global duplicate index name unexpectedly compiled");
+        assertTrue(compilation.diagnostics().contains(
+                "Multiple entities in one closed @VevModel require PostgreSQL index ledger.shared_value_idx"),
+                compilation.diagnostics());
+    }
+
+    @Test
+    void rejectsIndexNamesThatCollideWithMappedRelations() throws IOException {
+        Map<String, String> sources = new LinkedHashMap<>();
+        sources.put("example/FirstEntity.java", appendOnlyIndexedEntitySource("FirstEntity", "shared_value_idx"));
+        sources.put("example/SecondEntity.java", appendOnlyEntitySource("SecondEntity", "second_entity"));
+        sources.put("example/CollidingRelationModel.java", """
+                package example;
+
+                import no.beint.vev.VevModel;
+
+                @VevModel(entities = {FirstEntity.class, SecondEntity.class})
+                public final class CollidingRelationModel {
+                    private CollidingRelationModel() {
+                    }
+                }
+                """);
+
+        Compilation compilation = compile(sources);
+
+        assertFalse(compilation.success(), "A relation/index namespace collision unexpectedly compiled");
+        assertTrue(compilation.diagnostics().contains(
+                "PostgreSQL index ledger.shared_value_idx collides with a mapped relation"),
+                compilation.diagnostics());
     }
 
     @Test
@@ -396,6 +546,7 @@ final class VevProcessorTest {
                 import java.math.BigDecimal;
                 import java.util.UUID;
                 import no.beint.vev.TenantKey;
+                import no.beint.vev.VevIndex;
 
                 @Entity
                 @Table(name = "account", schema = "ledger")
@@ -403,8 +554,11 @@ final class VevProcessorTest {
                         @Id @Column(name = "id", nullable = false) Long id,
                         @TenantKey @Column(name = "tenant_id", nullable = false) UUID tenantId,
                         @Version @Column(name = "version", nullable = false) int version,
+                        @VevIndex(name = "account_display_name_idx")
                         @Column(name = "display_name", nullable = false, length = 255) String displayName,
-                        @Column(name = "balance", nullable = false, precision = 19, scale = 2) BigDecimal balance) {
+                        @Column(name = "balance", nullable = false, precision = 19, scale = 2) BigDecimal balance,
+                        @VevIndex(name = "account_alias_idx")
+                        @Column(name = "alias", nullable = true, length = 64) String alias) {
                     private static final String ENTITY_KIND = "account";
                 }
                 """);
@@ -448,6 +602,7 @@ final class VevProcessorTest {
                 import java.util.UUID;
                 import no.beint.vev.AppendOnly;
                 import no.beint.vev.TenantKey;
+                import no.beint.vev.VevIndex;
 
                 @Entity
                 %s
@@ -527,6 +682,31 @@ final class VevProcessorTest {
                 public record %s(
                         @Id @Column(name = "id", nullable = false) UUID id,
                         @TenantKey @Column(name = "tenant_id", nullable = false) UUID tenantId) {
+                }
+                """.formatted(tableName, entityName);
+    }
+
+    private static String appendOnlyIndexedEntitySource(String entityName, String tableName) {
+        return """
+                package example;
+
+                import jakarta.persistence.Column;
+                import jakarta.persistence.Entity;
+                import jakarta.persistence.Id;
+                import jakarta.persistence.Table;
+                import java.util.UUID;
+                import no.beint.vev.AppendOnly;
+                import no.beint.vev.TenantKey;
+                import no.beint.vev.VevIndex;
+
+                @Entity
+                @AppendOnly
+                @Table(name = "%s", schema = "ledger")
+                public record %s(
+                        @Id @Column(name = "id", nullable = false) UUID id,
+                        @TenantKey @Column(name = "tenant_id", nullable = false) UUID tenantId,
+                        @VevIndex(name = "shared_value_idx")
+                        @Column(name = "value", nullable = false, length = 64) String value) {
                 }
                 """.formatted(tableName, entityName);
     }

@@ -5,6 +5,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * Closed PostgreSQL/JDBC representation of one supported Java value type.
@@ -21,8 +22,18 @@ public final class PgCodec<T> {
     private final String jdbcType;
     private final SqlReader<T> reader;
     private final SqlBinder<T> binder;
+    private final Function<T, Object> arrayElement;
 
     PgCodec(Class<T> javaType, String databaseType, SqlReader<T> reader, SqlBinder<T> binder) {
+        this(javaType, databaseType, reader, binder, value -> value);
+    }
+
+    PgCodec(
+            Class<T> javaType,
+            String databaseType,
+            SqlReader<T> reader,
+            SqlBinder<T> binder,
+            Function<T, Object> arrayElement) {
         this.javaType = Objects.requireNonNull(javaType, "javaType");
         this.databaseType = Objects.requireNonNull(databaseType, "databaseType");
         String catalogType = switch (databaseType) {
@@ -37,6 +48,7 @@ public final class PgCodec<T> {
         this.jdbcType = "pg_catalog." + catalogType;
         this.reader = Objects.requireNonNull(reader, "reader");
         this.binder = Objects.requireNonNull(binder, "binder");
+        this.arrayElement = Objects.requireNonNull(arrayElement, "arrayElement");
     }
 
     /**
@@ -76,6 +88,16 @@ public final class PgCodec<T> {
         } else {
             binder.bind(statement, index, value);
         }
+    }
+
+    Object arrayElement(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value.getClass() != javaType) {
+            throw new IllegalArgumentException("Array value does not match the generated PostgreSQL codec");
+        }
+        return arrayElement.apply(javaType.cast(value));
     }
 
     @FunctionalInterface

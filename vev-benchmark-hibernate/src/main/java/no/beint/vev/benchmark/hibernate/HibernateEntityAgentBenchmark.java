@@ -46,11 +46,12 @@ public class HibernateEntityAgentBenchmark {
     @Setup(Level.Trial)
     public void setUp() throws Exception {
         var databaseConfiguration = BenchmarkDatabaseConfiguration.fromEnvironment();
+        BenchmarkDataset.resetUpdateRows(databaseConfiguration);
         BenchmarkDataset.verify(databaseConfiguration);
         databaseIdentity = BenchmarkDataset.verifyDatabaseIdentity(databaseConfiguration);
         identifiers32 = BenchmarkDataset.findMultipleIdentifiers(BenchmarkDataset.FIND_MULTIPLE_32_PRESENT_COUNT);
         identifiers256 = BenchmarkDataset.findMultipleIdentifiers(BenchmarkDataset.FIND_MULTIPLE_256_PRESENT_COUNT);
-        dataSource = databaseConfiguration.openReadOnlyPool(CONNECTION_POOL_SIZE);
+        dataSource = databaseConfiguration.openPool(CONNECTION_POOL_SIZE);
         serviceRegistry = buildServiceRegistry(dataSource);
         try {
             sessionFactory = new MetadataSources(serviceRegistry)
@@ -115,6 +116,18 @@ public class HibernateEntityAgentBenchmark {
                 createBoundedScan(entityAgent).getResultList()));
     }
 
+    @Benchmark
+    public long indexedEmail() {
+        return executeReadTransaction(entityAgent -> BenchmarkDataset.indexedPageChecksum(
+                createIndexedEmail(entityAgent).getResultList(), BenchmarkDataset.INDEXED_EMAIL_LIMIT));
+    }
+
+    @Benchmark
+    public long indexedActive32() {
+        return executeReadTransaction(entityAgent -> BenchmarkDataset.indexedPageChecksum(
+                createIndexedActive(entityAgent).getResultList(), BenchmarkDataset.INDEXED_ACTIVE_LIMIT));
+    }
+
     private long executeReadTransaction(ToLongFunction<StatelessSession> operation) {
         try (var entityAgent = openEntityAgent()) {
             EntityTransaction transaction = entityAgent.getTransaction();
@@ -147,6 +160,38 @@ public class HibernateEntityAgentBenchmark {
                 .setParameter("tenantId", BenchmarkDataset.TENANT_ID)
                 .setMaxResults(BenchmarkDataset.SCAN_SIZE + 1)
                 .setFetchSize(BenchmarkDataset.SCAN_SIZE + 1)
+                .setReadOnly(true)
+                .setCacheable(false);
+    }
+
+    private static SelectionQuery<BenchmarkAccount> createIndexedEmail(StatelessSession entityAgent) {
+        return entityAgent.createSelectionQuery("""
+                select account
+                from BenchmarkAccount account
+                where account.tenantId = :tenantId
+                  and account.email = :email
+                order by account.id
+                """, BenchmarkAccount.class)
+                .setParameter("tenantId", BenchmarkDataset.TENANT_ID)
+                .setParameter("email", BenchmarkDataset.INDEXED_EMAIL_VALUE)
+                .setMaxResults(BenchmarkDataset.INDEXED_EMAIL_LIMIT + 1)
+                .setFetchSize(BenchmarkDataset.INDEXED_EMAIL_LIMIT + 1)
+                .setReadOnly(true)
+                .setCacheable(false);
+    }
+
+    private static SelectionQuery<BenchmarkAccount> createIndexedActive(StatelessSession entityAgent) {
+        return entityAgent.createSelectionQuery("""
+                select account
+                from BenchmarkAccount account
+                where account.tenantId = :tenantId
+                  and account.active = :active
+                order by account.id
+                """, BenchmarkAccount.class)
+                .setParameter("tenantId", BenchmarkDataset.TENANT_ID)
+                .setParameter("active", true)
+                .setMaxResults(BenchmarkDataset.INDEXED_ACTIVE_LIMIT + 1)
+                .setFetchSize(BenchmarkDataset.INDEXED_ACTIVE_LIMIT + 1)
                 .setReadOnly(true)
                 .setCacheable(false);
     }
@@ -218,6 +263,24 @@ public class HibernateEntityAgentBenchmark {
                 if (actualScan != expectedScan) {
                     throw new IllegalStateException("Hibernate bounded scan checksum mismatch");
                 }
+
+                var actualEmail = BenchmarkDataset.indexedPageChecksum(
+                        createIndexedEmail(entityAgent).getResultList(), BenchmarkDataset.INDEXED_EMAIL_LIMIT);
+                var expectedEmail = BenchmarkDataset.indexedPageChecksum(
+                        List.of(BenchmarkDataset.expectedAccount(BenchmarkDataset.FIND_ONE_ID)),
+                        BenchmarkDataset.INDEXED_EMAIL_LIMIT);
+                if (actualEmail != expectedEmail) {
+                    throw new IllegalStateException("Hibernate indexed-email checksum mismatch");
+                }
+
+                var actualActive = BenchmarkDataset.indexedPageChecksum(
+                        createIndexedActive(entityAgent).getResultList(), BenchmarkDataset.INDEXED_ACTIVE_LIMIT);
+                var expectedActive = BenchmarkDataset.indexedPageChecksum(
+                        BenchmarkDataset.expectedActiveAccounts(BenchmarkDataset.INDEXED_ACTIVE_LIMIT + 1),
+                        BenchmarkDataset.INDEXED_ACTIVE_LIMIT);
+                if (actualActive != expectedActive) {
+                    throw new IllegalStateException("Hibernate indexed-active checksum mismatch");
+                }
                 verifyTransactionContext(entityAgent);
                 transaction.commit();
             } catch (RuntimeException | Error failure) {
@@ -250,14 +313,14 @@ public class HibernateEntityAgentBenchmark {
 
     private void applyTransactionContext(StatelessSession entityAgent) {
         entityAgent.doWork(connection -> {
-            BenchmarkDataset.installTrustedSearchPath(connection);
-            BenchmarkDataset.installUtf8Transport(connection);
-            BenchmarkDataset.applyTransactionContext(connection, databaseIdentity);
+            BenchmarkDataset.requireTrustedSessionBaseline(connection);
+            BenchmarkDataset.verifyNoRetainedTempSchema(connection);
+            BenchmarkDataset.applyTransactionContext(connection, databaseIdentity, true);
         });
     }
 
     private void verifyTransactionContext(StatelessSession entityAgent) {
-        entityAgent.doWork(connection -> BenchmarkDataset.verifyTransactionContext(connection, databaseIdentity));
+        entityAgent.doWork(connection -> BenchmarkDataset.verifyTransactionContext(connection, databaseIdentity, true));
     }
 
     private void closeAfterSetupFailure(Throwable failure) {

@@ -14,5 +14,5 @@ org.junit.platform:junit-platform-engine:6.1.3=testRuntimeClasspath
 org.junit.platform:junit-platform-launcher:6.1.3=testRuntimeClasspath
 org.junit:junit-bom:6.1.3=testCompileClasspath,testRuntimeClasspath
 org.opentest4j:opentest4j:1.3.0=testCompileClasspath,testRuntimeClasspath
-org.postgresql:postgresql:42.7.13=runtimeClasspath,testRuntimeClasspath
-empty=annotationProcessor,compileClasspath,testAnnotationProcessor
+org.postgresql:postgresql:42.7.13=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+empty=annotationProcessor,testAnnotationProcessor

@@ -130,6 +130,11 @@ final class PgModelBoundsTest {
             }
 
             @Override
+            public List<PgIndex<TestModel, TestEntity, Integer, ?>> indexes() {
+                return List.of();
+            }
+
+            @Override
             public Object columnValue(TestEntity entity, int columnIndex) {
                 return columnIndex == 0 ? entity.id() : entity.tenantId();
             }
