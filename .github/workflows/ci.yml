@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: JDK 26 (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Temurin reproducible
+            distribution: temurin
+            java_version: '26.0.2+10'
+            check_latest: 'false'
+            expected_runtime: '26.0.2+10'
+          - name: Oracle reproducible
+            distribution: oracle
+            java_version: '26.0.2'
+            check_latest: 'false'
+            expected_runtime: '26.0.2+10-55'
+          - name: Temurin security-current
+            distribution: temurin
+            java_version: '26'
+            check_latest: 'true'
+            expected_runtime: ''
+          - name: Oracle security-current
+            distribution: oracle
+            java_version: '26'
+            check_latest: 'true'
+            expected_runtime: ''
+    services:
+      postgres:
+        image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      VEV_TEST_ADMIN_JDBC_URL: jdbc:postgresql://127.0.0.1:5432/postgres
+      VEV_TEST_ADMIN_USER: postgres
+      VEV_TEST_ADMIN_PASSWORD: postgres
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Install JDK 26
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: ${{ matrix.distribution }}
+          java-version: ${{ matrix.java_version }}
+          check-latest: ${{ matrix.check_latest }}
+      - name: Verify runtime identity
+        shell: bash
+        env:
+          EXPECTED_RUNTIME: ${{ matrix.expected_runtime }}
+        run: |
+          actual_runtime="$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^[[:space:]]*java.runtime.version = //p')"
+          if [[ "$actual_runtime" != 26.* ]]; then
+            echo "Expected JDK 26, got '$actual_runtime'" >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_RUNTIME" && "$actual_runtime" != "$EXPECTED_RUNTIME" ]]; then
+            echo "Expected runtime '$EXPECTED_RUNTIME', got '$actual_runtime'" >&2
+            exit 1
+          fi
+          echo "Verified java.runtime.version=$actual_runtime"
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
+      - name: Verify
+        run: ./gradlew clean check integrationTest

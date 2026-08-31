@@ -1,0 +1,53 @@
+name: Compatibility request
+description: Propose a deliberate expansion of the safe mapping or runtime profile
+title: "profile: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compatibility is accepted only when Vev can implement the behavior exactly and reject unsafe adjacent shapes. Annotation recognition alone is not compatibility.
+  - type: input
+    id: surface
+    attributes:
+      label: Requested surface
+      description: Name the exact Jakarta annotation attribute, database behavior, query operation, or integration point.
+      placeholder: jakarta.persistence.Version on a scalar long column
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Synthetic use case
+      description: Explain why the application needs this behavior using a generic model and schema.
+    validations:
+      required: true
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Required semantics
+      description: Describe SQL shape, lifecycle, transaction, concurrency, failure, and schema expectations.
+    validations:
+      required: true
+  - type: textarea
+    id: rejection
+    attributes:
+      label: Fail-closed boundary
+      description: Which related shapes must still be rejected, and what diagnostic should they receive?
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification proposal
+      description: List positive, negative, PostgreSQL 18, schema, and adversarial tests.
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: I understand Vev is not a complete Jakarta Persistence provider or a drop-in Hibernate replacement.
+          required: true
+        - label: I can supply only synthetic fixtures and examples.
+          required: true
