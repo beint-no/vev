@@ -11,7 +11,7 @@ dependencies {
     implementation("org.openjdk.jmh:jmh-core:1.37")
     annotationProcessor("org.openjdk.jmh:jmh-generator-annprocess:1.37")
     implementation("org.postgresql:postgresql:42.7.13")
-    runtimeOnly("org.slf4j:slf4j-nop:2.0.17")
+    runtimeOnly("org.slf4j:slf4j-nop:2.0.18")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testCompileOnly("jakarta.persistence:jakarta.persistence-api:4.0.0-M6")
