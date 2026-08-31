@@ -48,7 +48,7 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 ## Evidence
 
 - Integration tests use synthetic fixtures and cover only documented shapes.
-- The preserved comparison uses Hibernate ORM 8.0.0.Beta1 with Jakarta Persistence 4.0.0-M6 and covers five read-only workloads from an earlier Vev commit. It does not measure generated indexed lookup, set-based insert, all-or-nothing update batches, or the revised connection baseline and cannot establish behavior against a final Hibernate 8 release.
+- The current comparison uses Hibernate ORM 8.0.0.Beta1 with Jakarta Persistence 4.0.0-M6 and covers generated indexed equality queries plus one 32-row all-or-nothing update shape. Its latency comparison is rejected: severe unrelated CPU and storage activity was observed after A2, and without comparable pre-run or in-run telemetry host interference cannot be excluded. The raw results remain published; only narrowly scoped normalized-allocation observations were repeatable. It does not measure set-based insert and cannot establish behavior against a final Hibernate 8 release. The earlier preserved comparison covers five read-only workloads from an earlier Vev commit.
 - No benchmark result is a capacity plan or production sizing recommendation.
 - Passing this repository's tests is not equivalent to passing the Jakarta Persistence TCK.
 

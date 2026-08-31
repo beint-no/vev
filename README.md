@@ -80,7 +80,7 @@ No artifact is currently published. To verify the source tree with JDK 26:
 
 Integration verification requires an administrator connection to disposable PostgreSQL 18. Tests and examples use synthetic data only.
 
-The reviewed local A–B–B–A evidence bundle, including raw JMH JSON and checksums, is preserved under [`benchmark-results`](benchmark-results/final-4b2b23f10d4352d86834c4f43993d1288ba82020/report.md). It compares an earlier Vev commit with prerelease Hibernate ORM 8.0.0.Beta1 on one machine and five read-only workloads. It does not measure this tranche's indexed queries, batch inserts, batch updates, or revised connection baseline and is not a general performance claim.
+The [current reviewed A–B–B–A evidence bundle](benchmark-results/final-b0b026d19959b4ca848174e8f2ab4c909363d208/report.md) covers generated indexed reads and the guarded 32-row update against prerelease Hibernate ORM 8.0.0.Beta1. Its latency comparison is explicitly rejected: post-A2 telemetry showed severe unrelated CPU and storage activity, and without comparable pre-run or in-run telemetry host interference cannot be excluded. The unfiltered raw results remain public; only the narrowly scoped, repeatable normalized-allocation observations are retained. An [earlier read-only bundle](benchmark-results/final-4b2b23f10d4352d86834c4f43993d1288ba82020/report.md) is also preserved. Neither campaign is a general performance claim.
 
 CI runs the complete verification on exact Temurin and Oracle builds of the common JDK `26.0.2+10` baseline, plus separate floating JDK 26 lanes that request each vendor's current security update. Every lane records and validates the installed runtime identity.
 

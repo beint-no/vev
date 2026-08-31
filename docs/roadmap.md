@@ -20,7 +20,7 @@
 - define transaction ownership and rollback-only behavior;
 - benchmark pgjdbc prepare thresholds, binary transfer, connection-pool behavior, generated-index selectivity, and typed-array batch sizes before fixing performance defaults;
 - add JFR/metrics events that never record bind values;
-- replace the earlier read-only Hibernate ORM 8.0.0.Beta1 evidence with isolated, reproducible workloads for the current code, including writes and generated-index queries, without universal performance claims.
+- rerun the current generated-index and write campaign on an isolated host with before/during/after CPU, I/O, and thermal telemetry, then add set-based insert and representative row-width/batch-size coverage without universal performance claims.
 
 ## Phase 2 — safety depth
 
