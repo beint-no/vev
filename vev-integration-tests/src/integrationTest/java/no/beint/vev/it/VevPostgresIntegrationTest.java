@@ -166,6 +166,24 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void bootstrapRequiresTheDeclaredIdentifierFirstReferenceOrder() throws SQLException {
+        try {
+            database.identityReferenceTenantFirst(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.identityReferenceTenantFirst(false);
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+        UUID parent = id("identifier-first-parent");
+        insert(account(parent, 7, 0, "parent@example.test", "1.0000"), TENANT_7);
+        var child = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("child", null, parent)));
+        assertEquals(parent, child.accountId());
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_8, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("foreign child", null, parent))));
+    }
+
+    @Test
     void jakartaFacadeRejectsIdentityInsertionWithoutPoisoningPreSqlValidation() {
         var snapshot = new IdentityEntry(1L, 7, (short) 0, "identified", null, null);
         Account assigned = account(id("agent-after-identity-rejection"), 7, 0, "assigned@example.test", "1.0000");

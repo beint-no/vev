@@ -86,6 +86,15 @@ final class IntegrationDatabase {
         }
     }
 
+    void identityReferenceTenantFirst(boolean tenantFirst) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT identity_entry_account_fk");
+            statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT identity_entry_account_fk FOREIGN KEY "
+                    + (tenantFirst ? "(tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id)"
+                            : "(account_id, tenant_id) REFERENCES vev_it.account (id, tenant_id)"));
+        }
+    }
+
     void identitySequenceVariant(String variant) throws SQLException {
         try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
             statement.execute("REVOKE ALL ON SEQUENCE vev_it.identity_event_id_seq FROM vev_it_app");
@@ -879,7 +888,7 @@ final class IntegrationDatabase {
             String values = switch (table) {
                 case "identity_entry" -> ", version smallint NOT NULL, label varchar(64) NOT NULL, code varchar(64), account_id uuid"
                         + ", CONSTRAINT identity_entry_code_key UNIQUE (tenant_id, code)"
-                        + ", CONSTRAINT identity_entry_account_fk FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account(tenant_id, id)";
+                        + ", CONSTRAINT identity_entry_account_fk FOREIGN KEY (account_id, tenant_id) REFERENCES vev_it.account(id, tenant_id)";
                 case "identity_counter" -> ", version integer NOT NULL";
                 case "kotlin_identity" -> ", version bigint NOT NULL, label varchar(64) NOT NULL, note varchar(64)";
                 default -> ", message varchar(64)";

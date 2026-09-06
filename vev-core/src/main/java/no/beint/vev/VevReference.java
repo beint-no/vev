@@ -30,4 +30,11 @@ public @interface VevReference {
      * @return entity whose tenant-qualified primary key is referenced
      */
     Class<?> target();
+
+    /**
+     * Selects the exact order of both sides of the database foreign key.
+     *
+     * @return true for (tenant, reference) to (tenant, ID); false for (reference, tenant) to (ID, tenant)
+     */
+    boolean tenantFirst() default true;
 }

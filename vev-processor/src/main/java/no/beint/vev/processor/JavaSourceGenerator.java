@@ -153,7 +153,7 @@ final class JavaSourceGenerator {
             source.append(index == 0 ? "\n" : ",\n")
                     .append("            new no.beint.vev.pg.PgReference(\"").append(escape(property.referenceName()))
                     .append("\", ").append(entity.properties().indexOf(property)).append(", ")
-                    .append(property.referenceTarget()).append(".class)");
+                    .append(property.referenceTarget()).append(property.referenceTenantFirst() ? ".class)" : ".class, false)");
         }
         source.append(");\n\n");
         method(source, "public java.util.List<no.beint.vev.pg.PgReference> references()", "return REFERENCES;");

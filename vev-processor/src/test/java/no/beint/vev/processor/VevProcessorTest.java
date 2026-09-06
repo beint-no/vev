@@ -220,6 +220,28 @@ final class VevProcessorTest {
     }
 
     @Test
+    void referenceColumnOrderIsExplicitAndStableAcrossCompilationBoundaries() throws IOException {
+        var sources = referenceSources();
+        Compilation tenantFirst = compile(sources);
+        sources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("target = AuditEvent.class", "target = AuditEvent.class, tenantFirst = false"));
+        Compilation idFirst = compile(sources);
+        assertTrue(idFirst.success(), idFirst.diagnostics());
+        assertTrue(idFirst.generated("example/AccountVev.java").contains(
+                "new no.beint.vev.pg.PgReference(\"account_audit_fk\", 5, example.AuditEvent.class, false)"));
+        assertTrue(idFirst.manifest("example.BillingModel").contains("\"columns\": [\"alias\", \"tenant_id\"],"
+                + " \"targetSchema\": \"ledger\", \"targetTable\": \"audit_event\", \"targetColumns\": [\"id\", \"tenant_id\"]"));
+        assertNotEquals(tenantFirst.generated("example/BillingModelVev.java"), idFirst.generated("example/BillingModelVev.java"));
+        String model = sources.remove("example/BillingModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(idFirst.generated("example/AccountVev.java"), binary.generated("example/AccountVev.java"));
+        assertEquals(idFirst.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+    }
+
+    @Test
     void rejectsForeignReferenceTargetsTypesRolesAndNames() throws IOException {
         for (var replacement : Map.of(
                 "foreign target", List.of("target = AuditEvent.class", "target = java.lang.String.class"),

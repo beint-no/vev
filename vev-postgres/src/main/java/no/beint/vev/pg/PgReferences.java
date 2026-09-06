@@ -51,12 +51,14 @@ final class PgReferences {
         void verify(ResultSet row) throws SQLException {
             String targetId = target.columns().stream().filter(column -> column.role() == PgColumn.Role.ID)
                     .findFirst().orElseThrow().name();
+            String sourceId = source.columns().get(reference.columnIndex()).name();
+            boolean tenantFirst = reference.tenantFirst();
             if (!target.schemaName().equals(row.getString(4))
                     || !target.tableName().equals(row.getString(5))
-                    || !source.tenantColumn().equals(row.getString(6))
-                    || !source.columns().get(reference.columnIndex()).name().equals(row.getString(7))
-                    || !target.tenantColumn().equals(row.getString(8))
-                    || !targetId.equals(row.getString(9))) {
+                    || !(tenantFirst ? source.tenantColumn() : sourceId).equals(row.getString(6))
+                    || !(tenantFirst ? sourceId : source.tenantColumn()).equals(row.getString(7))
+                    || !(tenantFirst ? target.tenantColumn() : targetId).equals(row.getString(8))
+                    || !(tenantFirst ? targetId : target.tenantColumn()).equals(row.getString(9))) {
                 throw new IllegalStateException("Foreign key does not match its generated tenant-composite reference: "
                         + source.logicalName() + '.' + reference.name());
             }

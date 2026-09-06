@@ -584,7 +584,8 @@ final class MappingCompiler {
                 enumConstants,
                 referenceName,
                 referenceTarget,
-                generatedValue != null);
+                generatedValue != null,
+                reference == null || booleanValue(reference, "tenantFirst"));
     }
 
     private List<UniqueMapping> compileUniqueConstraints(
@@ -986,7 +987,7 @@ final class MappingCompiler {
         Set<String> expected = switch (annotationName) {
             case ENUMERATED -> Set.of("value");
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
-            case VEV_REFERENCE -> Set.of("name", "target");
+            case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             default -> ANNOTATION_MEMBERS.get(annotationName);
         };
         if (expected == null) {
@@ -1091,6 +1092,7 @@ final class MappingCompiler {
                 if (property.reference()) {
                     canonical.append("reference|").append(property.referenceName()).append('|')
                             .append(property.referenceTarget()).append('\n');
+                    if (!property.referenceTenantFirst()) canonical.append("referenceOrder|ID_TENANT\n");
                 }
             }
             for (UniqueMapping unique : entity.uniqueConstraints()) {

@@ -79,8 +79,12 @@ final class SchemaManifestGenerator {
                     .filter(candidate -> candidate.qualifiedName().equals(property.referenceTarget())).findFirst().orElseThrow();
             return """
                     {"name": %s, "columns": [%s, %s], "targetSchema": %s, "targetTable": %s, "targetColumns": [%s, %s], "match": "SIMPLE", "onUpdate": "NO ACTION", "onDelete": "NO ACTION", "deferrable": false}"""
-                    .formatted(quote(property.referenceName()), quote(source.tenant().columnName()), quote(property.columnName()),
-                            quote(target.schemaName()), quote(target.tableName()), quote(target.tenant().columnName()), quote(target.id().columnName()));
+                    .formatted(quote(property.referenceName()),
+                            quote(property.referenceTenantFirst() ? source.tenant().columnName() : property.columnName()),
+                            quote(property.referenceTenantFirst() ? property.columnName() : source.tenant().columnName()),
+                            quote(target.schemaName()), quote(target.tableName()),
+                            quote(property.referenceTenantFirst() ? target.tenant().columnName() : target.id().columnName()),
+                            quote(property.referenceTenantFirst() ? target.id().columnName() : target.tenant().columnName()));
         }).collect(Collectors.joining(", "));
     }
 

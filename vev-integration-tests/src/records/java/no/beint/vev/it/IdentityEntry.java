@@ -14,6 +14,6 @@ public record IdentityEntry(
         @Version @Column(name = "version", nullable = false) Short version,
         @Column(name = "label", nullable = false, length = 64) String label,
         @Column(name = "code", nullable = true, length = 64) String code,
-        @VevReference(name = "identity_entry_account_fk", target = Account.class)
+        @VevReference(name = "identity_entry_account_fk", target = Account.class, tenantFirst = false)
         @Column(name = "account_id", nullable = true) UUID accountId) {
 }
