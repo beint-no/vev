@@ -149,6 +149,30 @@ final class IntegrationDatabase {
         }
     }
 
+    void setWorkItemUniqueConstraint(String variant) throws SQLException {
+        String definition = switch (variant) {
+            case "valid", "missing" -> "UNIQUE (tenant_id, account_id, state)";
+            case "wrongColumns" -> "UNIQUE (tenant_id, id, state)";
+            case "wrongOrder" -> "UNIQUE (account_id, tenant_id, state)";
+            case "global" -> "UNIQUE (account_id, state)";
+            case "deferred" -> "UNIQUE (tenant_id, account_id, state) DEFERRABLE INITIALLY DEFERRED";
+            case "nullsNotDistinct" -> "UNIQUE NULLS NOT DISTINCT (tenant_id, account_id, state)";
+            case "included" -> "UNIQUE (tenant_id, account_id, state) INCLUDE (version)";
+            case "nonUniqueIndex", "standaloneUniqueIndex" -> "";
+            default -> throw new IllegalArgumentException("Unknown synthetic unique-constraint variant");
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.work_item DROP CONSTRAINT IF EXISTS work_item_account_state_key");
+            statement.execute("DROP INDEX IF EXISTS vev_it.work_item_account_state_key");
+            if (variant.equals("nonUniqueIndex") || variant.equals("standaloneUniqueIndex")) {
+                statement.execute("CREATE " + (variant.equals("standaloneUniqueIndex") ? "UNIQUE " : "")
+                        + "INDEX work_item_account_state_key ON vev_it.work_item (tenant_id, account_id, state)");
+            } else if (!variant.equals("missing")) {
+                statement.execute("ALTER TABLE vev_it.work_item ADD CONSTRAINT work_item_account_state_key " + definition);
+            }
+        }
+    }
+
     void setWorkItemReference(String variant) throws SQLException {
         String definition = switch (variant) {
             case "valid", "missing", "disabledTrigger" ->
@@ -856,6 +880,7 @@ final class IntegrationDatabase {
                             state varchar(16),
                             account_id uuid,
                             PRIMARY KEY (tenant_id, id),
+                            CONSTRAINT work_item_account_state_key UNIQUE (tenant_id, account_id, state),
                             CONSTRAINT work_item_account_fk FOREIGN KEY (tenant_id, account_id)
                                 REFERENCES vev_it.account (tenant_id, id)
                         )

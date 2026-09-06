@@ -237,6 +237,68 @@ final class VevProcessorTest {
         }
     }
 
+    @Test
+    void compilesNamedTenantUniqueConstraintsWithCanonicalFingerprintAndManifest() throws IOException {
+        String first = "@jakarta.persistence.UniqueConstraint(name = \"account_alias_key\", columnNames = {\"tenant_id\", \"alias\"})";
+        String second = "@jakarta.persistence.UniqueConstraint(name = \"account_name_balance_key\", columnNames = {\"tenant_id\", \"display_name\", \"balance\"})";
+        Compilation original = compile(uniqueSources(first + ", " + second));
+        Compilation reordered = compile(uniqueSources(second + ", " + first));
+        assertTrue(original.success(), original.diagnostics());
+        assertTrue(reordered.success(), reordered.diagnostics());
+        assertEquals(original.manifest("example.BillingModel"), reordered.manifest("example.BillingModel"));
+        assertEquals(original.generated("example/AccountVev.java"), reordered.generated("example/AccountVev.java"));
+        assertTrue(original.generated("example/AccountVev.java").contains(
+                "new no.beint.vev.pg.PgUnique(\"account_name_balance_key\", java.util.List.of(1, 3, 4))"));
+        assertTrue(original.manifest("example.BillingModel").contains(
+                "\"columns\": [\"tenant_id\", \"display_name\", \"balance\"], \"method\": \"btree\", \"nullsDistinct\": true, \"deferrable\": false"));
+        Compilation renamed = compile(uniqueSources(first.replace("account_alias_key", "account_alias_unique") + ", " + second));
+        assertTrue(renamed.success(), renamed.diagnostics());
+        assertNotEquals(original.generated("example/BillingModelVev.java"), renamed.generated("example/BillingModelVev.java"));
+        Compilation differentColumns = compile(uniqueSources(first));
+        assertTrue(differentColumns.success(), differentColumns.diagnostics());
+        assertNotEquals(original.generated("example/BillingModelVev.java"), differentColumns.generated("example/BillingModelVev.java"));
+    }
+
+    @Test
+    void rejectsImplicitGlobalAmbiguousAndUnboundedUniqueConstraints() throws IOException {
+        String valid = "@jakarta.persistence.UniqueConstraint(name = \"account_alias_key\", columnNames = {\"tenant_id\", \"alias\"})";
+        for (String declaration : List.of(
+                valid.replace("name = \"account_alias_key\", ", ""),
+                valid.replace("account_alias_key", "account.alias.key"),
+                valid.replace("\"tenant_id\", \"alias\"", "\"alias\""),
+                valid.replace("\"tenant_id\", \"alias\"", "\"alias\", \"tenant_id\""),
+                valid.replace("\"alias\"", "\"unknown\""),
+                valid.replace("\"alias\"", "\"version\""),
+                valid.replace("\"alias\"", "\"id\""),
+                valid.replace("\"alias\"", "\"alias\", \"alias\""),
+                valid.replace("})", "}, options = \"DEFERRABLE\")"),
+                valid.replace("account_alias_key", "account_display_name_idx"),
+                valid.replace("account_alias_key", "account"),
+                valid + ", " + valid)) {
+            Compilation compilation = compile(uniqueSources(declaration));
+            assertFalse(compilation.success(), declaration);
+            assertFalse(Files.exists(compilation.classesDirectory().resolve("META-INF/vev/example.BillingModel.schema.json")));
+        }
+        var oversized = uniqueSources(valid);
+        oversized.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@VevIndex(name = \"account_alias_idx\")", "").replace("length = 64", "length = 1024"));
+        Compilation unbounded = compile(oversized);
+        assertFalse(unbounded.success());
+        assertTrue(unbounded.diagnostics().contains("B-tree key budget"), unbounded.diagnostics());
+        Compilation tooMany = compile(uniqueSources(java.util.stream.IntStream.range(0, 17)
+                .mapToObj(index -> valid.replace("account_alias_key", "account_alias_key_" + index))
+                .collect(java.util.stream.Collectors.joining(", "))));
+        assertFalse(tooMany.success());
+    }
+
+    private static Map<String, String> uniqueSources(String constraints) {
+        var sources = positiveSources();
+        sources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@Table(name = \"account\", schema = \"ledger\")",
+                        "@Table(name = \"account\", schema = \"ledger\", uniqueConstraints = {" + constraints + "})"));
+        return sources;
+    }
+
     private static Map<String, String> referenceSources() {
         var sources = new LinkedHashMap<>(positiveSources());
         sources.computeIfPresent("example/Account.java", (path, source) -> source

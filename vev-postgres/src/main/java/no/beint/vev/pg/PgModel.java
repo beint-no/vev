@@ -102,6 +102,11 @@ public final class PgModel<M, T> {
                                     + index.indexName());
                 }
             }
+            for (PgUnique unique : plan.uniqueConstraints()) {
+                if (!mappedIndexes.add(plan.schemaName() + '.' + unique.name())) {
+                    throw new IllegalArgumentException("Duplicate generated unique-constraint backing index: " + unique.name());
+                }
+            }
             if (discoveredTenantType == null) {
                 discoveredTenantType = plan.tenantCodec().javaType();
             } else if (discoveredTenantType != plan.tenantCodec().javaType()) {
@@ -134,6 +139,7 @@ public final class PgModel<M, T> {
 
     private static void validateReferences(PgPlan<?, ?, ?, ?> source, Map<Class<?>, ? extends PgPlan<?, ?, ?, ?>> plans) {
         Set<String> names = new HashSet<>();
+        source.uniqueConstraints().forEach(unique -> names.add(unique.name()));
         Set<Integer> columns = new HashSet<>();
         for (PgReference reference : source.references()) {
             if (!names.add(reference.name()) || !columns.add(reference.columnIndex())) {
@@ -245,6 +251,27 @@ public final class PgModel<M, T> {
                     "Append-only entity plan must not expose a version column: " + plan.logicalName());
         }
         validateIndexes(plan, id, tenant);
+        validateUniqueConstraints(plan);
+    }
+
+    private static void validateUniqueConstraints(PgPlan<?, ?, ?, ?> plan) {
+        for (PgUnique unique : plan.uniqueConstraints()) {
+            long maximumBytes = 0;
+            for (int index = 0; index < unique.columnIndexes().size(); index++) {
+                int position = unique.columnIndexes().get(index);
+                if (position >= plan.columns().size()) {
+                    throw new IllegalArgumentException("Unique constraint refers to an unmapped column");
+                }
+                PgColumn column = plan.columns().get(position);
+                if (index == 0 ? column.role() != PgColumn.Role.TENANT : column.role() != PgColumn.Role.VALUE) {
+                    throw new IllegalArgumentException("Unique constraints require the tenant column first and only values afterward");
+                }
+                maximumBytes = Math.addExact(maximumBytes, maximumIndexKeyBytes(column));
+            }
+            if (maximumBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
+                throw new IllegalArgumentException("Unique constraint can exceed Vev's conservative B-tree key budget");
+            }
+        }
     }
 
     private static void validateIndexes(PgPlan<?, ?, ?, ?> plan, PgColumn id, PgColumn tenant) {

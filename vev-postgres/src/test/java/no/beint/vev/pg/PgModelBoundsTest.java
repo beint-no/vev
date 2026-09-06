@@ -12,6 +12,7 @@ import java.util.Iterator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 final class PgModelBoundsTest {
     private static final ModelIdentity IDENTITY = new ModelIdentity(
@@ -77,7 +78,37 @@ final class PgModelBoundsTest {
         assertThrows(IllegalArgumentException.class, () -> PgModel.of(IDENTITY, plans));
     }
 
+    @Test
+    void uniqueMetadataCapturesPositionsAndEnforcesDatabaseAndTenantBounds() {
+        var positions = new java.util.ArrayList<>(List.of(1, 2));
+        var unique = new PgUnique("test_entity_code_key", positions);
+        positions.set(0, 0);
+        assertEquals(List.of(1, 2), unique.columnIndexes());
+        assertThrows(UnsupportedOperationException.class, () -> unique.columnIndexes().set(0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad.name", List.of(1, 2)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad", List.of(1, 1)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad", List.of(1, -1)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad", List.of(1, 64)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad",
+                java.util.stream.IntStream.range(0, 33).boxed().toList()));
+        var code = new PgColumn("code", PgCodecs.STRING, true, PgColumn.Role.VALUE, 64, 0, 0);
+        for (List<Integer> invalid : List.of(List.of(0, 2), List.of(2, 1), List.of(1, 0), List.of(1, 3))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT, code), List.of(new PgUnique("bad", invalid))))));
+        }
+        var largeCode = new PgColumn("code", PgCodecs.STRING, true, PgColumn.Role.VALUE, 1024, 0, 0);
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT, largeCode), List.of(unique)))));
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT, code), java.util.stream.IntStream.range(0, 17)
+                        .mapToObj(index -> new PgUnique("key_" + index, List.of(1, 2))).toList()))));
+    }
+
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(List<PgColumn> columns) {
+        return plan(columns, List.of());
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(List<PgColumn> columns, List<PgUnique> unique) {
         return new PgEntityPlan<>() {
             @Override
             public Class<TestEntity> javaType() {
@@ -132,6 +163,11 @@ final class PgModelBoundsTest {
             @Override
             public List<PgIndex<TestModel, TestEntity, Integer, ?>> indexes() {
                 return List.of();
+            }
+
+            @Override
+            public List<PgUnique> uniqueConstraints() {
+                return unique;
             }
 
             @Override

@@ -46,15 +46,23 @@ final class SchemaManifestGenerator {
                       ],
                       "primaryKey": [%s, %s],
                       "indexes": [%s],
+                      "uniqueConstraints": [%s],
                       "references": [%s],
                       "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": %s, "setting": "vev.tenant_id"},
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": false}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
                 entity.appendOnly(), columns(entity.properties()), quote(entity.tenant().columnName()),
-                quote(entity.id().columnName()), indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", references(model, entity),
+                quote(entity.id().columnName()), indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity), references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates);
+    }
+
+    private String uniqueConstraints(EntityMapping entity) {
+        return entity.uniqueConstraints().stream().map(unique ->
+                "{\"name\": %s, \"columns\": [%s], \"method\": \"btree\", \"nullsDistinct\": true, \"deferrable\": false}"
+                        .formatted(quote(unique.name()), unique.columns().stream().map(column -> quote(column.columnName()))
+                                .collect(Collectors.joining(", ")))).collect(Collectors.joining(", "));
     }
 
     private String references(CompiledModel model, EntityMapping source) {

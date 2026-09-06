@@ -14,7 +14,7 @@ Vev interprets a safe, closed selection of Jakarta Persistence 4.0.0-M6 annotati
 | Basic columns | Explicit `@Column`, including an explicitly written `nullable = true` or `nullable = false`; eager bounded scalar values with exact generated JDBC metadata | Reject Jakarta-default nullability, lazy basics, implicit names, unbounded strings/numerics, and unrecognized Java/JDBC mappings |
 | Mutable entity | Mandatory non-null `Integer`, `Long`, or `Short` `@Version`, initially zero, with explicit applied/missing/conflict outcomes | Reject mutation plans without a version token and negative or non-integral versions |
 | Append-only entity | Explicit Vev `@AppendOnly`; generated plans expose insert/read but no update | Reject attempts to update through the safe API |
-| Equality index | `@VevIndex` on an ordinary scalar value; explicit schema-unique index name; at most 16 per entity; bounded generated equality pages and nullable-only `IS NULL` pages | Reject index annotations on ID/tenant/version, unique or partial/expression/include indexes, wrong key order, excessive retained-key size, and undeclared secondary indexes |
+| Equality index | `@VevIndex` on an ordinary scalar value; explicit schema-unique index name; at most 16 query indexes and unique constraints combined per entity; bounded generated equality pages and nullable-only `IS NULL` pages | Reject index annotations on ID/tenant/version, unique or partial/expression/include indexes, wrong key order, excessive retained-key size, and undeclared secondary indexes |
 | Enum columns | Explicit `@Enumerated(EnumType.STRING)` with bounded `varchar` and generated enum-typed index tokens | Reject implicit/ordinal mappings, `@EnumeratedValue`, unknown stored names, empty enums, over 1,024 constants, and names exceeding the column bound |
 | Transient state | Not accepted in the first record profile | Every record component must be an explicitly mapped scalar column |
 | Tenancy | Explicit Vev `@TenantKey`, an opaque model-typed `TenantScope<Model,T>` minted only after the generated single-use `TenantAuthority<Model,T>` is claimed by one verified `PgVev`, and generated structural tenant predicates | Reject cross-model, foreign-authority, reused-authority, missing, null, wrong-type, or entity/scope-mismatched tenant state before SQL |
@@ -25,7 +25,7 @@ A closed model has at most 128 entities and an entity has at most 64 columns. Th
 
 The current experiment treats ID non-reuse within a tenant as an application/schema invariant but cannot attest it. Vev therefore exposes neither physical delete nor create-capable upsert, and its verified application role must have no `DELETE` privilege. This removes the library's previous delete/reinsert ABA path, but privileged out-of-band changes can still violate the invariant.
 
-The initial live-schema profile is equally closed. Every mapped relation must be a permanent, logged, nonpartitioned, non-inherited built-in heap table with no rewrite rules or enabled user triggers. It has the exact immediate built-in B-tree `(tenant, id)` primary key plus exactly the generated `@VevIndex` set. Each secondary index must be non-unique, immediate, built-in B-tree, have keys exactly `(tenant, indexed value, id)` with default ascending/null ordering and expected collations/operator classes, and have no predicate, expression, included column, constraint ownership, custom option, or custom tablespace. Check constraints and unique indexes remain rejected. `@VevReference` declares a scalar reference within the same closed model: its Java type and bounds must exactly match the target identifier. The runtime verifies the exact composite `(tenant, reference)` to `(target tenant, target id)` foreign key, including built-in equality operators and four enabled integrity triggers. Only immediate, validated, enforced MATCH SIMPLE and NO ACTION semantics are accepted. Undeclared incoming or outgoing references remain rejected.
+The initial live-schema profile is equally closed. Every mapped relation must be a permanent, logged, nonpartitioned, non-inherited built-in heap table with no rewrite rules or enabled user triggers. It has the exact immediate built-in B-tree `(tenant, id)` primary key plus exactly the generated `@VevIndex` and named unique-constraint sets. Each query index must be non-unique, immediate, built-in B-tree, have keys exactly `(tenant, indexed value, id)` with default ascending/null ordering and expected collations/operator classes, and have no predicate, expression, included column, constraint ownership, custom option, or custom tablespace. Check constraints and undeclared unique indexes remain rejected. Explicit tenant-scoped `@UniqueConstraint` declarations require immediate, validated/enforced uniqueness with PostgreSQL `NULLS DISTINCT` semantics and exact built-in B-tree columns, collations, and default operator classes. `@VevReference` declares a scalar reference within the same closed model: its Java type and bounds must exactly match the target identifier. The runtime verifies the exact composite `(tenant, reference)` to `(target tenant, target id)` foreign key, including built-in equality operators and four enabled integrity triggers. Only immediate, validated, enforced MATCH SIMPLE and NO ACTION semantics are accepted. Undeclared incoming or outgoing references remain rejected.
 
 ## Explicit scalar references
 
@@ -54,6 +54,38 @@ Self-references use the same contract. Vev performs no implicit fetch, cascade, 
 insert reordering; callers insert referenced rows before their dependants, or use
 one atomic batch for a self-referencing set.
 
+## Tenant-scoped uniqueness
+
+Vev interprets Jakarta's [`@UniqueConstraint`](https://jakarta.ee/specifications/persistence/4.0/apidocs/jakarta.persistence/jakarta/persistence/uniqueconstraint)
+as an explicit migration contract:
+
+```java
+@Table(name = "user_handle", schema = "accounts", uniqueConstraints =
+        @UniqueConstraint(name = "user_handle_tenant_handle_key",
+                          columnNames = {"tenant_id", "handle"}))
+```
+
+The name is mandatory. `columnNames` must list distinct mapped database column
+names, starting with the tenant column and followed by ordinary scalar values.
+The primary identifier and version are not unique business-key components. Each
+constraint has at most 32 columns and a conservative 1,536-byte maximum key size;
+an entity has at most 16 query indexes and unique constraints combined.
+
+The migration installs `CONSTRAINT user_handle_tenant_handle_key UNIQUE
+(tenant_id, handle)`. Vev verifies the exact named constraint and backing B-tree,
+column order, built-in default operator classes, matching collations, and immediate
+enforcement. This uses PostgreSQL's [default distinct-null semantics](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-UNIQUE-CONSTRAINTS):
+if any value component is null, multiple such rows are permitted. Otherwise the
+same tuple may occur once per tenant. A violation poisons and rolls back the whole
+lexical transaction, including earlier writes and other batch members.
+
+Global uniqueness, `NULLS NOT DISTINCT`, deferred or partial constraints, included
+columns, standalone unique indexes, `@Column(unique = true)`, and SQL fragments in
+`@UniqueConstraint.options` are rejected. A unique declaration adds database
+enforcement; it does not generate a query token or imply an application precheck.
+Unique keys cannot be swapped through temporary duplicate states in an immediate
+constraint. Applications must design such transitions explicitly.
+
 ## Deliberately rejected mappings
 
 | Mapping or behavior | Initial status | Reason |
@@ -69,7 +101,7 @@ one atomic batch for a self-referencing set.
 | Lazy basic fields | Rejected | Vev does not generate entity proxies |
 | Provider formulas, generated timestamps, custom types | Rejected | Provider-specific behavior cannot be approximated safely |
 | Physical delete and create-capable upsert | Absent | Removing a row can make an assigned ID reusable and reintroduce version-zero ABA; lifecycle retirement is a versioned update |
-| Check constraints and unique indexes | Rejected | The generator and verifier do not yet model their complete domain semantics |
+| Check constraints and undeclared unique indexes | Rejected | The generator and verifier do not yet model their complete domain semantics |
 | Foreign keys | Only explicit scalar `@VevReference` within the closed model | Exact tenant-composite keys, matching types and bounds, no cascade/deferral, and verified built-in enforcement |
 | Native SQL in entity/repository metadata | Rejected in the safe profile | Arbitrary SQL cannot be proven to preserve mapping and tenant invariants |
 

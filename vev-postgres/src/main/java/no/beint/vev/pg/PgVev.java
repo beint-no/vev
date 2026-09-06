@@ -1252,13 +1252,13 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyStructuralConstraints(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
-        verifySecondaryIndexes(connection, plan);
+        PgIndexes.verify(connection, plan);
 
         PgReferences.verify(connection, model, plan);
 
         String executableConstraintSql = """
                 SELECT pg_catalog.count(*) FILTER (
-                           WHERE constraint_definition.contype NOT IN ('p', 'n', 'f')),
+                           WHERE constraint_definition.contype NOT IN ('p', 'n', 'f', 'u')),
                        pg_catalog.count(*) FILTER (
                            WHERE constraint_definition.contype = 'n'),
                        pg_catalog.count(*) FILTER (
@@ -1288,135 +1288,6 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     throw new IllegalStateException(
                             "Executable or additional constraints are outside Vev's closed schema profile: "
                                     + plan.schemaName() + '.' + plan.tableName());
-                }
-            }
-        }
-    }
-
-    private void verifySecondaryIndexes(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
-        String shapeSql = """
-                SELECT index_relation.relname,
-                       access_method.amname = 'btree',
-                       index_namespace.nspname = namespace.nspname,
-                       index_relation.relkind = 'i',
-                       index_relation.relpersistence = 'p',
-                       NOT index_relation.relispartition,
-                       index_relation.reltablespace = 0,
-                       index_relation.reloptions IS NULL,
-                       NOT mapped_index.indisunique,
-                       NOT mapped_index.indisprimary,
-                       NOT mapped_index.indisexclusion,
-                       mapped_index.indimmediate,
-                       mapped_index.indisvalid,
-                       mapped_index.indisready,
-                       mapped_index.indislive,
-                       NOT mapped_index.indcheckxmin,
-                       NOT mapped_index.indisclustered,
-                       NOT mapped_index.indisreplident,
-                       NOT mapped_index.indnullsnotdistinct,
-                       mapped_index.indexprs IS NULL,
-                       mapped_index.indpred IS NULL,
-                       mapped_index.indnkeyatts = 3,
-                       mapped_index.indnatts = 3,
-                       index_constraint.oid IS NULL
-                  FROM pg_catalog.pg_index mapped_index
-                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
-                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-                  JOIN pg_catalog.pg_class index_relation ON index_relation.oid = mapped_index.indexrelid
-                  JOIN pg_catalog.pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
-                  JOIN pg_catalog.pg_am access_method ON access_method.oid = index_relation.relam
-                  LEFT JOIN pg_catalog.pg_constraint index_constraint
-                    ON index_constraint.conindid = mapped_index.indexrelid
-                 WHERE namespace.nspname = ?
-                   AND relation.relname = ?
-                   AND NOT mapped_index.indisprimary
-                 ORDER BY index_relation.relname
-                """;
-        List<PgIndex<M, ?, ?, ?>> expected = new ArrayList<>(plan.indexes());
-        expected.sort(java.util.Comparator.comparing(PgIndex::indexName));
-        try (PreparedStatement statement = connection.prepareStatement(shapeSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                for (PgIndex<M, ?, ?, ?> index : expected) {
-                    if (!resultSet.next() || !index.indexName().equals(resultSet.getString(1))) {
-                        throw new IllegalStateException("Mapped secondary-index set does not match generated model: "
-                                + plan.schemaName() + '.' + plan.tableName());
-                    }
-                    for (int column = 2; column <= 24; column++) {
-                        if (!resultSet.getBoolean(column)) {
-                            throw new IllegalStateException("Mapped PostgreSQL index shape is unsafe: "
-                                    + plan.schemaName() + '.' + index.indexName());
-                        }
-                    }
-                    verifySecondaryIndexKeys(connection, plan, index);
-                }
-                if (resultSet.next()) {
-                    throw new IllegalStateException("Undeclared PostgreSQL secondary index exists: "
-                            + plan.schemaName() + '.' + resultSet.getString(1));
-                }
-            }
-        }
-    }
-
-    private void verifySecondaryIndexKeys(
-            Connection connection,
-            PgPlan<M, ?, ?, T> plan,
-            PgIndex<M, ?, ?, ?> index) throws SQLException {
-        String keysSql = """
-                SELECT attribute.attname,
-                       operator_namespace.nspname = 'pg_catalog',
-                       operator_class.opcdefault,
-                       (mapped_index.indcollation::pg_catalog.oid[])[key_position.position]
-                           = attribute.attcollation,
-                       (mapped_index.indoption::pg_catalog.int2[])[key_position.position] = 0
-                  FROM pg_catalog.pg_index mapped_index
-                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
-                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-                  JOIN pg_catalog.pg_class index_relation ON index_relation.oid = mapped_index.indexrelid
-                  JOIN pg_catalog.pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
-                  CROSS JOIN LATERAL pg_catalog.generate_subscripts(
-                      mapped_index.indkey::pg_catalog.int2[], 1) AS key_position(position)
-                  JOIN pg_catalog.pg_attribute attribute
-                    ON attribute.attrelid = relation.oid
-                   AND attribute.attnum = (mapped_index.indkey::pg_catalog.int2[])[key_position.position]
-                  JOIN pg_catalog.pg_opclass operator_class
-                    ON operator_class.oid = (mapped_index.indclass::pg_catalog.oid[])[key_position.position]
-                  JOIN pg_catalog.pg_namespace operator_namespace
-                    ON operator_namespace.oid = operator_class.opcnamespace
-                 WHERE namespace.nspname = ?
-                   AND relation.relname = ?
-                   AND index_namespace.nspname = ?
-                   AND index_relation.relname = ?
-                 ORDER BY key_position.position
-                """;
-        String idColumn = plan.columns().stream()
-                .filter(column -> column.role() == PgColumn.Role.ID)
-                .map(PgColumn::name)
-                .findFirst()
-                .orElseThrow();
-        String valueColumn = plan.columns().get(index.columnIndex()).name();
-        List<String> expectedColumns = List.of(plan.tenantColumn(), valueColumn, idColumn);
-        try (PreparedStatement statement = connection.prepareStatement(keysSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            statement.setString(3, plan.schemaName());
-            statement.setString(4, index.indexName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                for (String expectedColumn : expectedColumns) {
-                    if (!resultSet.next()
-                            || !expectedColumn.equals(resultSet.getString(1))
-                            || !resultSet.getBoolean(2)
-                            || !resultSet.getBoolean(3)
-                            || !resultSet.getBoolean(4)
-                            || !resultSet.getBoolean(5)) {
-                        throw new IllegalStateException("Mapped PostgreSQL index keys do not match generated query: "
-                                + plan.schemaName() + '.' + index.indexName());
-                    }
-                }
-                if (resultSet.next()) {
-                    throw new IllegalStateException("Mapped PostgreSQL index has undeclared key columns: "
-                            + plan.schemaName() + '.' + index.indexName());
                 }
             }
         }

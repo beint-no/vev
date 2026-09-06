@@ -5,6 +5,7 @@ import no.beint.vev.pg.PgCodec;
 import no.beint.vev.pg.PgColumn;
 import no.beint.vev.pg.PgIndex;
 import no.beint.vev.pg.PgReference;
+import no.beint.vev.pg.PgUnique;
 
 import java.util.List;
 
@@ -81,6 +82,15 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * @return immutable scalar references within this model; empty for a model without references
      */
     default List<PgReference> references() {
+        return List.of();
+    }
+
+    /**
+     * Returns the complete generated tenant-scoped unique constraints.
+     *
+     * @return immutable immediate constraints using distinct-null semantics
+     */
+    default List<PgUnique> uniqueConstraints() {
         return List.of();
     }
 

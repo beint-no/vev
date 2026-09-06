@@ -44,6 +44,7 @@ final class JavaSourceGenerator {
         appendIndexTokens(source, entity, modelMarker);
         appendIndexList(source, entity, modelMarker);
         appendReferences(source, entity);
+        appendUniqueConstraints(source, entity);
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -95,6 +96,20 @@ final class JavaSourceGenerator {
         }
         source.append("}\n");
         return source.toString();
+    }
+
+    private void appendUniqueConstraints(StringBuilder source, EntityMapping entity) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgUnique> UNIQUE_CONSTRAINTS = java.util.List.of(");
+        for (int index = 0; index < entity.uniqueConstraints().size(); index++) {
+            UniqueMapping unique = entity.uniqueConstraints().get(index);
+            source.append(index == 0 ? "\n" : ",\n")
+                    .append("            new no.beint.vev.pg.PgUnique(\"").append(escape(unique.name()))
+                    .append("\", java.util.List.of(")
+                    .append(unique.columns().stream().map(column -> Integer.toString(entity.properties().indexOf(column)))
+                            .collect(java.util.stream.Collectors.joining(", "))).append("))");
+        }
+        source.append(");\n\n");
+        method(source, "public java.util.List<no.beint.vev.pg.PgUnique> uniqueConstraints()", "return UNIQUE_CONSTRAINTS;");
     }
 
     private void appendReferences(StringBuilder source, EntityMapping entity) {

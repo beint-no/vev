@@ -27,6 +27,7 @@ class PgPlan<M, E, K, T> {
     private final List<PgColumn> columns;
     private final List<PgIndex<M, E, K, ?>> indexes;
     private final List<PgReference> references;
+    private final List<PgUnique> uniqueConstraints;
     private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
 
@@ -67,11 +68,23 @@ class PgPlan<M, E, K, T> {
             boundedReferences.add(Objects.requireNonNull(reference, "reference"));
         }
         this.references = List.copyOf(boundedReferences);
+        List<PgUnique> boundedUnique = new ArrayList<>();
+        for (PgUnique unique : Objects.requireNonNull(source.uniqueConstraints(), "uniqueConstraints")) {
+            if (boundedUnique.size() + indexes.size() == VevIndex.MAXIMUM_INDEXES_PER_ENTITY) {
+                throw new IllegalArgumentException("Unique constraints and query indexes exceed Vev's index bound");
+            }
+            boundedUnique.add(Objects.requireNonNull(unique, "uniqueConstraint"));
+        }
+        this.uniqueConstraints = List.copyOf(boundedUnique);
         this.indexSql = new IdentityHashMap<>();
     }
 
     List<PgReference> references() {
         return references;
+    }
+
+    List<PgUnique> uniqueConstraints() {
+        return uniqueConstraints;
     }
 
     static PgPlan<?, ?, ?, ?> capture(PgEntityPlan<?, ?, ?, ?> source) {

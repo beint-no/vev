@@ -48,10 +48,12 @@ final class MappingCompiler {
     private static final int MAXIMUM_ENTITIES = 128;
     private static final int MAXIMUM_COLUMNS = 64;
     private static final int MAXIMUM_INDEXES = 16;
+    private static final int MAXIMUM_UNIQUE_KEY_COLUMNS = 32;
     private static final int MAXIMUM_INDEX_KEY_BYTES = 1_536;
     private static final long MAXIMUM_MATERIALIZED_RESULT_BYTES = 64L * 1_024L * 1_024L;
     private static final String ENTITY = "jakarta.persistence.Entity";
     private static final String TABLE = "jakarta.persistence.Table";
+    private static final String UNIQUE_CONSTRAINT = "jakarta.persistence.UniqueConstraint";
     private static final String ID = "jakarta.persistence.Id";
     private static final String COLUMN = "jakarta.persistence.Column";
     private static final String VERSION = "jakarta.persistence.Version";
@@ -63,7 +65,7 @@ final class MappingCompiler {
     private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
-    private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES");
+    private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES", "UNIQUE_CONSTRAINTS");
     private static final Set<String> ASSOCIATIONS = Set.of(
             "jakarta.persistence.OneToOne",
             "jakarta.persistence.OneToMany",
@@ -181,6 +183,7 @@ final class MappingCompiler {
         entities.forEach(entity -> byType.put(entity.qualifiedName(), entity));
         for (EntityMapping entity : entities) {
             Set<String> names = new HashSet<>();
+            entity.uniqueConstraints().forEach(unique -> names.add(unique.name()));
             for (PropertyMapping property : entity.properties()) {
                 if (!property.reference()) {
                     continue;
@@ -296,7 +299,6 @@ final class MappingCompiler {
         if (!catalogName.isEmpty()) {
             error(entity, "PostgreSQL catalogs cannot be selected per entity; @Table.catalog must be empty");
         }
-        rejectNonEmptyList(entity, table, "uniqueConstraints", "@Table.uniqueConstraints");
         rejectNonEmptyList(entity, table, "indexes", "@Table.indexes");
         rejectNonEmptyList(entity, table, "check", "@Table.check");
         rejectNonEmptyString(entity, table, "comment", "@Table.comment");
@@ -317,6 +319,7 @@ final class MappingCompiler {
             }
         }
         validateIndexes(entity, properties);
+        List<UniqueMapping> uniqueConstraints = compileUniqueConstraints(entity, table, properties);
         validateMaterializedResultBudget(entity, properties);
 
         List<PropertyMapping> ids = properties.stream().filter(PropertyMapping::id).toList();
@@ -387,6 +390,7 @@ final class MappingCompiler {
                 tableName,
                 tableSql,
                 List.copyOf(properties),
+                uniqueConstraints,
                 id,
                 tenant,
                 version,
@@ -559,6 +563,56 @@ final class MappingCompiler {
                 referenceTarget);
     }
 
+    private List<UniqueMapping> compileUniqueConstraints(
+            TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
+        AnnotationValue declaration = table == null ? null : annotationValue(table, "uniqueConstraints");
+        if (declaration == null || !(declaration.getValue() instanceof List<?> constraints)) {
+            return List.of();
+        }
+        if (constraints.size() + properties.stream().filter(PropertyMapping::indexed).count() > MAXIMUM_INDEXES) {
+            error(entity, "Unique constraints and query indexes must not exceed " + MAXIMUM_INDEXES + " per entity");
+            return List.of();
+        }
+        List<UniqueMapping> result = new ArrayList<>();
+        for (Object entry : constraints) {
+            if (!(entry instanceof AnnotationValue value) || !(value.getValue() instanceof AnnotationMirror unique)) {
+                error(entity, "@Table.uniqueConstraints requires explicit @UniqueConstraint metadata");
+                continue;
+            }
+            validateAnnotationShape(entity, unique);
+            String name = stringValue(unique, "name");
+            validateIdentifier(entity, name, "unique constraint");
+            rejectNonEmptyString(entity, unique, "options", "@UniqueConstraint.options");
+            AnnotationValue columnsValue = annotationValue(unique, "columnNames");
+            if (columnsValue == null || !(columnsValue.getValue() instanceof List<?> names)
+                    || names.size() < 2 || names.size() > MAXIMUM_UNIQUE_KEY_COLUMNS) {
+                error(entity, "@UniqueConstraint requires the tenant column followed by ordinary value columns");
+                continue;
+            }
+            List<PropertyMapping> columns = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (Object item : names) {
+                String columnName = item instanceof AnnotationValue columnValue ? String.valueOf(columnValue.getValue()) : "";
+                PropertyMapping column = properties.stream().filter(property -> property.columnName().equals(columnName))
+                        .findFirst().orElse(null);
+                if (column == null || !seen.add(columnName)) {
+                    error(entity, "@UniqueConstraint columns must be distinct explicitly mapped column names: " + columnName);
+                    continue;
+                }
+                if (columns.isEmpty() ? !column.tenant() : column.tenant() || column.id() || column.version()) {
+                    error(entity, "@UniqueConstraint requires the tenant column first and only ordinary values afterward");
+                }
+                columns.add(column);
+            }
+            if (columns.stream().mapToInt(this::maximumIndexBytes).sum() > MAXIMUM_INDEX_KEY_BYTES) {
+                error(entity, "Unique constraint " + name + " can exceed Vev's " + MAXIMUM_INDEX_KEY_BYTES + "-byte B-tree key budget");
+            }
+            result.add(new UniqueMapping(name, List.copyOf(columns)));
+        }
+        result.sort(Comparator.comparing(UniqueMapping::name));
+        return List.copyOf(result);
+    }
+
     private void validateIndexes(TypeElement entity, List<PropertyMapping> properties) {
         List<PropertyMapping> indexed = properties.stream().filter(PropertyMapping::indexed).toList();
         if (indexed.size() > MAXIMUM_INDEXES) {
@@ -649,6 +703,12 @@ final class MappingCompiler {
             mappedRelations.add(entity.schemaName() + '.' + entity.tableName());
         }
         for (EntityMapping entity : entities) {
+            for (UniqueMapping unique : entity.uniqueConstraints()) {
+                String index = entity.schemaName() + '.' + unique.name();
+                if (!indexes.add(index) || mappedRelations.contains(index)) {
+                    error(model, "Unique constraint backing index collides with a generated relation or index: " + index);
+                }
+            }
             for (PropertyMapping property : entity.properties()) {
                 if (!property.indexed()) {
                     continue;
@@ -899,6 +959,7 @@ final class MappingCompiler {
         String annotationName = annotationName(annotation);
         Set<String> expected = switch (annotationName) {
             case ENUMERATED -> Set.of("value");
+            case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target");
             default -> ANNOTATION_MEMBERS.get(annotationName);
         };
@@ -1002,6 +1063,11 @@ final class MappingCompiler {
                     canonical.append("reference|").append(property.referenceName()).append('|')
                             .append(property.referenceTarget()).append('\n');
                 }
+            }
+            for (UniqueMapping unique : entity.uniqueConstraints()) {
+                canonical.append("unique|").append(unique.name());
+                unique.columns().forEach(column -> canonical.append('|').append(column.columnName()));
+                canonical.append("|NULLS DISTINCT|NOT DEFERRABLE\n");
             }
         }
         try {

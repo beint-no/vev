@@ -190,6 +190,66 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void uniqueConstraintsAreTenantScopedAndKeepPostgresDistinctNullSemantics() {
+        UUID parent = id("unique-parent");
+        insert(account(parent, 7, 0, "first@example.test", "1.0000"), TENANT_7);
+        insert(account(parent, 8, 0, "second@example.test", "1.0000"), TENANT_8);
+        var first = new WorkItem(id("unique-first"), 7, 0L, WorkState.OPEN, parent);
+        var otherTenant = new WorkItem(id("unique-other-tenant"), 8, 0L, WorkState.OPEN, parent);
+        assertEquals(first, vev.write(TENANT_7, tx -> tx.entities().insert(WorkItemVev.INSTANCE, first)));
+        assertEquals(otherTenant, vev.write(TENANT_8, tx -> tx.entities().insert(WorkItemVev.INSTANCE, otherTenant)));
+        var distinctNulls = Batch.copyOf(List.of(
+                new WorkItem(id("unique-null-state-a"), 7, 0L, null, parent),
+                new WorkItem(id("unique-null-state-b"), 7, 0L, null, parent),
+                new WorkItem(id("unique-null-parent-a"), 7, 0L, WorkState.OPEN, null),
+                new WorkItem(id("unique-null-parent-b"), 7, 0L, WorkState.OPEN, null)));
+        assertEquals(distinctNulls, vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, distinctNulls)));
+        var duplicate = new WorkItem(id("unique-duplicate"), 7, 0L, WorkState.OPEN, parent);
+        UUID earlier = id("unique-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "earlier@example.test", "2.0000"));
+            tx.entities().insert(WorkItemVev.INSTANCE, duplicate);
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(duplicate.id()))).isEmpty());
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).orElseThrow());
+    }
+
+    @Test
+    void uniqueViolationsInBatchInsertsAndUpdatesRollbackEveryMember() {
+        UUID parent = id("unique-batch-parent");
+        insert(account(parent, 7, 0, "parent@example.test", "1.0000"), TENANT_7);
+        var first = new WorkItem(id("unique-batch-a"), 7, 0L, WorkState.OPEN, parent);
+        var second = new WorkItem(id("unique-batch-b"), 7, 0L, WorkState.OPEN, parent);
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(first, second)))));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(second.id()))).isEmpty());
+        var secondOriginal = new WorkItem(second.id(), 7, 0L, WorkState.CLOSED, parent);
+        vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(first, secondOriginal))));
+        var firstChanged = new WorkItem(first.id(), 7, 0L, WorkState.CLOSED, parent);
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx ->
+                tx.entities().updateMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(firstChanged, secondOriginal)))));
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).orElseThrow());
+        assertEquals(secondOriginal, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(second.id()))).orElseThrow());
+    }
+
+    @Test
+    void bootstrapRequiresExactGeneratedUniqueConstraints() throws SQLException {
+        for (String variant : List.of("missing", "wrongColumns", "wrongOrder", "global", "deferred", "nullsNotDistinct",
+                "included", "nonUniqueIndex", "standaloneUniqueIndex")) {
+            try {
+                database.setWorkItemUniqueConstraint(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.setWorkItemUniqueConstraint("valid");
+            }
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
     void batchInsertPreservesInputOrderAndRejectsDuplicateKeysAtomicallyBeforeSql() {
         Account third = account(
                 UUID.fromString("00000000-0000-0000-0000-000000000003"),

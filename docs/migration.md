@@ -19,14 +19,14 @@ Start with a flat aggregate that has:
 - a small, measurable query surface expressible as point/batch ID access, bounded ID traversal, or generated scalar equality/`IS NULL` pages;
 - synthetic integration fixtures that represent nullability and constraint edges.
 
-The mapped table cannot currently carry check constraints or unique secondary indexes. Scalar `@VevReference` components can preserve exact immediate tenant-composite foreign keys within the closed model; they do not imply loading or cascades. Each supported lookup index must be declared with `@VevIndex` and installed by the migration as the exact non-unique B-tree `(tenant, indexed value, id)`. If removing those database constraints would weaken an aggregate, it is not a migration candidate yet.
+The mapped table cannot currently carry check constraints. Named `@UniqueConstraint` declarations preserve immediate tenant-scoped uniqueness with PostgreSQL distinct-null semantics; global, deferred, partial, and standalone unique indexes are unsupported. Scalar `@VevReference` components can preserve exact immediate tenant-composite foreign keys within the closed model; they do not imply loading or cascades. Each supported lookup index must be declared with `@VevIndex` and installed by the migration as the exact non-unique B-tree `(tenant, indexed value, id)`. If removing those database constraints would weaken an aggregate, it is not a migration candidate yet.
 
 If an aggregate does not fit the supported profile, leave it on the existing provider. Do not remove an annotation merely to make compilation succeed unless the corresponding behavior is intentionally replaced.
 
 ## Suggested migration sequence
 
 1. Inventory entity annotations, provider annotations, repositories, JPQL/HQL, Criteria, `EntityManager` use, locks, callbacks, and transactional call sites.
-2. Select one bounded aggregate whose primary key, non-unique equality indexes, nullability, row security, and tenant-composite foreign keys fit Vev's verified profile. Preserve all business constraints; extend Vev before migrating a table with an unsupported constraint.
+2. Select one bounded aggregate whose primary key, non-unique equality indexes, tenant-scoped unique constraints, nullability, row security, and tenant-composite foreign keys fit Vev's verified profile. Preserve all business constraints; extend Vev before migrating a table with an unsupported constraint.
 3. Introduce a separate immutable Vev record model, add Vev processing, and treat every rejection as a compatibility decision. A Jakarta/Hibernate processor may remain in the same build for the distinct legacy entity types.
 4. Review generated metadata and the runtime's fixed SQL/schema contract in CI. Compilation does not inspect the live database; start `PgVev` against a migrated disposable PostgreSQL 18 database to exercise catalog attestation.
 5. Run differential reads against disposable representative synthetic schemas; compare canonical values and row counts.
