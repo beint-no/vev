@@ -17,7 +17,7 @@ public final class CheckCatalogProbe {
     public static void verify(Connection connection) throws SQLException {
         try (var statement = connection.createStatement()) {
             statement.execute("SET search_path = pg_catalog");
-            statement.execute("CREATE TEMP TABLE check_probe(id integer, label varchar(64), n numeric(12,2), stamp timestamptz)");
+            statement.execute("CREATE TEMP TABLE check_probe(id integer, label varchar(64), n numeric(12,2), stamp timestamptz, opened date, closed date)");
         }
         var catalog = new PgCheckCatalog(connection);
         for (String expression : List.of(
@@ -36,6 +36,7 @@ public final class CheckCatalogProbe {
                 "date_trunc('day', stamp)::date <= stamp::date",
                 "stamp >= ('2024-01-01'::date)::timestamptz",
                 "id::int8 * 2 > 0 AND n + 1 >= 1",
+                "closed >= opened + id", "opened <= closed - id", "closed - opened = id",
                 "octet_length('sample'::bytea) > 0 AND jsonb_typeof('{}'::jsonb) = 'object'",
                 "label ~ '^[a-z]+$'", "label LIKE 'a%'", "label COLLATE \"C\" <> ''")) {
             String tree = install(connection, expression);
@@ -53,8 +54,11 @@ public final class CheckCatalogProbe {
             statement.execute("CREATE FUNCTION pg_temp.check_equal(text, text) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT $1 = $2'");
             statement.execute("CREATE OPERATOR pg_temp.=== (LEFTARG = text, RIGHTARG = text, FUNCTION = pg_temp.check_equal)");
             statement.execute("CREATE COLLATION pg_temp.check_collation FROM \"C\"");
+            statement.execute("CREATE FUNCTION pg_temp.date_pli(date, integer) RETURNS date LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN RAISE EXCEPTION 'date arithmetic tripwire was executed'; END $$");
+            assertThrows(SQLException.class, () -> statement.execute("SELECT pg_temp.date_pli('2024-02-28'::date, 2)"));
         }
         for (String expression : List.of("pg_temp.check_tripwire(label)", "random() > 0", "txid_current() > 0",
+                "pg_temp.date_pli(opened, id) <= closed", "id + opened <= closed",
                 "current_setting('application_name') <> ''", "to_regclass(label) IS NOT NULL",
                 "label OPERATOR(pg_temp.===) 'alpha'", "label COLLATE pg_temp.check_collation <> ''",
                 "concat_ws('-', label, 'sample'::bytea) <> ''", "concat(ARRAY[label]) <> ''")) {

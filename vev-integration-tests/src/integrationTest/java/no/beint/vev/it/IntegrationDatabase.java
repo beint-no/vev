@@ -91,6 +91,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : dateWindowSchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             for (String sql : orderedSchemaStatements()) {
                 try (Statement statement = connection.createStatement()) {
                     statement.execute(sql);
@@ -108,8 +113,18 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared, vev_it.ranked_item, vev_it.kotlin_ranked");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared, vev_it.ranked_item, vev_it.kotlin_ranked, vev_it.date_window");
         }
+    }
+
+    private static List<String> dateWindowSchemaStatements() {
+        return List.of(
+                "CREATE TABLE vev_it.date_window (id integer NOT NULL, tenant_id integer NOT NULL, opened date NOT NULL, closed date, lead_days integer NOT NULL, lag_days integer NOT NULL, span_days integer NOT NULL, PRIMARY KEY(tenant_id,id), CONSTRAINT date_window_plus CHECK (closed >= opened + lead_days), CONSTRAINT date_window_minus CHECK (opened <= closed - lag_days), CONSTRAINT date_window_span CHECK (closed - opened = span_days))",
+                "ALTER TABLE vev_it.date_window OWNER TO vev_it_owner",
+                "ALTER TABLE vev_it.date_window ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.date_window FORCE ROW LEVEL SECURITY",
+                "CREATE POLICY date_window_tenant ON vev_it.date_window FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer) WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)",
+                "GRANT SELECT, INSERT(id,tenant_id,opened,closed,lead_days,lag_days,span_days) ON vev_it.date_window TO vev_it_app");
     }
 
     void seedOrderedRows() throws SQLException {

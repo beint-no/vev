@@ -146,7 +146,7 @@ final class PgCheckCatalog {
                 "texticlike", "texticnlike", "bpcharlike", "bpcharnlike", "bpchariclike", "bpcharicnlike",
                 "num_nonnulls", "num_nulls", "jsonb_typeof", "concat", "concat_ws", "textcat",
                 "text", "bpchar", "varchar", "int2", "int4", "int8", "numeric", "date", "timestamp", "timestamptz",
-                "date_trunc", "numeric_abs", "numeric_round", "numeric_trunc", "numeric_ceil", "numeric_floor"));
+                "date_trunc", "date_pli", "date_mii", "date_mi", "numeric_abs", "numeric_round", "numeric_trunc", "numeric_ceil", "numeric_floor"));
         for (String type : Set.of("bool", "int2", "int4", "int8", "int24", "int28", "int42", "int48", "int82", "int84",
                 "text", "bpchar", "numeric_", "date_", "timestamp_", "timestamptz_", "time_", "uuid_")) {
             for (String comparison : Set.of("eq", "ne", "lt", "le", "gt", "ge")) result.add(type + comparison);

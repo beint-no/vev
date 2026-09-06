@@ -58,7 +58,15 @@ tests, approved scalar operators/functions, relabels, one-dimensional array
 construction/coercion and scalar-array comparisons, `NULLIF`, `IS DISTINCT FROM`,
 `CASE`, and `COALESCE`. Approved builtin operations cover integer/decimal
 arithmetic and comparisons, text trimming/case/length/regular expressions,
-null counts, and selected date/time operations. The small stable-function
+null counts, and selected date/time operations. Date arithmetic includes
+`date + integer` and `date - integer` (calendar days) and `date - date` (integer
+day difference), through the pinned immutable builtin implementations. See the
+[PostgreSQL date/time operator contract](https://www.postgresql.org/docs/18/functions-datetime.html).
+The reversed `integer + date` SQL wrapper and arbitrary interval operations
+remain outside this reviewed set. A user function with the same name cannot
+pass the catalog boundary. Leap/year boundaries and nullable dates retain
+PostgreSQL semantics; arithmetic overflow, like a failed constraint, rolls back
+the whole lexical transaction. The small stable-function
 allowlist (`concat`, `concat_ws`, `date`, `date_trunc`, `timestamptz`) depends only
 on approved scalar inputs and the verified UTC context with `DateStyle = ISO, MDY`
 and `IntervalStyle = postgres`. Display settings must match the dedicated pool's

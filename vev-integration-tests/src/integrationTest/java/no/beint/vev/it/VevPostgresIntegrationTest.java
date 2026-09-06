@@ -1442,6 +1442,58 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void dateArithmeticChecksPreserveCalendarDaysNullSemanticsAndTenantIsolation() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            int firstId = binary ? 3 : 1;
+            var leap = new DateWindow(firstId, 7, LocalDate.of(2024, 2, 28), LocalDate.of(2024, 3, 1), 2, 1, 2);
+            var absent = new DateWindow(firstId + 1, 7, LocalDate.of(2024, 12, 31), null, 2, 2, 2);
+            runtime.write(authority.scope(7), tx -> {
+                tx.entities().insertMultiple(DateWindowVev.INSTANCE, Batch.copyOf(List.of(leap, absent)));
+                assertEquals(leap, tx.entities().find(DateWindowVev.INSTANCE.key(firstId)).orElseThrow());
+                assertEquals(absent, tx.entities().find(DateWindowVev.INSTANCE.key(firstId + 1)).orElseThrow());
+                return null;
+            });
+            runtime.write(authority.scope(8), tx -> {
+                assertTrue(tx.entities().find(DateWindowVev.INSTANCE.key(firstId)).isEmpty());
+                var year = new DateWindow(firstId, 8, LocalDate.of(2024, 12, 31), LocalDate.of(2025, 1, 2), 2, 2, 2);
+                tx.entities().insert(DateWindowVev.INSTANCE, year);
+                assertEquals(year, tx.entities().find(DateWindowVev.INSTANCE.key(firstId)).orElseThrow());
+                return null;
+            });
+            assertEquals(leap, runtime.read(authority.scope(7), tx -> tx.entities().find(DateWindowVev.INSTANCE.key(firstId))).orElseThrow());
+        }
+    }
+
+    @Test
+    void dateArithmeticConstraintAndOverflowFailuresRollBackWholeBatchesAndEarlierWrites() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            var good = new DateWindow(10, 7, LocalDate.of(2024, 2, 28), LocalDate.of(2024, 3, 1), 2, 1, 2);
+            for (String variant : List.of("plus", "minus", "span", "overflow")) {
+                var bad = new DateWindow(11, 7, good.opened(), good.closed(),
+                        variant.equals("plus") ? 3 : variant.equals("overflow") ? Integer.MAX_VALUE : 2,
+                        variant.equals("minus") ? 3 : 1, variant.equals("span") ? 3 : 2);
+                UUID earlier = id("date-check-" + binary + variant);
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "date-check@example.test", "1.0000"));
+                    assertThrows(IllegalStateException.class, () -> tx.entities().insertMultiple(DateWindowVev.INSTANCE, Batch.copyOf(List.of(good, bad))));
+                    assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+                    return null;
+                }), variant);
+                runtime.read(authority.scope(7), tx -> {
+                    assertTrue(tx.entities().find(AccountVev.INSTANCE.key(earlier)).isEmpty());
+                    assertTrue(tx.entities().find(DateWindowVev.INSTANCE.key(10)).isEmpty());
+                    assertTrue(tx.entities().find(DateWindowVev.INSTANCE.key(11)).isEmpty());
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
     void bootstrapRequiresExactDeclaredValidatedAndEnforcedCheckConstraints() throws SQLException {
         for (String variant : List.of("missing", "renamed", "weakened", "unvalidated", "unenforced", "noinherit", "extra", "unsafe")) {
             try {

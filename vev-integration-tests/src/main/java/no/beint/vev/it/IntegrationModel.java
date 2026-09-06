@@ -8,7 +8,7 @@ import no.beint.vev.fixtures.KotlinText;
 import no.beint.vev.fixtures.KotlinClock;
 import no.beint.vev.fixtures.KotlinReadOnly;
 
-@VevModel(entities = {Account.class, AuditEvent.class, WorkItem.class, SnapshotProbe.class, KotlinEntry.class, IdentityEntry.class, IdentityCounter.class, IdentityEvent.class, KotlinIdentity.class, LargeText.class, BinaryAsset.class, BinarySample.class, KotlinBinary.class, TextDocument.class, KotlinText.class, KotlinClock.class, ReadOnlySnapshot.class, ReadOnlyIdentity.class, KotlinReadOnly.class, SharedCatalog.class, CatalogSelection.class, no.beint.vev.fixtures.KotlinShared.class, RankedItem.class, no.beint.vev.fixtures.KotlinRanked.class})
+@VevModel(entities = {Account.class, AuditEvent.class, WorkItem.class, SnapshotProbe.class, KotlinEntry.class, IdentityEntry.class, IdentityCounter.class, IdentityEvent.class, KotlinIdentity.class, LargeText.class, BinaryAsset.class, BinarySample.class, KotlinBinary.class, TextDocument.class, KotlinText.class, KotlinClock.class, ReadOnlySnapshot.class, ReadOnlyIdentity.class, KotlinReadOnly.class, SharedCatalog.class, CatalogSelection.class, no.beint.vev.fixtures.KotlinShared.class, RankedItem.class, DateWindow.class, no.beint.vev.fixtures.KotlinRanked.class})
 public final class IntegrationModel {
     private IntegrationModel() {
     }
