@@ -9,10 +9,10 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * Generated immediate tenant-scoped unique constraint with PostgreSQL {@code NULLS DISTINCT} semantics.
+ * Generated immediate unique constraint with PostgreSQL {@code NULLS DISTINCT} semantics.
  *
  * @param name exact constraint and backing-index name
- * @param columnIndexes ordered constructor positions, starting with the tenant column
+ * @param columnIndexes ordered constructor positions, starting with the tenant column for tenant-owned mappings
  */
 public record PgUnique(String name, List<Integer> columnIndexes) {
     /** PostgreSQL's maximum number of columns in a single index. */
@@ -23,7 +23,7 @@ public record PgUnique(String name, List<Integer> columnIndexes) {
      * Captures bounded, immutable constraint metadata.
      *
      * @param name explicit database constraint name
-     * @param columnIndexes tenant column followed by one or more ordinary value columns
+     * @param columnIndexes ordered mapped column positions, validated against the owning plan
      */
     public PgUnique {
         if (name == null || !IDENTIFIER.matcher(name).matches()) {
@@ -37,8 +37,8 @@ public record PgUnique(String name, List<Integer> columnIndexes) {
             }
             bounded.add(position);
         }
-        if (bounded.size() < 2 || new HashSet<>(bounded).size() != bounded.size()) {
-            throw new IllegalArgumentException("Unique constraints require distinct tenant and value columns");
+        if (bounded.isEmpty() || new HashSet<>(bounded).size() != bounded.size()) {
+            throw new IllegalArgumentException("Unique constraints require distinct mapped columns");
         }
         columnIndexes = List.copyOf(bounded);
     }

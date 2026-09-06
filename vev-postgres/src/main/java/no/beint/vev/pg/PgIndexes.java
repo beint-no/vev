@@ -68,10 +68,13 @@ final class PgIndexes {
         String idColumn = plan.columns().stream().filter(column -> column.role() == PgColumn.Role.ID)
                 .findFirst().orElseThrow().name();
         for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
-            expected.add(new ExpectedIndex(index.indexName(), false,
-                    plan.columns().get(index.columnIndex()).role() == PgColumn.Role.ID
-                            ? List.of(plan.tenantColumn(), idColumn)
-                            : List.of(plan.tenantColumn(), plan.columns().get(index.columnIndex()).name(), idColumn)));
+            List<String> indexColumns = new ArrayList<>();
+            if (!plan.shared()) indexColumns.add(plan.tenantColumn());
+            if (plan.columns().get(index.columnIndex()).role() != PgColumn.Role.ID) {
+                indexColumns.add(plan.columns().get(index.columnIndex()).name());
+            }
+            indexColumns.add(idColumn);
+            expected.add(new ExpectedIndex(index.indexName(), false, List.copyOf(indexColumns)));
         }
         for (PgUnique unique : plan.uniqueConstraints()) {
             expected.add(new ExpectedIndex(unique.name(), true,

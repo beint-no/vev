@@ -20,11 +20,11 @@ Consumers must reject unknown format versions or profiles. The resource includes
 - entity Java types, schema/table identifiers, append-only semantics, explicit `readOnly: true` where declared, and maximum row counts;
 - ordered columns with boxed Java type, PostgreSQL type, nullability, structural
   role, string code-point or binary byte length, decimal precision, scale, and sorted enum names;
-- ordered primary-key and secondary-index columns, plus named tenant-scoped unique constraints with distinct-null and immediate enforcement semantics;
+- ordered primary-key and secondary-index columns, plus named scoped or explicitly shared unique constraints with distinct-null and immediate enforcement semantics;
 - explicit scalar references with composite source/target columns, exact target relation, and immediate non-cascading enforcement;
 - named exact check expressions and generated length bounds: `BINARY_MAXIMUM` with `maximumBytes`, or `TEXT_MAXIMUM` with `maximumCodePoints`, plus the column and canonical expression;
 - assigned/identity identifier strategy and the required owned-sequence contract for identity creation;
-- required enabled/forced tenant row security and its transaction-local setting;
+- required enabled/forced tenant row security and its transaction-local setting; explicitly shared reference tables instead declare disabled/unforced RLS and an empty policy list;
 - the exact application insert/update column sets and whether `@VevDelete` requires table-level delete access; read-only mappings have no write or sequence privileges.
 
 The profile also requires the catalog restrictions in
@@ -39,3 +39,5 @@ catalog and privileges. There is no automated migration comparison task yet.
 Keep constraints which protect business correctness. If a required foreign key,
 check, unique constraint, or identity generator is outside the accepted profile,
 expand and verify Vev's contract before migrating that table.
+
+Explicit [shared mappings](shared-reference-mappings.md) add `shared: true` and `readOnly: true`, omit tenant metadata from row security, and record ID-only primary keys, global index/unique columns, and scalar reference columns for shared targets. Their fingerprint differs from tenant-owned mappings.

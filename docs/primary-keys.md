@@ -1,5 +1,7 @@
 # Physical primary keys and tenant traversal
 
+This page describes tenant-owned records. Explicit [shared reference mappings](shared-reference-mappings.md) instead require an ID-only primary key, with no tenant traversal prefix or tenant-qualified reference key.
+
 The scalar `@Id` is the identifier carried by Vev's typed API. The PostgreSQL
 primary key may contain that identifier alone or together with the tenant column.
 Declare a physical shape when it differs from the default:

@@ -55,11 +55,11 @@ install matching role grants and the new fingerprint before the runtime is
 constructed. A mapping change alone cannot remove an application's existing
 database privileges.
 
-This contract keeps the existing mandatory tenant key, explicit tenant
-predicates, forced RLS, and closed-model restrictions. It does not make a table
-global, bypass tenant ownership, permit arbitrary views or partial column sets,
-or introduce shared-data access. Global reference data, authentication data, and
-cross-tenant administration require separately specified access boundaries.
+By itself, this annotation retains the mandatory tenant key, explicit tenant
+predicates, forced RLS, and closed-model restrictions. Intentionally shared
+reference rows require the separate [@VevShared contract](shared-reference-mappings.md).
+Neither annotation permits arbitrary views, partial column sets, authentication
+access, or cross-tenant administration.
 
 Read failures use normal transaction poisoning and rollback, including rollback
 of earlier writes in a write transaction when malformed stored data is read and

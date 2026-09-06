@@ -960,8 +960,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     if (!"r".equals(resultSet.getString(1))
                             || !"p".equals(resultSet.getString(2))
                             || resultSet.getBoolean(3)
-                            || !resultSet.getBoolean(4)
-                            || !resultSet.getBoolean(5)
+                            || resultSet.getBoolean(4) == plan.shared()
+                            || resultSet.getBoolean(5) == plan.shared()
                             || resultSet.getBoolean(6)
                             || !resultSet.getBoolean(7)
                             || resultSet.getBoolean(8)
@@ -984,7 +984,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             || resultSet.getBoolean(26)
                             || resultSet.getBoolean(27)
                             || resultSet.getBoolean(28)) {
-                        throw new IllegalStateException("Mapped table must use a least-privilege role and forced row security: "
+                        throw new IllegalStateException("Mapped table must use least privilege and its declared row-security profile: "
                                 + plan.schemaName() + '.' + plan.tableName());
                     }
                     boolean versioned = plan instanceof PgVersionPlan<?, ?, ?, ?, ?>;
@@ -1305,6 +1305,26 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyPolicy(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
+        if (plan.shared()) {
+            // Never deparse a policy on a shared table, even when RLS is disabled.
+            // Unexpected policy constants could invoke an untrusted output routine during pg_get_expr.
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT pg_catalog.count(*)
+                      FROM pg_catalog.pg_policy policy
+                      JOIN pg_catalog.pg_class relation ON relation.oid = policy.polrelid
+                      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+                     WHERE namespace.nspname = ? AND relation.relname = ?
+                    """)) {
+                statement.setString(1, plan.schemaName());
+                statement.setString(2, plan.tableName());
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next() || rows.getLong(1) != 0 || rows.next()) {
+                        throw new IllegalStateException("Shared reference tables must have no row-security policies");
+                    }
+                }
+            }
+            return;
+        }
         String sql = """
                 SELECT pg_catalog.count(*),
                        COALESCE(pg_catalog.bool_and(

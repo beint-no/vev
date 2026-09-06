@@ -24,7 +24,7 @@ import java.util.List;
  * @param <M> closed-model marker type
  * @param <E> entity snapshot type
  * @param <K> primary-key type
- * @param <T> tenant-key type
+ * @param <T> ambient model tenant-key type
  */
 public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     /**
@@ -100,7 +100,7 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     }
 
     /**
-     * Returns the complete generated tenant-scoped unique constraints.
+     * Returns the complete generated scoped or shared unique constraints.
      *
      * @return immutable immediate constraints using distinct-null semantics
      */

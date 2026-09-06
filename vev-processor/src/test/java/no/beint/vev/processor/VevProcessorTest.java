@@ -920,6 +920,115 @@ final class VevProcessorTest {
     }
 
     @Test
+    void sharedMappingsGenerateExplicitReadOnlyOwnershipAndIdenticalSourceAndBinaryPlans() throws IOException, ReflectiveOperationException {
+        for (boolean identity : List.of(false, true)) {
+            for (boolean version : List.of(false, true)) {
+                var sources = sharedSources();
+                sources.computeIfPresent("example/AReference.java", (path, text) -> {
+                    String result = identity ? text.replace("@Id @Column", "@Id @GeneratedValue(strategy = GenerationType.IDENTITY) @Column") : text;
+                    return version ? result : result.replace("@Version ", "");
+                });
+                Compilation source = compile(sources);
+                assertTrue(source.success(), source.diagnostics());
+                String plan = source.generated("example/AReferenceVev.java");
+                assertTrue(plan.contains("PgSharedEntityPlan<example.BillingModelVev.Model, example.AReference, java.lang.Long, java.util.UUID>"));
+                for (String absent : List.of("tenantCodec()", "tenantColumn()", "tenantKeyOf(", "PgTenantEntityPlan<", "AssignedEntityType", "PgGeneratedEntityPlan", "PgVersionedEntityPlan", "record New(")) {
+                    assertFalse(plan.contains(absent), absent);
+                }
+                assertEquals(identity, plan.contains("PgIdentityEntityPlan<"));
+                String manifest = source.manifest("example.BillingModel");
+                assertTrue(manifest.contains("\"shared\": true"));
+                assertTrue(manifest.contains("\"primaryKey\": [\"id\"]"));
+                assertTrue(manifest.contains("\"columns\": [\"label\", \"id\"]"));
+                assertTrue(manifest.contains("\"columns\": [\"code\"]"));
+                assertTrue(manifest.contains("\"rowSecurity\": {\"enabled\": false, \"forced\": false, \"policies\": []}"));
+                assertTrue(manifest.contains("\"columns\": [\"parent_id\"], \"targetSchema\": \"ledger\", \"targetTable\": \"shared_reference\", \"targetColumns\": [\"id\"]"));
+                try (var loader = new java.net.URLClassLoader(new java.net.URL[]{source.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+                    var model = (no.beint.vev.pg.PgModel<?, ?>) loader.loadClass("example.BillingModelVev").getField("POSTGRES").get(null);
+                    assertEquals(java.util.UUID.class, model.tenantType());
+                    assertEquals(3, model.plans().size());
+                }
+                String model = sources.remove("example/BillingModel.java");
+                Compilation dependency = compile(sources, "", false);
+                assertTrue(dependency.success(), dependency.diagnostics());
+                Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+                assertTrue(binary.success(), binary.diagnostics());
+                assertEquals(plan, binary.generated("example/AReferenceVev.java"));
+                assertEquals(manifest, binary.manifest("example.BillingModel"));
+            }
+        }
+    }
+
+    @Test
+    void sharedMappingsRejectImplicitAccessTenantOwnershipAndForeignTenantReferences() throws IOException {
+        var cases = new LinkedHashMap<String, String>();
+        cases.put("@VevShared requires @VevReadOnly", "noReadOnly");
+        cases.put("@VevShared forbids @TenantKey", "tenant");
+        cases.put("Every Vev entity must declare exactly one @TenantKey", "implicit");
+        cases.put("requires at least one tenant-owned mapping", "onlyShared");
+        cases.put("@VevShared requires an ID-only primary key", "primaryKey");
+        cases.put("@VevShared unique constraints may contain only VALUE columns", "uniqueId");
+        cases.put("@VevShared unique constraints require one to 32 VALUE columns", "emptyUnique");
+        cases.put("@VevShared rows cannot reference tenant-owned rows", "tenantReference");
+        cases.put("has no tenant order", "referenceOrder");
+        for (var entry : cases.entrySet()) {
+            var sources = sharedSources();
+            sources.computeIfPresent("example/AReference.java", (path, text) -> switch (entry.getValue()) {
+                case "noReadOnly" -> text.replace("@VevReadOnly", "");
+                case "tenant" -> text.replace("@Column(name = \"code\"", "@TenantKey @Column(name = \"code\"");
+                case "implicit" -> text.replace("@VevShared", "");
+                case "primaryKey" -> text.replace("@VevShared", "@VevShared @VevPrimaryKey(VevPrimaryKey.Shape.ID_TENANT)");
+                case "uniqueId" -> text.replace("columnNames = \"code\"", "columnNames = \"id\"");
+                case "emptyUnique" -> text.replace("columnNames = \"code\"", "columnNames = {}");
+                case "tenantReference" -> text.replace("target = AReference.class", "target = Account.class");
+                case "referenceOrder" -> text.replace("target = AReference.class", "target = AReference.class, tenantFirst = false");
+                default -> text;
+            });
+            if (entry.getValue().equals("onlyShared")) sources.computeIfPresent("example/BillingModel.java", (path, text) -> text.replace("AuditEvent.class, Account.class, ", ""));
+            Compilation source = compile(sources);
+            assertFalse(source.success(), entry.getValue());
+            assertTrue(source.diagnostics().contains(entry.getKey()), source.diagnostics());
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(binary.success(), entry.getValue());
+            assertTrue(binary.diagnostics().contains(entry.getKey()), binary.diagnostics());
+        }
+    }
+
+    @Test
+    void sharedReadOnlyCapabilitiesCannotCompileNativeWrites() throws IOException {
+        for (String operation : List.of("write.insert(AReferenceVev.INSTANCE, value)", "write.update(AReferenceVev.INSTANCE, value)",
+                "write.create(AReferenceVev.INSTANCE, value)", "new no.beint.vev.DeleteTarget<>(AReferenceVev.INSTANCE, 1L, 0L)")) {
+            var sources = sharedSources();
+            sources.put("example/SharedWrite.java", "package example; class SharedWrite { void run(no.beint.vev.WriteEntities<BillingModelVev.Model> write, AReference value) { " + operation + "; } }");
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), operation);
+            assertTrue(compilation.diagnostics().contains("AReferenceVev"), compilation.diagnostics());
+        }
+    }
+
+    private static Map<String, String> sharedSources() {
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.computeIfPresent("example/BillingModel.java", (path, text) -> text.replace("AuditEvent.class, Account.class", "AuditEvent.class, Account.class, AReference.class"));
+        sources.put("example/AReference.java", """
+                package example;
+                import jakarta.persistence.*;
+                import no.beint.vev.*;
+                @Entity @VevShared @VevReadOnly
+                @Table(name = "shared_reference", schema = "ledger", uniqueConstraints = @UniqueConstraint(name = "shared_code_key", columnNames = "code"))
+                public record AReference(
+                    @Id @Column(name = "id", nullable = false) Long id,
+                    @Version @Column(name = "version", nullable = false) Long version,
+                    @Column(name = "code", nullable = false, length = 32) String code,
+                    @VevIndex(name = "shared_label_idx") @Column(name = "label", nullable = true, length = 64) String label,
+                    @VevReference(name = "shared_parent_fk", target = AReference.class) @Column(name = "parent_id", nullable = true) Long parentId) {}
+                """);
+        return sources;
+    }
+
+    @Test
     void readOnlyMappingsSeparateStoredIdentityAndVersionFromWriteCapabilities() throws IOException {
         for (boolean identity : List.of(false, true)) {
             for (boolean version : List.of(false, true)) {

@@ -11,7 +11,8 @@ import java.lang.annotation.Target;
  *
  * <p>The processor emits a closed typed query token. Runtime bootstrap then attests the exact migration-installed,
  * non-unique B-tree over tenant key, annotated value, and entity identifier. An identifier index has only the
- * tenant and identifier columns. Tenant and version components cannot be annotated. This annotation never
+ * tenant and identifier columns. Explicitly shared records omit the tenant prefix.
+ * Tenant and version components cannot be annotated. This annotation never
  * implies uniqueness.</p>
  */
 @Documented

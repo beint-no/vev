@@ -29,9 +29,10 @@ final class SchemaManifestGenerator {
         String indexes = entity.properties().stream().filter(PropertyMapping::indexed)
                 .map(property -> """
                             {"name": %s, "method": "btree", "unique": false, "columns": [%s]}"""
-                        .formatted(quote(property.indexName()), property.id()
-                                ? quote(entity.tenant().columnName()) + ", " + quote(entity.id().columnName())
-                                : quote(entity.tenant().columnName()) + ", " + quote(property.columnName()) + ", " + quote(entity.id().columnName())))
+                        .formatted(quote(property.indexName()),
+                                (entity.shared() ? "" : quote(entity.tenant().columnName()) + ", ")
+                                        + (property.id() ? "" : quote(property.columnName()) + ", ")
+                                        + quote(entity.id().columnName())))
                 .collect(Collectors.joining(",\n")).indent(8).stripTrailing();
         String updates = entity.properties().stream()
                 .filter(property -> !entity.readOnly() && !entity.appendOnly() && !property.id() && !property.tenant())
@@ -51,11 +52,11 @@ final class SchemaManifestGenerator {
                       "uniqueConstraints": [%s],
                       "checkConstraints": [%s],
                       "references": [%s],
-                      "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": %s, "setting": "vev.tenant_id"},
+                      "rowSecurity": %s,
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": %s}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
-                entity.appendOnly(), (entity.readOnly() ? "\n      \"readOnly\": true," : "") + identity(entity),
+                entity.appendOnly(), (entity.shared() ? "\n      \"shared\": true," : "") + (entity.readOnly() ? "\n      \"readOnly\": true," : "") + identity(entity),
                 entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
                 indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
                 entity.checkConstraints().stream().map(check -> check.kind() == CheckMapping.Kind.EXACT
@@ -66,7 +67,9 @@ final class SchemaManifestGenerator {
                                         check.maximumLength(), quote(check.expression())))
                         .collect(Collectors.joining(", ")),
                 references(model, entity),
-                quote(entity.tenant().columnName()), entity.properties().stream()
+                entity.shared() ? "{\"enabled\": false, \"forced\": false, \"policies\": []}"
+                        : "{\"enabled\": true, \"forced\": true, \"tenantColumn\": %s, \"setting\": \"vev.tenant_id\"}".formatted(quote(entity.tenant().columnName())),
+                entity.properties().stream()
                         .filter(property -> !entity.readOnly())
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates, entity.deletable());
     }
@@ -99,14 +102,16 @@ final class SchemaManifestGenerator {
         return source.properties().stream().filter(PropertyMapping::reference).map(property -> {
             EntityMapping target = model.entities().stream()
                     .filter(candidate -> candidate.qualifiedName().equals(property.referenceTarget())).findFirst().orElseThrow();
+            String sourceColumns = target.shared() ? quote(property.columnName())
+                    : quote(property.referenceTenantFirst() ? source.tenant().columnName() : property.columnName()) + ", "
+                            + quote(property.referenceTenantFirst() ? property.columnName() : source.tenant().columnName());
+            String targetColumns = target.shared() ? quote(target.id().columnName())
+                    : quote(property.referenceTenantFirst() ? target.tenant().columnName() : target.id().columnName()) + ", "
+                            + quote(property.referenceTenantFirst() ? target.id().columnName() : target.tenant().columnName());
             return """
-                    {"name": %s, "columns": [%s, %s], "targetSchema": %s, "targetTable": %s, "targetColumns": [%s, %s], "match": "SIMPLE", "onUpdate": "NO ACTION", "onDelete": "NO ACTION", "deferrable": false}"""
-                    .formatted(quote(property.referenceName()),
-                            quote(property.referenceTenantFirst() ? source.tenant().columnName() : property.columnName()),
-                            quote(property.referenceTenantFirst() ? property.columnName() : source.tenant().columnName()),
-                            quote(target.schemaName()), quote(target.tableName()),
-                            quote(property.referenceTenantFirst() ? target.tenant().columnName() : target.id().columnName()),
-                            quote(property.referenceTenantFirst() ? target.id().columnName() : target.tenant().columnName()));
+                    {"name": %s, "columns": [%s], "targetSchema": %s, "targetTable": %s, "targetColumns": [%s], "match": "SIMPLE", "onUpdate": "NO ACTION", "onDelete": "NO ACTION", "deferrable": false}"""
+                    .formatted(quote(property.referenceName()), sourceColumns,
+                            quote(target.schemaName()), quote(target.tableName()), targetColumns);
         }).collect(Collectors.joining(", "));
     }
 

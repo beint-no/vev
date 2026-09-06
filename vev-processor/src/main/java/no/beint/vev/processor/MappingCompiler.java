@@ -66,6 +66,7 @@ final class MappingCompiler {
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final String VEV_ROWS = "no.beint.vev.VevRows";
     private static final String VEV_DELETE = "no.beint.vev.VevDelete";
+    private static final String VEV_SHARED = "no.beint.vev.VevShared";
     private static final String VEV_READ_ONLY = "no.beint.vev.VevReadOnly";
     private static final String VEV_BINARY = "no.beint.vev.VevBinary";
     private static final String VEV_TEXT = "no.beint.vev.VevText";
@@ -181,7 +182,7 @@ final class MappingCompiler {
                 fingerprint);
         JavaSourceGenerator generator = new JavaSourceGenerator();
         for (EntityMapping entity : entities) {
-            writeSource(entity.planQualifiedName(), generator.entityPlan(entity), entity.declaration());
+            writeSource(entity.planQualifiedName(), generator.entityPlan(entity, model.tenantType()), entity.declaration());
         }
         writeSource(modelQualifiedName, generator.modelRegistry(model), modelDeclaration);
         writeManifest(model);
@@ -212,7 +213,13 @@ final class MappingCompiler {
                         || property.maximumLength() != target.id().maximumLength()) {
                     error(property.declaration(), "@VevReference must use the target's exact scalar identifier type and bounds");
                 }
-                if (target != null && target.primaryKeyShape().equals("ID")
+                if (target != null && entity.shared() && !target.shared()) {
+                    error(property.declaration(), "@VevShared rows cannot reference tenant-owned rows");
+                }
+                if (target != null && target.shared() && !property.referenceTenantFirst()) {
+                    error(property.declaration(), "@VevReference to shared rows has no tenant order; omit tenantFirst");
+                }
+                if (target != null && !target.shared() && target.primaryKeyShape().equals("ID")
                         && target.uniqueConstraints().stream().noneMatch(unique -> tenantIdentityUnique(unique.columns()))) {
                     error(property.declaration(), "@VevReference target with an ID-only primary key requires a tenant-qualified @UniqueConstraint");
                 }
@@ -358,13 +365,17 @@ final class MappingCompiler {
         } else if (ids.size() > 1) {
             error(entity, "Compound identifiers are forbidden; declare exactly one scalar @Id");
         }
-        if (tenants.isEmpty()) {
+        boolean shared = annotation(entity, VEV_SHARED) != null;
+        if (shared && !tenants.isEmpty()) {
+            error(entity, "@VevShared forbids @TenantKey; shared rows are intentionally visible to every tenant");
+        } else if (!shared && tenants.isEmpty()) {
             error(entity, "Every Vev entity must declare exactly one @TenantKey");
         } else if (tenants.size() > 1) {
             error(entity, "Every Vev entity must declare exactly one @TenantKey, but found " + tenants.size());
         }
         boolean appendOnly = annotation(entity, APPEND_ONLY) != null;
         boolean readOnly = annotation(entity, VEV_READ_ONLY) != null;
+        if (shared && !readOnly) error(entity, "@VevShared requires @VevReadOnly");
         if (appendOnly && readOnly) error(entity, "@VevReadOnly and @AppendOnly are distinct capabilities and cannot be combined");
         if (appendOnly && !versions.isEmpty()) {
             error(entity, "@AppendOnly entities must not declare @Version because update and delete plans do not exist");
@@ -382,11 +393,12 @@ final class MappingCompiler {
             error(entity, "@VevDelete requires a versioned entity with a generated IDENTITY; assigned, read-only, and append-only entities cannot be deleted");
         }
         AnnotationMirror primaryKey = annotation(entity, VEV_PRIMARY_KEY);
-        String primaryKeyShape = primaryKey == null ? "TENANT_ID" : enumValue(primaryKey, "value");
+        String primaryKeyShape = primaryKey == null ? (shared ? "ID" : "TENANT_ID") : enumValue(primaryKey, "value");
+        if (shared && !primaryKeyShape.equals("ID")) error(entity, "@VevShared requires an ID-only primary key");
         if (!Set.of("TENANT_ID", "ID_TENANT", "ID").contains(primaryKeyShape)) {
             error(entity, "@VevPrimaryKey must select TENANT_ID, ID_TENANT, or ID");
         }
-        if (id != null && !primaryKeyShape.equals("TENANT_ID") && !id.indexed()
+        if (!shared && id != null && !primaryKeyShape.equals("TENANT_ID") && !id.indexed()
                 && uniqueConstraints.stream().noneMatch(unique -> tenantIdentityUnique(unique.columns())
                         && unique.columns().getFirst().tenant())) {
             error(entity, "An ID-first primary key requires @VevIndex on @Id or a tenant-first (tenant, ID) @UniqueConstraint for bounded scans");
@@ -411,14 +423,14 @@ final class MappingCompiler {
                 error(version.declaration(), "@Version must use Integer, Long, or Short for atomic PostgreSQL increment semantics");
             }
         }
-        if (id != null && tenant != null) {
+        if (id != null && (shared || tenant != null)) {
             validateIndexKeyBudgets(properties, id, tenant);
         }
 
         String entityPackage = packageName(entity);
         String planQualifiedName = qualify(entityPackage, entity.getSimpleName() + "Vev");
         rejectGeneratedTypeCollision(entity, planQualifiedName);
-        if (invalid || id == null || tenant == null || (!appendOnly && !readOnly && version == null)
+        if (invalid || id == null || (!shared && tenant == null) || (!appendOnly && !readOnly && version == null)
                 || tableName.isBlank() || schemaName.isBlank()) {
             return null;
         }
@@ -441,6 +453,7 @@ final class MappingCompiler {
                 version,
                 appendOnly,
                 readOnly,
+                shared,
                 deletable,
                 primaryKeyShape,
                 maximumRows);
@@ -723,6 +736,7 @@ final class MappingCompiler {
 
     private List<UniqueMapping> compileUniqueConstraints(
             TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
+        boolean shared = annotation(entity, VEV_SHARED) != null;
         AnnotationValue declaration = table == null ? null : annotationValue(table, "uniqueConstraints");
         if (declaration == null || !(declaration.getValue() instanceof List<?> constraints)) {
             return List.of();
@@ -743,8 +757,9 @@ final class MappingCompiler {
             rejectNonEmptyString(entity, unique, "options", "@UniqueConstraint.options");
             AnnotationValue columnsValue = annotationValue(unique, "columnNames");
             if (columnsValue == null || !(columnsValue.getValue() instanceof List<?> names)
-                    || names.size() < 2 || names.size() > MAXIMUM_UNIQUE_KEY_COLUMNS) {
-                error(entity, "@UniqueConstraint requires the tenant column followed by ordinary value columns");
+                    || names.size() < (shared ? 1 : 2) || names.size() > MAXIMUM_UNIQUE_KEY_COLUMNS) {
+                error(entity, shared ? "@VevShared unique constraints require one to 32 VALUE columns"
+                        : "@UniqueConstraint requires the tenant column followed by ordinary value columns");
                 continue;
             }
             List<PropertyMapping> columns = new ArrayList<>();
@@ -759,7 +774,11 @@ final class MappingCompiler {
                 }
                 columns.add(column);
             }
-            if (!tenantIdentityUnique(columns)) {
+            if (shared) {
+                if (columns.stream().anyMatch(column -> column.id() || column.tenant() || column.version())) {
+                    error(entity, "@VevShared unique constraints may contain only VALUE columns");
+                }
+            } else if (!tenantIdentityUnique(columns)) {
                 for (int index = 0; index < columns.size(); index++) {
                     PropertyMapping column = columns.get(index);
                     if (index == 0 ? !column.tenant() : column.tenant() || column.id() || column.version()) {
@@ -802,7 +821,7 @@ final class MappingCompiler {
 
     private void validateIndexKeyBudgets(
             List<PropertyMapping> properties, PropertyMapping id, PropertyMapping tenant) {
-        int identityBytes = Math.addExact(maximumIndexBytes(id), maximumIndexBytes(tenant));
+        int identityBytes = Math.addExact(maximumIndexBytes(id), tenant == null ? 0 : maximumIndexBytes(tenant));
         for (PropertyMapping property : properties) {
             if (!property.indexed()) {
                 continue;
@@ -850,7 +869,10 @@ final class MappingCompiler {
     private void validateSingleTenantType(TypeElement model, List<EntityMapping> entities) {
         Set<String> tenantTypes = new HashSet<>();
         for (EntityMapping entity : entities) {
-            tenantTypes.add(entity.tenant().boxedType());
+            if (!entity.shared()) tenantTypes.add(entity.tenant().boxedType());
+        }
+        if (tenantTypes.isEmpty() && !entities.isEmpty()) {
+            error(model, "A closed @VevModel requires at least one tenant-owned mapping to establish transaction authority");
         }
         if (tenantTypes.size() > 1) {
             error(model, "All entities in one closed @VevModel must use the same tenant key type, found " + tenantTypes);
@@ -907,7 +929,7 @@ final class MappingCompiler {
         for (AnnotationMirror annotation : entity.getAnnotationMirrors()) {
             String name = annotationName(annotation);
             if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY)
-                    || name.equals(VEV_ROWS) || name.equals(VEV_DELETE) || name.equals(VEV_READ_ONLY)) {
+                    || name.equals(VEV_ROWS) || name.equals(VEV_DELETE) || name.equals(VEV_READ_ONLY) || name.equals(VEV_SHARED)) {
                 validateAnnotationShape(entity, annotation);
                 continue;
             }
@@ -1136,7 +1158,7 @@ final class MappingCompiler {
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
-            case VEV_DELETE, VEV_READ_ONLY -> Set.of();
+            case VEV_DELETE, VEV_READ_ONLY, VEV_SHARED -> Set.of();
             case VEV_BINARY -> Set.of("maximumBytes", "check");
             case VEV_TEXT -> Set.of("check");
             default -> ANNOTATION_MEMBERS.get(annotationName);
@@ -1225,6 +1247,7 @@ final class MappingCompiler {
                     .append(entity.appendOnly()).append('\n');
             if (entity.deletable()) canonical.append("delete|versionedIdentity\n");
             if (entity.readOnly()) canonical.append("readOnly\n");
+            if (entity.shared()) canonical.append("shared\n");
             for (CheckMapping check : entity.checkConstraints()) {
                 checkCharacters += check.expression().length();
                 if (checkCharacters > 16 * 1024 * 1024) {

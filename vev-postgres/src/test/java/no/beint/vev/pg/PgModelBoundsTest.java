@@ -345,7 +345,40 @@ final class PgModelBoundsTest {
                         return method.invoke(source, arguments);
                     });
             var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(missing)));
-            assertEquals("A PostgreSQL entity plan must explicitly declare tenant ownership", failure.getMessage());
+            assertEquals("A PostgreSQL entity plan must explicitly declare tenant ownership or shared read-only access", failure.getMessage());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sharedCapabilitiesRejectTenantRolesMutationMarkersAndMissingTransactionAuthority() {
+        var source = plan(List.of(ID));
+        for (String variant : List.of("tenantMarker", "tenantColumn", "tenantPrimaryKey", "assigned", "generated", "versioned", "deleted", "onlyShared")) {
+            var kinds = new java.util.ArrayList<Class<?>>();
+            kinds.add(no.beint.vev.pg.spi.PgSharedEntityPlan.class);
+            switch (variant) {
+                case "tenantMarker" -> kinds.add(PgTenantEntityPlan.class);
+                case "assigned" -> kinds.add(no.beint.vev.AssignedEntityType.class);
+                case "generated" -> kinds.add(no.beint.vev.pg.spi.PgGeneratedEntityPlan.class);
+                case "versioned" -> kinds.add(no.beint.vev.VersionedEntityType.class);
+                case "deleted" -> kinds.add(no.beint.vev.DeletableEntityType.class);
+                default -> { }
+            }
+            var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), kinds.toArray(Class<?>[]::new), (proxy, method, arguments) -> switch (method.getName()) {
+                        case "tenantCodec", "tenantColumn", "tenantKeyOf" -> throw new AssertionError("Shared plans have no tenant metadata");
+                        case "primaryKeyShape" -> variant.equals("tenantPrimaryKey") ? no.beint.vev.VevPrimaryKey.Shape.TENANT_ID : no.beint.vev.VevPrimaryKey.Shape.ID;
+                        case "columns" -> variant.equals("tenantColumn") ? List.of(ID, TENANT) : List.of(ID);
+                        default -> method.invoke(source, arguments);
+                    });
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(invalid)), variant);
+            String expected = switch (variant) {
+                case "tenantMarker", "generated" -> "mutually exclusive";
+                case "tenantColumn", "tenantPrimaryKey" -> "no tenant column and an ID-only primary key";
+                case "onlyShared" -> "at least one tenant-owned mapping";
+                default -> "cannot expose mutation capabilities";
+            };
+            org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains(expected), failure.getMessage());
         }
     }
 

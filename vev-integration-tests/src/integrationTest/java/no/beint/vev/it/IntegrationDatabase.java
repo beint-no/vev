@@ -86,6 +86,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : sharedSchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -98,8 +103,77 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared");
         }
+    }
+
+    void seedSharedRows() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO vev_it.shared_catalog(id, version, code, label, parent_id) OVERRIDING SYSTEM VALUE VALUES (1,0,'root','group',NULL), (2,9223372036854775807,'child',NULL,1), (3,1,'peer','group',1), (4,2,'leaf',NULL,2)");
+            statement.execute("INSERT INTO vev_it.kotlin_shared(id, label) OVERRIDING SYSTEM VALUE VALUES (1,'common')");
+        }
+    }
+
+    void sharedVariant(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            for (String table : List.of("catalog_selection", "shared_catalog", "kotlin_shared")) {
+                statement.execute("DROP TABLE IF EXISTS vev_it." + table + " CASCADE");
+            }
+            for (String sql : sharedSchemaStatements()) statement.execute(sql);
+            for (String sql : switch (variant) {
+                case "valid" -> List.<String>of();
+                case "noSelect" -> List.of("REVOKE SELECT ON vev_it.shared_catalog FROM vev_it_app");
+                case "insert" -> List.of("GRANT INSERT (label) ON vev_it.shared_catalog TO vev_it_app");
+                case "insertTable" -> List.of("GRANT INSERT ON vev_it.shared_catalog TO vev_it_app");
+                case "selectGrantOption" -> List.of("GRANT SELECT ON vev_it.shared_catalog TO vev_it_app WITH GRANT OPTION");
+                case "update" -> List.of("GRANT UPDATE (label) ON vev_it.shared_catalog TO vev_it_app");
+                case "delete" -> List.of("GRANT DELETE ON vev_it.shared_catalog TO vev_it_app");
+                case "sequence" -> List.of("GRANT USAGE ON SEQUENCE vev_it.shared_catalog_id_seq TO vev_it_app");
+                case "enabledRls" -> List.of("ALTER TABLE vev_it.shared_catalog ENABLE ROW LEVEL SECURITY");
+                case "forcedRls" -> List.of("ALTER TABLE vev_it.shared_catalog FORCE ROW LEVEL SECURITY");
+                case "dormantPolicy" -> List.of("CREATE POLICY unexpected_shared_policy ON vev_it.shared_catalog USING (true)");
+                case "indexOrder" -> List.of("DROP INDEX vev_it.shared_catalog_label_idx", "CREATE INDEX shared_catalog_label_idx ON vev_it.shared_catalog (id, label)");
+                case "wrongPrimaryKey" -> List.of("ALTER TABLE vev_it.kotlin_shared DROP CONSTRAINT kotlin_shared_pkey", "ALTER TABLE vev_it.kotlin_shared ADD PRIMARY KEY (id, label)");
+                case "missingUnique" -> List.of("ALTER TABLE vev_it.shared_catalog DROP CONSTRAINT shared_catalog_code_key");
+                case "wrongUnique" -> List.of("ALTER TABLE vev_it.shared_catalog DROP CONSTRAINT shared_catalog_code_key", "ALTER TABLE vev_it.shared_catalog ADD CONSTRAINT shared_catalog_code_key UNIQUE (label)");
+                case "missingReference" -> List.of("ALTER TABLE vev_it.catalog_selection DROP CONSTRAINT catalog_selection_catalog_fk");
+                case "wrongReference" -> List.of("ALTER TABLE vev_it.catalog_selection DROP CONSTRAINT catalog_selection_catalog_fk", "ALTER TABLE vev_it.catalog_selection ADD CONSTRAINT catalog_selection_catalog_fk FOREIGN KEY (catalog_id) REFERENCES vev_it.kotlin_shared (id)");
+                case "cascade" -> List.of("ALTER TABLE vev_it.catalog_selection DROP CONSTRAINT catalog_selection_catalog_fk", "ALTER TABLE vev_it.catalog_selection ADD CONSTRAINT catalog_selection_catalog_fk FOREIGN KEY (catalog_id) REFERENCES vev_it.shared_catalog (id) ON DELETE CASCADE");
+                case "matchFull" -> List.of("ALTER TABLE vev_it.catalog_selection DROP CONSTRAINT catalog_selection_catalog_fk", "ALTER TABLE vev_it.catalog_selection ADD CONSTRAINT catalog_selection_catalog_fk FOREIGN KEY (catalog_id) REFERENCES vev_it.shared_catalog (id) MATCH FULL");
+                case "unvalidated" -> List.of("ALTER TABLE vev_it.catalog_selection DROP CONSTRAINT catalog_selection_catalog_fk", "ALTER TABLE vev_it.catalog_selection ADD CONSTRAINT catalog_selection_catalog_fk FOREIGN KEY (catalog_id) REFERENCES vev_it.shared_catalog (id) NOT VALID");
+                case "deferred" -> List.of("ALTER TABLE vev_it.catalog_selection ALTER CONSTRAINT catalog_selection_catalog_fk DEFERRABLE");
+                case "disabledTrigger" -> List.of("ALTER TABLE vev_it.shared_catalog DISABLE TRIGGER ALL");
+                case "unmappedIncoming" -> List.of("CREATE TABLE vev_it.shared_external (id integer REFERENCES vev_it.shared_catalog(id))");
+                case "extraTenant" -> List.of("ALTER TABLE vev_it.shared_catalog ADD COLUMN tenant_id integer NOT NULL");
+                default -> throw new IllegalArgumentException(variant);
+            }) statement.execute(sql);
+            // Cleanup the unmapped relation after its constraint has been removed by DROP ... CASCADE on reset.
+            if (!variant.equals("unmappedIncoming")) statement.execute("DROP TABLE IF EXISTS vev_it.shared_external");
+        }
+    }
+
+    void negativeSharedVersion() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("UPDATE vev_it.shared_catalog SET version = -1 WHERE id = 1");
+        }
+    }
+
+    private static List<String> sharedSchemaStatements() {
+        return List.of(
+                "CREATE TABLE vev_it.shared_catalog (id integer GENERATED ALWAYS AS IDENTITY NOT NULL, version bigint NOT NULL, code varchar(32) NOT NULL, label varchar(64), parent_id integer, PRIMARY KEY(id), CONSTRAINT shared_catalog_code_key UNIQUE(code), CONSTRAINT shared_catalog_parent_fk FOREIGN KEY(parent_id) REFERENCES vev_it.shared_catalog(id))",
+                "ALTER TABLE vev_it.shared_catalog OWNER TO vev_it_owner",
+                "CREATE INDEX shared_catalog_label_idx ON vev_it.shared_catalog(label, id)",
+                "GRANT SELECT ON vev_it.shared_catalog TO vev_it_app",
+                "CREATE TABLE vev_it.kotlin_shared (id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY, label varchar(64) NOT NULL)",
+                "ALTER TABLE vev_it.kotlin_shared OWNER TO vev_it_owner",
+                "GRANT SELECT ON vev_it.kotlin_shared TO vev_it_app",
+                "CREATE INDEX kotlin_shared_id_idx ON vev_it.kotlin_shared(id)",
+                "CREATE TABLE vev_it.catalog_selection (id uuid NOT NULL, tenant_id integer NOT NULL, catalog_id integer, PRIMARY KEY(tenant_id,id), CONSTRAINT catalog_selection_catalog_fk FOREIGN KEY(catalog_id) REFERENCES vev_it.shared_catalog(id))",
+                "ALTER TABLE vev_it.catalog_selection OWNER TO vev_it_owner",
+                "ALTER TABLE vev_it.catalog_selection ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.catalog_selection FORCE ROW LEVEL SECURITY",
+                "CREATE POLICY catalog_selection_tenant ON vev_it.catalog_selection FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer) WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)",
+                "GRANT SELECT, INSERT (id,tenant_id,catalog_id) ON vev_it.catalog_selection TO vev_it_app");
     }
 
     void seedReadOnlyRows(UUID key) throws SQLException {

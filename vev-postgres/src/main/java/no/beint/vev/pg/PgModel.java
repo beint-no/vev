@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  * is inside the generated-plan safety profile.</p>
  *
  * @param <M> closed-model marker type
- * @param <T> tenant-key type shared by every entity
+ * @param <T> tenant-key type shared by tenant-owned mappings
  */
 public final class PgModel<M, T> {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
@@ -113,6 +113,7 @@ public final class PgModel<M, T> {
                     throw new IllegalArgumentException("Duplicate generated unique-constraint backing index: " + unique.name());
                 }
             }
+            if (plan.shared()) continue;
             if (discoveredTenantType == null) {
                 discoveredTenantType = plan.tenantCodec().javaType();
             } else if (discoveredTenantType != plan.tenantCodec().javaType()) {
@@ -128,7 +129,10 @@ public final class PgModel<M, T> {
                         "Generated PostgreSQL index collides with a mapped relation: " + mappedIndex);
             }
         }
-        this.tenantType = Objects.requireNonNull(discoveredTenantType, "tenantType");
+        if (discoveredTenantType == null) {
+            throw new IllegalArgumentException("A Vev model requires at least one tenant-owned mapping to establish transaction authority");
+        }
+        this.tenantType = discoveredTenantType;
         if (!KEY_TYPES.contains(tenantType)) {
             throw new IllegalArgumentException(
                     "Tenant keys require an equality-stable Integer, Long, Short, String, or UUID codec");
@@ -160,7 +164,13 @@ public final class PgModel<M, T> {
             if (target == null) {
                 throw new IllegalArgumentException("Reference target must belong to the same closed model");
             }
-            if (target.primaryKeyShape() == no.beint.vev.VevPrimaryKey.Shape.ID
+            if (source.shared() && !target.shared()) {
+                throw new IllegalArgumentException("Shared rows cannot reference tenant-owned rows");
+            }
+            if (target.shared() && !reference.tenantFirst()) {
+                throw new IllegalArgumentException("References to shared rows have no tenant order");
+            }
+            if (!target.shared() && target.primaryKeyShape() == no.beint.vev.VevPrimaryKey.Shape.ID
                     && target.uniqueConstraints().stream().noneMatch(target::tenantIdentityUnique)) {
                 throw new IllegalArgumentException("An ID-only reference target requires a tenant-qualified unique constraint");
             }
@@ -189,7 +199,7 @@ public final class PgModel<M, T> {
         }
         requireIdentifier(plan.schemaName(), "schema", plan.logicalName());
         requireIdentifier(plan.tableName(), "table", plan.logicalName());
-        requireIdentifier(plan.tenantColumn(), "tenant column", plan.logicalName());
+        if (!plan.shared()) requireIdentifier(plan.tenantColumn(), "tenant column", plan.logicalName());
         List<PgColumn> columns = plan.columns();
         if (columns.isEmpty()) {
             throw new IllegalArgumentException("Entity plan has no mapped columns: " + plan.logicalName());
@@ -241,7 +251,7 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException("Length check does not match its generated column bound");
             }
         }
-        if (id == null || tenant == null) {
+        if (id == null || (!plan.shared() && tenant == null)) {
             throw new IllegalArgumentException(
                     "Entity plan must have exactly one ID and tenant column: " + plan.logicalName());
         }
@@ -256,14 +266,18 @@ public final class PgModel<M, T> {
         if (plan.generatedIdentity() && !Set.of(Short.class, Integer.class, Long.class).contains(plan.keyType())) {
             throw new IllegalArgumentException("Generated identity requires a Short, Integer, or Long codec");
         }
-        if (tenant.codec() != plan.tenantCodec() || !tenant.name().equals(plan.tenantColumn())) {
+        if (plan.shared() && (tenant != null || !plan.readOnly()
+                || plan.primaryKeyShape() != no.beint.vev.VevPrimaryKey.Shape.ID)) {
+            throw new IllegalArgumentException("Shared read-only plans require no tenant column and an ID-only primary key");
+        }
+        if (!plan.shared() && (tenant.codec() != plan.tenantCodec() || !tenant.name().equals(plan.tenantColumn()))) {
             throw new IllegalArgumentException(
                     "Entity tenant metadata does not match its tenant codec: " + plan.logicalName());
         }
         if (id.codec() == PgCodecs.STRING && id.maximumLength() != 128) {
             throw new IllegalArgumentException("String entity IDs must declare an exact 128-character bound");
         }
-        if (tenant.codec() == PgCodecs.STRING && tenant.maximumLength() != 128) {
+        if (tenant != null && tenant.codec() == PgCodecs.STRING && tenant.maximumLength() != 128) {
             throw new IllegalArgumentException("String tenant keys must declare an exact 128-character bound");
         }
         if (plan instanceof PgVersionPlan<?, ?, ?, ?, ?> versionedPlan) {
@@ -281,7 +295,7 @@ public final class PgModel<M, T> {
         }
         validateIndexes(plan, id, tenant);
         validateUniqueConstraints(plan);
-        if (plan.primaryKeyShape() != no.beint.vev.VevPrimaryKey.Shape.TENANT_ID
+        if (!plan.shared() && plan.primaryKeyShape() != no.beint.vev.VevPrimaryKey.Shape.TENANT_ID
                 && plan.indexes().stream().noneMatch(index -> plan.columns().get(index.columnIndex()).role() == PgColumn.Role.ID)
                 && plan.uniqueConstraints().stream().noneMatch(unique -> plan.tenantIdentityUnique(unique)
                         && plan.columns().get(unique.columnIndexes().getFirst()).role() == PgColumn.Role.TENANT)) {
@@ -291,6 +305,9 @@ public final class PgModel<M, T> {
 
     private static void validateUniqueConstraints(PgPlan<?, ?, ?, ?> plan) {
         for (PgUnique unique : plan.uniqueConstraints()) {
+            if (!plan.shared() && unique.columnIndexes().size() < 2) {
+                throw new IllegalArgumentException("Tenant unique constraints require at least two columns");
+            }
             long maximumBytes = 0;
             boolean tenantIdentity = plan.tenantIdentityUnique(unique);
             for (int index = 0; index < unique.columnIndexes().size(); index++) {
@@ -299,7 +316,10 @@ public final class PgModel<M, T> {
                     throw new IllegalArgumentException("Unique constraint refers to an unmapped column");
                 }
                 PgColumn column = plan.columns().get(position);
-                if (!tenantIdentity && (index == 0 ? column.role() != PgColumn.Role.TENANT : column.role() != PgColumn.Role.VALUE)) {
+                if (plan.shared() && column.role() != PgColumn.Role.VALUE) {
+                    throw new IllegalArgumentException("Shared unique constraints require only VALUE columns");
+                }
+                if (!plan.shared() && !tenantIdentity && (index == 0 ? column.role() != PgColumn.Role.TENANT : column.role() != PgColumn.Role.VALUE)) {
                     throw new IllegalArgumentException("Unique constraints require tenant-first VALUE columns or exactly the ID and tenant columns");
                 }
                 maximumBytes = Math.addExact(maximumBytes, maximumIndexKeyBytes(column));
@@ -349,7 +369,7 @@ public final class PgModel<M, T> {
                                 + " code points: " + index.indexName());
             }
             long maximumKeyBytes = Math.addExact(
-                    Math.addExact(maximumIndexKeyBytes(id), maximumIndexKeyBytes(tenant)),
+                    Math.addExact(maximumIndexKeyBytes(id), tenant == null ? 0 : maximumIndexKeyBytes(tenant)),
                     value.role() == PgColumn.Role.ID ? 0 : maximumIndexKeyBytes(value));
             if (maximumKeyBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
                 throw new IllegalArgumentException(
@@ -390,7 +410,7 @@ public final class PgModel<M, T> {
      * @param identity generated identity shared by every entity plan
      * @param plans non-empty complete set of generated PostgreSQL plans
      * @param <M> closed-model marker type
-     * @param <T> tenant-key type shared by every entity
+     * @param <T> tenant-key type shared by tenant-owned mappings
      * @return validated immutable PostgreSQL model
      */
     @SafeVarargs
@@ -417,7 +437,7 @@ public final class PgModel<M, T> {
     }
 
     /**
-     * Returns the tenant-key type shared by every plan.
+     * Returns the tenant-key type shared by tenant-owned plans.
      *
      * @return exact boxed tenant-key type
      */

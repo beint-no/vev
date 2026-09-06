@@ -3,7 +3,7 @@ package no.beint.vev.processor;
 import java.util.List;
 
 final class JavaSourceGenerator {
-    String entityPlan(EntityMapping entity) {
+    String entityPlan(EntityMapping entity, String tenantType) {
         StringBuilder source = new StringBuilder();
         if (!entity.packageName().isEmpty()) {
             source.append("package ").append(entity.packageName()).append(";\n\n");
@@ -15,7 +15,7 @@ final class JavaSourceGenerator {
                 .append(" * <p>This class is generated and must not be edited.</p>\n")
                 .append(" */\n")
                 .append("public final class ").append(entity.simpleName()).append("Vev implements ")
-                .append(planInterfaces(entity, modelMarker))
+                .append(planInterfaces(entity, modelMarker, tenantType))
                 .append(" {\n")
                 .append("    /** Singleton generated mapping plan for {@link ")
                 .append(entity.qualifiedName()).append("}. */\n")
@@ -59,11 +59,13 @@ final class JavaSourceGenerator {
         method(source, "public no.beint.vev.ModelIdentity modelIdentity()", "return " + entity.modelQualifiedName() + ".IDENTITY;");
         method(source, "public int maximumRows()", "return " + entity.maximumRows() + ";");
         method(source, "public no.beint.vev.pg.PgCodec<" + entity.id().boxedType() + "> keyCodec()", "return " + entity.id().codec() + ";");
-        method(source, "public no.beint.vev.pg.PgCodec<" + entity.tenant().boxedType() + "> tenantCodec()",
-                "return " + entity.tenant().codec() + ";");
+        if (!entity.shared()) {
+            method(source, "public no.beint.vev.pg.PgCodec<" + tenantType + "> tenantCodec()",
+                    "return " + entity.tenant().codec() + ";");
+            method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");
+        }
         method(source, "public String schemaName()", "return \"" + escape(entity.schemaName()) + "\";");
         method(source, "public String tableName()", "return \"" + escape(entity.tableName()) + "\";");
-        method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");
         method(source, "public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape()",
                 "return no.beint.vev.VevPrimaryKey.Shape." + entity.primaryKeyShape() + ";");
         method(source, "public java.util.List<no.beint.vev.pg.PgColumn> columns()", "return COLUMNS;");
@@ -100,8 +102,10 @@ final class JavaSourceGenerator {
         source.append("    }\n\n");
         method(source, "public " + entity.id().boxedType() + " keyOf(" + entity.qualifiedName() + " entity)",
                 "return entity." + entity.id().name() + "();");
-        method(source, "public " + entity.tenant().boxedType() + " tenantKeyOf(" + entity.qualifiedName() + " entity)",
-                "return entity." + entity.tenant().name() + "();");
+        if (!entity.shared()) {
+            method(source, "public " + tenantType + " tenantKeyOf(" + entity.qualifiedName() + " entity)",
+                    "return entity." + entity.tenant().name() + "();");
+        }
         if (!entity.appendOnly() && !entity.readOnly()) {
             appendVersionedMethods(source, entity);
         }
@@ -109,13 +113,16 @@ final class JavaSourceGenerator {
         return source.toString();
     }
 
-    private static String planInterfaces(EntityMapping entity, String modelMarker) {
+    private static String planInterfaces(EntityMapping entity, String modelMarker, String tenantType) {
         String types = modelMarker + ", " + entity.qualifiedName() + ", " + entity.id().boxedType();
-        String tenantTypes = types + ", " + entity.tenant().boxedType();
+        String tenantTypes = types + ", " + tenantType;
         var interfaces = new java.util.ArrayList<String>();
         if (entity.readOnly()) {
-            interfaces.add("no.beint.vev.pg.spi.PgReadOnlyEntityPlan<" + tenantTypes + ">");
-            interfaces.add("no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">");
+            if (entity.shared()) interfaces.add("no.beint.vev.pg.spi.PgSharedEntityPlan<" + tenantTypes + ">");
+            else {
+                interfaces.add("no.beint.vev.pg.spi.PgReadOnlyEntityPlan<" + tenantTypes + ">");
+                interfaces.add("no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">");
+            }
             if (entity.id().identity()) interfaces.add("no.beint.vev.pg.spi.PgIdentityEntityPlan<" + tenantTypes + ">");
         } else {
             interfaces.add(entity.appendOnly() ? "no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">"
@@ -266,13 +273,13 @@ final class JavaSourceGenerator {
                 .append(SchemaManifestGenerator.resourceName(model)).append("\";\n")
                 .append("    /** Validated immutable PostgreSQL plan set for this closed model. */\n")
                 .append("    public static final no.beint.vev.pg.PgModel<Model, ")
-                .append(model.entities().getFirst().tenant().boxedType())
+                .append(model.tenantType())
                 .append("> POSTGRES = no.beint.vev.pg.PgModel.of(\n")
                 .append("            IDENTITY");
         for (EntityMapping entity : model.entities()) {
             source.append(",\n            ").append(entity.planQualifiedName()).append(".INSTANCE");
         }
-        String tenantType = model.entities().getFirst().tenant().boxedType();
+        String tenantType = model.tenantType();
         source.append(");\n\n")
                 .append("    /**\n")
                 .append("     * Creates the single-use authority which may be claimed by one verified runtime.\n")

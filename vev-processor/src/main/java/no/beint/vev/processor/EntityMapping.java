@@ -21,6 +21,7 @@ record EntityMapping(
         PropertyMapping version,
         boolean appendOnly,
         boolean readOnly,
+        boolean shared,
         boolean deletable,
         String primaryKeyShape,
         int maximumRows) {

@@ -95,6 +95,121 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void sharedReferenceReadsPreserveEveryBoundedQueryShapeInBothProtocolsAndTenants() throws SQLException {
+        database.seedSharedRows();
+        UUID selection = id("shared-selection");
+        vev.write(TENANT_7, tx -> tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(selection, 7, 1)));
+        vev.write(TENANT_8, tx -> tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(selection, 8, 2)));
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var count = new AtomicInteger();
+            var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(binary), count), IntegrationModelVev.POSTGRES, authority);
+            for (int tenantId : List.of(7, 8)) {
+                runtime.read(authority.scope(tenantId), tx -> {
+                    int before = count.get();
+                    assertTrue(tx.entities().findMultiple(SharedCatalogVev.INSTANCE, Batch.empty()).isEmpty());
+                    assertThrows(IllegalArgumentException.class, () -> tx.entities().findMultiple(SharedCatalogVev.INSTANCE, Batch.copyOf(java.util.Collections.nCopies(9, 1))));
+                    assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.scanById(SharedCatalogVev.INSTANCE, new QueryLimit(9))));
+                    assertEquals(before, count.get());
+                    var first = tx.entities().find(SharedCatalogVev.INSTANCE.key(1)).orElseThrow();
+                    assertEquals("root", first.code());
+                    assertNull(first.parentId());
+                    var found = tx.entities().findMultiple(SharedCatalogVev.INSTANCE, Batch.copyOf(List.of(2, 99, 1, 2)));
+                    assertEquals(before + 2, count.get());
+                    assertInstanceOf(EntityLookup.Missing.class, found.get(1));
+                    var second = ((EntityLookup.Found<?, SharedCatalog, ?>) found.get(0)).entity();
+                    assertEquals(Long.MAX_VALUE, second.version());
+                    assertEquals(1, second.parentId());
+                    assertEquals(second, ((EntityLookup.Found<?, SharedCatalog, ?>) found.get(3)).entity());
+                    var page = tx.entities().many(PgQueries.scanById(SharedCatalogVev.INSTANCE, new QueryLimit(1)));
+                    assertEquals(List.of(first), page.values());
+                    assertTrue(page.hasMore());
+                    assertEquals(List.of(second), tx.entities().many(PgQueries.scanByIdAfter(SharedCatalogVev.INSTANCE.key(1), new QueryLimit(1))).values());
+                    assertEquals(List.of(first), tx.entities().many(PgQueries.equal(SharedCatalogVev.LABEL, "group", new QueryLimit(1))).values());
+                    assertEquals(List.of(3), tx.entities().many(PgQueries.equalAfter(SharedCatalogVev.LABEL, "group", SharedCatalogVev.INSTANCE.key(1), new QueryLimit(1))).values().stream().map(SharedCatalog::id).toList());
+                    assertEquals(List.of(second), tx.entities().many(PgQueries.isNull(SharedCatalogVev.LABEL, new QueryLimit(1))).values());
+                    assertEquals(List.of(4), tx.entities().many(PgQueries.isNullAfter(SharedCatalogVev.LABEL, SharedCatalogVev.INSTANCE.key(2), new QueryLimit(1))).values().stream().map(SharedCatalog::id).toList());
+                    assertEquals("common", tx.entities().find(no.beint.vev.fixtures.KotlinSharedVev.INSTANCE.key(1)).orElseThrow().label());
+                    assertEquals(1, tx.entities().many(PgQueries.equal(no.beint.vev.fixtures.KotlinSharedVev.ID, 1, new QueryLimit(1))).values().size());
+                    assertTrue(tx.entities().many(PgQueries.equalAfter(no.beint.vev.fixtures.KotlinSharedVev.ID, 1, no.beint.vev.fixtures.KotlinSharedVev.INSTANCE.key(1), new QueryLimit(1))).values().isEmpty());
+                    assertEquals(tenantId == 7 ? 1 : 2, tx.entities().find(CatalogSelectionVev.INSTANCE.key(selection)).orElseThrow().catalogId());
+                    assertEquals(4, tx.entities().many(PgQueries.scanById(SharedCatalogVev.INSTANCE, new QueryLimit(8))).values().size());
+                    assertTrue(tx.entities().find(SharedCatalogVev.INSTANCE.key(99)).isEmpty());
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
+    void sharedMappingsRemainReadOnlyThroughTheJakartaFacadeInsideWriteTransactions() throws SQLException {
+        database.seedSharedRows();
+        VevEntityAgents.runInTransaction(vev, TENANT_8, agent -> {
+            var stored = agent.find(SharedCatalog.class, 1);
+            assertNotNull(stored);
+            assertEquals("root", stored.code());
+            assertThrows(UnsupportedOperationException.class, () -> agent.insert(stored));
+            assertThrows(UnsupportedOperationException.class, () -> agent.insertMultiple(List.of(stored)));
+            assertThrows(IllegalArgumentException.class, () -> agent.update(stored));
+            assertEquals(4, agent.find(SharedCatalog.class, 4).id());
+        });
+    }
+
+    @Test
+    void sharedReferenceAttestationRejectsPoliciesPrivilegesAndUnexpectedConstraintShapes() throws SQLException {
+        try {
+            for (String variant : List.of("noSelect", "insert", "update", "delete", "sequence", "enabledRls", "forcedRls",
+                    "dormantPolicy", "indexOrder", "missingUnique", "wrongUnique", "missingReference", "wrongReference",
+                    "cascade", "deferred", "disabledTrigger", "unmappedIncoming", "extraTenant", "matchFull", "unvalidated",
+                    "wrongPrimaryKey", "insertTable", "selectGrantOption")) {
+                database.sharedVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.sharedVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void tenantWritesCanReferenceSharedRowsWithoutGivingSharedRowsMutationCapabilities() throws SQLException {
+        database.seedSharedRows();
+        for (var tenant : List.of(TENANT_7, TENANT_8)) {
+            int tenantId = tenant == TENANT_7 ? 7 : 8;
+            UUID key = id("shared-foreign-key");
+            vev.write(tenant, tx -> {
+                var inserted = tx.entities().insertMultiple(CatalogSelectionVev.INSTANCE, Batch.copyOf(List.of(
+                        new CatalogSelection(key, tenantId, 2), new CatalogSelection(id("shared-null-fk"), tenantId, null))));
+                assertEquals(2, inserted.size());
+                assertEquals(1, tx.entities().find(SharedCatalogVev.INSTANCE.key(2)).orElseThrow().parentId());
+                return null;
+            });
+            UUID earlier = id("shared-fk-earlier");
+            assertThrows(IllegalStateException.class, () -> vev.write(tenant, tx -> {
+                tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(earlier, tenantId, 1));
+                assertThrows(IllegalStateException.class, () -> tx.entities().insert(CatalogSelectionVev.INSTANCE,
+                        new CatalogSelection(id("shared-fk-missing"), tenantId, 99)));
+                return null;
+            }));
+            assertTrue(vev.read(tenant, tx -> tx.entities().find(CatalogSelectionVev.INSTANCE.key(earlier))).isEmpty());
+        }
+    }
+
+    @Test
+    void invalidSharedSnapshotPoisonsTheWholeTransactionEvenWhenItsReadFailureIsCaught() throws SQLException {
+        database.seedSharedRows();
+        database.negativeSharedVersion();
+        UUID earlier = id("shared-invalid-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(earlier, 7, 2));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(SharedCatalogVev.INSTANCE.key(1)));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(SharedCatalogVev.INSTANCE.key(2)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(CatalogSelectionVev.INSTANCE.key(earlier))).isEmpty());
+    }
+
+    @Test
     void readOnlyMappingsPreserveStoredVersionsTenantBoundsAndEveryReadShape() throws SQLException {
         UUID key = id("read-only");
         database.seedReadOnlyRows(key);

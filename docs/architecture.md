@@ -40,7 +40,7 @@ The native execution path is `TransactionExecutor` to a lexical `ReadTx` or `Wri
 
 ## Read-only capabilities
 
-[Read-only mappings](read-only-mappings.md) describe stored rows without granting mutation. Identity-column metadata is separate from creation capability; an optional stored version does not produce an update capability. The generated plan exposes only reads, the runtime compiles no write statements, and bootstrap requires SELECT-only grants with no sequence access. Tenant scope and all existing schema restrictions remain mandatory.
+[Read-only mappings](read-only-mappings.md) describe stored rows without granting mutation. Identity-column metadata is separate from creation capability; an optional stored version does not produce an update capability. The generated plan exposes only reads, the runtime compiles no write statements, and bootstrap requires SELECT-only grants with no sequence access. Lexical tenant scope remains mandatory. Explicit [shared reference mappings](shared-reference-mappings.md) separate global read visibility from tenant ownership; only those read-only plans omit tenant predicates and require disabled RLS with no policies. Shared and tenant ownership capabilities are mutually exclusive.
 
 ## Why stateless is the default
 

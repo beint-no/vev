@@ -41,11 +41,12 @@ final class PgSql {
     static PgSql compile(PgPlan<?, ?, ?, ?> plan) {
         List<PgColumn> columns = plan.columns();
         PgColumn id = column(columns, PgColumn.Role.ID);
-        PgColumn tenant = column(columns, PgColumn.Role.TENANT);
+        PgColumn tenant = plan.shared() ? null : column(columns, PgColumn.Role.TENANT);
+        String tenantPredicate = tenant == null ? "" : quoted(tenant.name()) + " = ?";
         String table = quoted(plan.schemaName()) + '.' + quoted(plan.tableName());
         String selectedColumns = columns(columns, "");
         String find = "SELECT " + selectedColumns + " FROM " + table
-                + " WHERE " + quoted(id.name()) + " = ? AND " + quoted(tenant.name()) + " = ?";
+                + " WHERE " + quoted(id.name()) + " = ?" + (plan.shared() ? "" : " AND " + tenantPredicate);
 
         String row = "\"__vev_row\"";
         String requested = "\"__vev_requested\"";
@@ -55,15 +56,15 @@ final class PgSql {
                 + "[]) WITH ORDINALITY AS " + requested + "(\"key\", \"ordinality\")"
                 + " LEFT JOIN " + table + " AS " + row
                 + " ON " + row + "." + quoted(id.name()) + " = " + requested + ".\"key\""
-                + " AND " + row + "." + quoted(tenant.name()) + " = ?"
+                + (plan.shared() ? "" : " AND " + row + "." + tenantPredicate)
                 + " ORDER BY " + requested + ".\"ordinality\"";
 
         String scanById = "SELECT " + selectedColumns + " FROM " + table
-                + " WHERE " + quoted(tenant.name()) + " = ?"
+                + (plan.shared() ? "" : " WHERE " + tenantPredicate)
                 + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
         String scanByIdAfter = "SELECT " + selectedColumns + " FROM " + table
-                + " WHERE " + quoted(tenant.name()) + " = ?"
-                + " AND " + quoted(id.name()) + " > ?"
+                + " WHERE " + (plan.shared() ? "" : tenantPredicate + " AND ")
+                + quoted(id.name()) + " > ?"
                 + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
 
         String insert = plan.readOnly() ? null : "INSERT INTO " + table + " (" + quotedColumns(columns) + ") VALUES ("
@@ -141,8 +142,9 @@ final class PgSql {
         Map<PgIndex<?, ?, ?, ?>, PgIndexSql> compiled = new IdentityHashMap<>();
         for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
             PgColumn value = plan.columns().get(index.columnIndex());
-            String equality = quoted(tenant.name()) + " = ? AND " + quoted(value.name()) + " = ?";
-            String nullEquality = quoted(tenant.name()) + " = ? AND " + quoted(value.name()) + " IS NULL";
+            String tenantPredicate = tenant == null ? "" : quoted(tenant.name()) + " = ? AND ";
+            String equality = tenantPredicate + quoted(value.name()) + " = ?";
+            String nullEquality = tenantPredicate + quoted(value.name()) + " IS NULL";
             String orderAndLimit = " ORDER BY " + quoted(id.name()) + " LIMIT ?";
             String select = "SELECT " + selectedColumns + " FROM " + table + " WHERE ";
             String after = " AND " + quoted(id.name()) + " > ?";

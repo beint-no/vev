@@ -130,9 +130,12 @@ class PgPlan<M, E, K, T> {
 
     @SuppressWarnings("unchecked")
     private static <M, E, K, T> TenantMapping<M, E, K, T> captureTenant(PgEntityPlan<M, E, K, T> source) {
+        boolean shared = source instanceof no.beint.vev.pg.spi.PgSharedEntityPlan<?, ?, ?, ?>;
         if (!(source instanceof PgTenantEntityPlan<?, ?, ?, ?> tenantSource)) {
-            throw new IllegalArgumentException("A PostgreSQL entity plan must explicitly declare tenant ownership");
+            if (shared) return null;
+            throw new IllegalArgumentException("A PostgreSQL entity plan must explicitly declare tenant ownership or shared read-only access");
         }
+        if (shared) throw new IllegalArgumentException("Shared and tenant-owned mappings are mutually exclusive");
         var typed = (PgTenantEntityPlan<M, E, K, T>) tenantSource;
         return new TenantMapping<>(typed, Objects.requireNonNull(typed.tenantCodec(), "tenantCodec"),
                 Objects.requireNonNull(typed.tenantColumn(), "tenantColumn"));
@@ -144,6 +147,15 @@ class PgPlan<M, E, K, T> {
 
     boolean generatedIdentity() {
         return generatedIdentity;
+    }
+
+    boolean shared() {
+        return tenant == null;
+    }
+
+    private TenantMapping<M, E, K, T> requireTenant() {
+        if (tenant == null) throw new IllegalStateException("Shared reference rows have no tenant metadata");
+        return tenant;
     }
 
     boolean readOnly() {
@@ -248,7 +260,7 @@ class PgPlan<M, E, K, T> {
     }
 
     PgCodec<T> tenantCodec() {
-        return tenant.codec();
+        return requireTenant().codec();
     }
 
     String schemaName() {
@@ -260,7 +272,7 @@ class PgPlan<M, E, K, T> {
     }
 
     String tenantColumn() {
-        return tenant.column();
+        return requireTenant().column();
     }
 
     List<PgColumn> columns() {
@@ -284,7 +296,7 @@ class PgPlan<M, E, K, T> {
     }
 
     T tenantKeyOf(E entity) {
-        return tenant.source().tenantKeyOf(entity);
+        return requireTenant().source().tenantKeyOf(entity);
     }
 
     EntityKey<M, E, K> key(K value) {

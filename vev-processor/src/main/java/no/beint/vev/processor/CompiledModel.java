@@ -10,4 +10,7 @@ record CompiledModel(
         String qualifiedName,
         List<EntityMapping> entities,
         String fingerprint) {
+    String tenantType() {
+        return entities.stream().filter(entity -> !entity.shared()).findFirst().orElseThrow().tenant().boxedType();
+    }
 }

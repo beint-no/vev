@@ -53,13 +53,18 @@ final class PgReferences {
                     .findFirst().orElseThrow().name();
             String sourceId = source.columns().get(reference.columnIndex()).name();
             boolean tenantFirst = reference.tenantFirst();
+            String sourceFirst = target.shared() ? sourceId : tenantFirst ? source.tenantColumn() : sourceId;
+            String sourceSecond = target.shared() ? null : tenantFirst ? sourceId : source.tenantColumn();
+            String targetFirst = target.shared() ? targetId : tenantFirst ? target.tenantColumn() : targetId;
+            String targetSecond = target.shared() ? null : tenantFirst ? targetId : target.tenantColumn();
             if (!target.schemaName().equals(row.getString(4))
                     || !target.tableName().equals(row.getString(5))
-                    || !(tenantFirst ? source.tenantColumn() : sourceId).equals(row.getString(6))
-                    || !(tenantFirst ? sourceId : source.tenantColumn()).equals(row.getString(7))
-                    || !(tenantFirst ? target.tenantColumn() : targetId).equals(row.getString(8))
-                    || !(tenantFirst ? targetId : target.tenantColumn()).equals(row.getString(9))) {
-                throw new IllegalStateException("Foreign key does not match its generated tenant-composite reference: "
+                    || !sourceFirst.equals(row.getString(6))
+                    || !java.util.Objects.equals(sourceSecond, row.getString(7))
+                    || !targetFirst.equals(row.getString(8))
+                    || !java.util.Objects.equals(targetSecond, row.getString(9))
+                    || row.getInt(15) != (target.shared() ? 1 : 2)) {
+                throw new IllegalStateException("Foreign key does not match its generated reference columns: "
                         + source.logicalName() + '.' + reference.name());
             }
             for (int column = 10; column <= 14; column++) {
@@ -83,17 +88,18 @@ final class PgReferences {
                        AND constraint_definition.confmatchtype = 's'
                        AND constraint_definition.confupdtype = 'a' AND constraint_definition.confdeltype = 'a'
                        AND constraint_definition.confdelsetcols IS NULL
-                       AND pg_catalog.cardinality(constraint_definition.conkey) = 2
-                       AND pg_catalog.cardinality(constraint_definition.confkey) = 2,
+                       AND pg_catalog.cardinality(constraint_definition.conkey) IN (1, 2)
+                       AND pg_catalog.cardinality(constraint_definition.confkey) = pg_catalog.cardinality(constraint_definition.conkey),
                    source_tenant.atttypid = target_tenant.atttypid
                        AND source_tenant.atttypmod = target_tenant.atttypmod
                        AND source_tenant.attcollation = target_tenant.attcollation
-                       AND source_value.atttypid = target_id.atttypid
-                       AND source_value.atttypmod = target_id.atttypmod
-                       AND source_value.attcollation = target_id.attcollation,
-                   pg_catalog.cardinality(constraint_definition.conpfeqop) = 2
-                       AND pg_catalog.cardinality(constraint_definition.conppeqop) = 2
-                       AND pg_catalog.cardinality(constraint_definition.conffeqop) = 2
+                       AND (pg_catalog.cardinality(constraint_definition.conkey) = 1
+                           OR (source_value.atttypid = target_id.atttypid
+                               AND source_value.atttypmod = target_id.atttypmod
+                               AND source_value.attcollation = target_id.attcollation)),
+                   pg_catalog.cardinality(constraint_definition.conpfeqop) = pg_catalog.cardinality(constraint_definition.conkey)
+                       AND pg_catalog.cardinality(constraint_definition.conppeqop) = pg_catalog.cardinality(constraint_definition.conkey)
+                       AND pg_catalog.cardinality(constraint_definition.conffeqop) = pg_catalog.cardinality(constraint_definition.conkey)
                        AND NOT EXISTS (
                            SELECT 1 FROM pg_catalog.unnest(constraint_definition.conpfeqop
                                    || constraint_definition.conppeqop || constraint_definition.conffeqop) AS equality(operator_oid)
@@ -133,7 +139,8 @@ final class PgReferences {
                                   SELECT 1 FROM pg_catalog.pg_constraint unique_constraint
                                    WHERE unique_constraint.conrelid = target_relation.oid
                                      AND unique_constraint.conindid = target_index.indexrelid
-                                     AND unique_constraint.contype = 'u')))
+                                     AND unique_constraint.contype = 'u'))),
+                   pg_catalog.cardinality(constraint_definition.conkey)
               FROM pg_catalog.pg_constraint constraint_definition
               JOIN pg_catalog.pg_class source_relation ON source_relation.oid = constraint_definition.conrelid
               JOIN pg_catalog.pg_namespace source_namespace ON source_namespace.oid = source_relation.relnamespace

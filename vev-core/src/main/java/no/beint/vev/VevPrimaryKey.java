@@ -11,7 +11,8 @@ import java.lang.annotation.Target;
  *
  * <p>The default without this annotation is {@link Shape#TENANT_ID}. Other shapes require a declared
  * tenant-leading identifier index or unique constraint for bounded tenant traversal. A foreign key still requires
- * a tenant-qualified unique target. All application operations retain the lexical tenant boundary.</p>
+ * a tenant-qualified unique target. All application operations retain the lexical tenant boundary. Explicitly shared read-only
+ * records require {@code ID} and omit the tenant traversal/reference columns.</p>
  */
 @Documented
 @Retention(RetentionPolicy.CLASS)

@@ -63,7 +63,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         PgPlan<M, E, K, T> plan = plan(key.entityType());
         try (PreparedStatement statement = prepare(plan.sql().find())) {
             bindUnknown(plan.keyCodec(), statement, 1, key.value());
-            bindTenant(plan, statement, 2);
+            if (!plan.shared()) bindTenant(plan, statement, 2);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
                     return Optional.empty();
@@ -101,7 +101,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         try (Array keyArray = connection.createArrayOf(plan.keyCodec().jdbcType(), keyValues);
              PreparedStatement statement = prepare(plan.sql().findMultiple())) {
             statement.setArray(1, keyArray);
-            bindTenant(plan, statement, 2);
+            if (!plan.shared()) bindTenant(plan, statement, 2);
             try (ResultSet resultSet = statement.executeQuery()) {
                 for (EntityKey<M, E, K> entityKey : entityKeys) {
                     if (!resultSet.next()) {
@@ -155,13 +155,12 @@ final class PgEntities<M, T> implements WriteEntities<M> {
                 ? entityPlan.sql().scanByIdAfter()
                 : entityPlan.sql().scanById();
         try (PreparedStatement statement = prepare(sql)) {
-            bindTenant(entityPlan, statement, 1);
-            int limitIndex = 2;
+            int parameter = 1;
+            if (!entityPlan.shared()) bindTenant(entityPlan, statement, parameter++);
             if (scan.hasAfterExclusive()) {
-                bindUnknown(entityPlan.keyCodec(), statement, 2, scan.afterExclusive());
-                limitIndex = 3;
+                bindUnknown(entityPlan.keyCodec(), statement, parameter++, scan.afterExclusive());
             }
-            statement.setInt(limitIndex, Math.addExact(limit, 1));
+            statement.setInt(parameter, Math.addExact(limit, 1));
             statement.setFetchSize(Math.addExact(limit, 1));
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (values.size() < limit && resultSet.next()) {
@@ -204,7 +203,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         }
         try (PreparedStatement statement = prepare(sql)) {
             int parameter = 1;
-            bindTenant(entityPlan, statement, parameter++);
+            if (!entityPlan.shared()) bindTenant(entityPlan, statement, parameter++);
             if (equality) {
                 bindUnknown(indexedColumn.codec(), statement, parameter++, scan.value());
             }
@@ -655,8 +654,8 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         if (entityKey != null) {
             plan.key(entityKey);
         }
-        Object entityTenant = Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
-        if (!tenant.tenantId().equals(entityTenant)) {
+        Object entityTenant = plan.shared() ? null : Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
+        if (!plan.shared() && !tenant.tenantId().equals(entityTenant)) {
             throw new IllegalArgumentException("Entity tenant does not match the lexical transaction tenant");
         }
         List<PgColumn> columns = plan.columns();

@@ -77,9 +77,10 @@ check provides an early failure, not compatibility with stale generated classes.
 It does not attest handwritten or transformed implementations. Incompatible SPI
 changes must increment the runtime and processor ABI together. ABI 2 separates
 common snapshot metadata (`PgEntityPlan`) from explicit tenant ownership
-(`PgTenantEntityPlan`). Every currently supported mapping declares that ownership,
-including read-only mappings. Missing tenant metadata does not imply shared or
-unrestricted access; it fails model construction. The tenant codec and column are
+(`PgTenantEntityPlan`). Tenant-owned mappings declare that ownership,
+including read-only mappings. Explicit `@VevShared` records instead implement
+`PgSharedEntityPlan`, have no tenant metadata, and expose no writes. A plan
+with neither ownership capability, or both, fails model construction. The tenant codec and column are
 captured once, while snapshot tenant access remains direct generated code.
 ABI 1 mappings must be regenerated even if their schema fingerprint is unchanged.
 The mapping
@@ -101,14 +102,14 @@ Compilation proves source consistency, not database consistency. In particular, 
 - an endpoint identity consisting of server address and port, PostgreSQL system identifier, postmaster start time, database name and OID, session user, current role, and recovery state;
 - an application role that is neither superuser nor `BYPASSRLS`, is not a member of a role with either capability, and is not the mapped-table owner or a member of the owner role;
 - `SELECT` access and no data-mutation privilege on `public.vev_schema_fingerprint`, plus exactly one matching migration-installed fingerprint row;
-- an exact generated column set with built-in PostgreSQL types, exact `varchar` and `numeric` modifiers, nullability, deterministic collations whose recorded provider version is current, no defaults, no identity, no generated columns, and no missing-value catalog state; the database-default collation is attested through `pg_database`, while named collations are attested through `pg_collation`;
-- one exact immediate built-in B-tree `(tenant, id)` primary key, which bounds the implemented tenant/ID scan work;
-- the exact generated set of non-unique, immediate, built-in B-tree secondary indexes, each with no predicate, expression, included column, constraint ownership, custom option, or non-default ordering and with keys exactly `(tenant, indexed value, id)` under the expected collation and built-in default operator classes;
-- named `@UniqueConstraint` declarations and their backing B-trees, with exact tenant-first value-column order, immediate validated/enforced distinct-null semantics, built-in default operator classes, matching collations, and no predicate, expression, included column, custom options, or non-default ordering;
+- an exact generated column set with built-in PostgreSQL types, exact `varchar` and `numeric` modifiers, nullability, deterministic collations whose recorded provider version is current, no ordinary defaults or generated columns and no missing-value catalog state; declared integer identities require their exact internally owned sequence contract; the database-default collation is attested through `pg_database`, while named collations are attested through `pg_collation`;
+- one exact declared immediate built-in B-tree primary key, with a tenant-leading traversal index when a scoped primary key starts with ID; shared reference tables require `(id)`;
+- the exact generated set of non-unique, immediate, built-in B-tree secondary indexes, each with no predicate, expression, included column, constraint ownership, custom option, or non-default ordering and with keys exactly `(tenant, indexed value, id)` or `(tenant, id)`, omitting the tenant prefix only for shared mappings, under the expected collation and built-in default operator classes;
+- named `@UniqueConstraint` declarations and their backing B-trees, with exact declared tenant-qualified or shared VALUE-column order, immediate validated/enforced distinct-null semantics, built-in default operator classes, matching collations, and no predicate, expression, included column, custom options, or non-default ordering;
 - permanent logged nonpartitioned non-inherited built-in heap tables, with no rewrite rules, undeclared checks, or undeclared indexes touching a mapped table;
 - schema `USAGE` without `CREATE`, table `SELECT`, exact column-level `INSERT` for writable mappings, exact mutable-value/version column-level `UPDATE`, no write or sequence privileges for `@VevReadOnly`, table `DELETE` exactly when `@VevDelete` opts in (without grant option), and no effective `TRUNCATE`, `REFERENCES`, `TRIGGER`, or `MAINTAIN` privilege;
 - no enabled user trigger; and
-- enabled and forced RLS with exactly one permissive `FOR ALL` policy, restricted to the application role, whose `USING` and `WITH CHECK` expressions exactly compare the tenant column with `vev.tenant_id`.
+- enabled and forced RLS with exactly one permissive `FOR ALL` policy, restricted to the application role, whose `USING` and `WITH CHECK` expressions exactly compare the tenant column with `vev.tenant_id`; explicitly shared tables instead require both RLS flags false and zero policies.
 
 Vev requires a dedicated pgjdbc `DataSource` whose connections already report an exact `pg_catalog` search path, UTF-8 client and server encodings, standard-conforming strings, and integer datetimes. Bootstrap and every runtime checkout fail if that trusted session baseline differs or if PostgreSQL reports a retained temporary schema. Vev deliberately does not toggle `search_path` per transaction: PostgreSQL reports that setting to pgjdbc, whose prepared-query cache is invalidated when it changes. Built-in casts remain schema-qualified as defense in depth. Bootstrap then enters its read-only catalog boundary. Each runtime connection uses `SERIALIZABLE`, enables synchronous commit, installs transaction-local tenant and timeout state, and verifies the pinned endpoint identity, exact generated fingerprint, and session state both after configuration and immediately before commit. The single-use tenant authority is claimed only after bootstrap succeeds.
 

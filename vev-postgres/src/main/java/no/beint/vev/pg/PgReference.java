@@ -4,12 +4,12 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * Generated metadata for an immediate, non-cascading tenant-composite foreign key.
+ * Generated metadata for an immediate, non-cascading scoped-composite or shared-scalar foreign key.
  *
  * @param name exact database constraint name
  * @param columnIndex zero-based index of the scalar reference column
  * @param targetType referenced entity in the same closed model
- * @param tenantFirst whether both sides put the tenant column before the identifier column
+ * @param tenantFirst whether both scoped sides put the tenant column first; must be true for shared targets
  */
 public record PgReference(String name, int columnIndex, Class<?> targetType, boolean tenantFirst) {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
