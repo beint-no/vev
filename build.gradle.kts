@@ -169,7 +169,7 @@ tasks.register<GradleBuild>("publishedConsumerTest") {
     description = "Compiles an isolated JPMS consumer against an isolated Vev repository."
     dependsOn("publishCompatibilityRepository")
     dir = file("compatibility/published-consumer")
-    tasks = listOf("clean", "compileJava")
+    tasks = listOf("clean", "check")
     startParameter.isOffline = true
     startParameter.isBuildCacheEnabled = false
     startParameter.isRerunTasks = true

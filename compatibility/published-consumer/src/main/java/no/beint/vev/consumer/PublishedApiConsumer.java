@@ -25,6 +25,7 @@ public final class PublishedApiConsumer {
                 tenant,
                 agent -> agent.find(PublishedAccount.class, new UUID(0L, 0L)));
         PublishedAccountVev.INSTANCE.modelIdentity();
+        PublishedModelVev.SCHEMA_MANIFEST.length();
     }
 
     public static <M> void exercise(

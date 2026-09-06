@@ -42,6 +42,7 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
 import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
 
 final class MappingCompiler {
     private static final int MAXIMUM_ENTITIES = 128;
@@ -169,6 +170,23 @@ final class MappingCompiler {
             writeSource(entity.planQualifiedName(), generator.entityPlan(entity), entity.declaration());
         }
         writeSource(modelQualifiedName, generator.modelRegistry(model), modelDeclaration);
+        writeManifest(model);
+    }
+
+    private void writeManifest(CompiledModel model) {
+        String name = SchemaManifestGenerator.resourceName(model);
+        List<Element> origins = new ArrayList<>();
+        origins.add(model.declaration());
+        model.entities().forEach(entity -> origins.add(entity.declaration()));
+        try {
+            var file = processingEnvironment.getFiler().createResource(
+                    StandardLocation.CLASS_OUTPUT, "", name, origins.toArray(Element[]::new));
+            try (var output = file.openOutputStream()) {
+                output.write(new SchemaManifestGenerator().generate(model).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException failure) {
+            error(model.declaration(), "Could not write generated schema manifest " + name + ": " + failure.getMessage());
+        }
     }
 
     private List<TypeElement> entityDeclarations(TypeElement modelDeclaration, AnnotationMirror modelAnnotation) {

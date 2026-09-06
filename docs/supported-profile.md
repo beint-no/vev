@@ -63,7 +63,7 @@ The Jakarta adapter is a deliberately nonconforming `EntityAgent`-shaped facade.
 
 A rejection should identify the entity member, unsupported feature, and safe next action. Falling back to reflection, accepting an annotation while ignoring a semantic attribute, or delaying a known incompatibility until the first production query is a defect.
 
-This fail-early rule has an important boundary: source and generated-query errors should fail compilation, while facts about a live PostgreSQL catalog can only be proved at `PgVev` startup. Vev does not currently generate a canonical DDL/schema manifest that a build can compare with a migration.
+This fail-early rule has an important boundary: source and generated-query errors should fail compilation, while facts about a live PostgreSQL catalog can only be proved at `PgVev` startup. The processor emits a versioned [schema manifest](schema-manifest.md) for migration review and tooling. Live catalog verification remains mandatory; the manifest alone does not validate a migration.
 
 The exported PostgreSQL plan SPIs are a linker surface for generated application code, not a supported handwritten extension point. Only unmodified annotation-processor output is inside the generated-plan safety profile; custom executable plan behavior is fully trusted by the runtime.
 

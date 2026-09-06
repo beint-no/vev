@@ -93,6 +93,40 @@ final class VevProcessorTest {
         assertNotEquals(
                 original.generated("example/BillingModelVev.java"),
                 changed.generated("example/BillingModelVev.java"));
+        assertNotEquals(original.manifest("example.BillingModel"), changed.manifest("example.BillingModel"));
+    }
+
+    @Test
+    void packagesDeterministicSchemaContractWithTheCompiledModel() throws IOException {
+        var sources = positiveSources();
+        var reordered = new LinkedHashMap<String, String>();
+        sources.entrySet().stream().sorted(Map.Entry.<String, String>comparingByKey().reversed())
+                .forEach(entry -> reordered.put(entry.getKey(), entry.getValue()));
+        Compilation first = compile(sources);
+        Compilation second = compile(reordered);
+        assertTrue(first.success(), first.diagnostics());
+        assertTrue(second.success(), second.diagnostics());
+        String manifest = first.manifest("example.BillingModel");
+        assertEquals(manifest, second.manifest("example.BillingModel"));
+        assertFalse(manifest.contains(temporaryDirectory.toString()));
+        var fingerprint = java.util.regex.Pattern.compile("sha256:[a-f0-9]{64}").matcher(manifest);
+        assertTrue(fingerprint.find());
+        assertTrue(first.generated("example/BillingModelVev.java").contains(fingerprint.group()));
+        assertFalse(fingerprint.find());
+        try (var expected = getClass().getResourceAsStream("/schema/billing.schema.json")) {
+            assertTrue(expected != null, "Schema contract fixture must be packaged with the tests");
+            assertEquals(new String(expected.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8),
+                    manifest.replaceAll("sha256:[a-f0-9]{64}", "<model fingerprint>"));
+        }
+    }
+
+    @Test
+    void invalidModelDoesNotEmitASchemaManifest() throws IOException {
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@Version", ""));
+        Compilation compilation = compile(sources);
+        assertFalse(compilation.success());
+        assertFalse(Files.exists(compilation.classesDirectory().resolve("META-INF/vev/example.BillingModel.schema.json")));
     }
 
     @Test
@@ -514,7 +548,7 @@ final class VevProcessorTest {
             String diagnosticText = diagnostics.getDiagnostics().stream()
                     .map(VevProcessorTest::formatDiagnostic)
                     .collect(java.util.stream.Collectors.joining("\n"));
-            return new Compilation(success, diagnosticText, generatedDirectory);
+            return new Compilation(success, diagnosticText, generatedDirectory, classesDirectory);
         }
     }
 
@@ -727,9 +761,13 @@ final class VevProcessorTest {
     private record NegativeCase(String source, String diagnostic) {
     }
 
-    private record Compilation(boolean success, String diagnostics, Path generatedDirectory) {
+    private record Compilation(boolean success, String diagnostics, Path generatedDirectory, Path classesDirectory) {
         String generated(String relativePath) throws IOException {
             return Files.readString(generatedDirectory.resolve(relativePath));
+        }
+
+        String manifest(String modelName) throws IOException {
+            return Files.readString(classesDirectory.resolve("META-INF/vev/" + modelName + ".schema.json"));
         }
     }
 }
