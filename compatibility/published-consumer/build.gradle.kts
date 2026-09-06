@@ -5,7 +5,7 @@ plugins {
 val vevVersion = providers.gradleProperty("vevVersion").get()
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(26)
+    toolchain.languageVersion = JavaLanguageVersion.of(27)
 }
 
 dependencies {
@@ -14,6 +14,6 @@ dependencies {
 }
 
 tasks.withType<JavaCompile>().configureEach {
-    options.release = 26
+    options.release = 27
     options.compilerArgs.addAll(listOf("-Xlint:all,-processing", "-Werror"))
 }

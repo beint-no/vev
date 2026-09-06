@@ -11,7 +11,7 @@ Vev welcomes narrowly scoped experimental contributions. The project is not prod
 
 ## Development baseline
 
-Use JDK 26 and the checked-in Gradle wrapper:
+Use JDK 27 and the checked-in Gradle wrapper:
 
 ```shell
 ./gradlew clean check integrationTest
@@ -34,7 +34,7 @@ An annotation-profile change should include:
 
 A runtime change should include failure-path tests, resource cleanup, rollback behavior, and concurrency ownership where applicable. Tenant-sensitive changes also need adversarial cases from the [tenant threat model](docs/tenant-threat-model.md).
 
-Every new production dependency needs an architectural justification: identify the owning module, explain why the JDK or an existing dependency is insufficient, and describe its runtime, security, and publication impact. Dependency updates must retain JDK 26 compatibility and the module boundary that keeps Hibernate out of Vev's runtime graph. Jakarta Persistence milestone or Hibernate beta upgrades must state that prerelease status explicitly.
+Every new production dependency needs an architectural justification: identify the owning module, explain why the JDK or an existing dependency is insufficient, and describe its runtime, security, and publication impact. Dependency updates must retain JDK 27 compatibility and the module boundary that keeps Hibernate out of Vev's runtime graph. Jakarta Persistence milestone or Hibernate beta upgrades must state that prerelease status explicitly.
 
 ## Benchmarks
 

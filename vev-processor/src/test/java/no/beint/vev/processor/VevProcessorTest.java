@@ -502,7 +502,7 @@ final class VevProcessorTest {
         try (StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, null)) {
             Iterable<? extends JavaFileObject> units = fileManager.getJavaFileObjectsFromPaths(sourcePaths);
             List<String> options = List.of(
-                    "--release", "26",
+                    "--release", "27",
                     "-classpath", System.getProperty("java.class.path"),
                     "-processor", VevProcessor.class.getName(),
                     "-proc:full",

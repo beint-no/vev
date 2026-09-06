@@ -672,15 +672,15 @@ final class MappingCompiler {
             return;
         }
         long typeStart = trees.getSourcePositions()
-                .getStartPosition(entityPath.getCompilationUnit(), classTree);
+                .getStartPosition(classTree);
         for (Tree member : classTree.getMembers()) {
             if (!(member instanceof MethodTree methodTree) || methodTree.getReturnType() != null) {
                 continue;
             }
             long constructorStart = trees.getSourcePositions()
-                    .getStartPosition(entityPath.getCompilationUnit(), member);
+                    .getStartPosition(member);
             long constructorEnd = trees.getSourcePositions()
-                    .getEndPosition(entityPath.getCompilationUnit(), member);
+                    .getEndPosition(member);
             if (constructorStart == Diagnostic.NOPOS
                     || constructorEnd == Diagnostic.NOPOS
                     || constructorStart <= typeStart) {
@@ -736,7 +736,7 @@ final class MappingCompiler {
         var entityPath = trees.getPath(entity);
         return methodTree != null
                 && entityPath != null
-                && trees.getSourcePositions().getStartPosition(entityPath.getCompilationUnit(), methodTree) != Diagnostic.NOPOS;
+                && trees.getSourcePositions().getStartPosition(methodTree) != Diagnostic.NOPOS;
     }
 
     private static Trees compilerTrees(ProcessingEnvironment environment) {

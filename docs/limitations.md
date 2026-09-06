@@ -6,7 +6,7 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 
 ## Platform
 
-- JDK 26 is the minimum and only supported Java baseline.
+- JDK 27 is the minimum and only supported Java baseline.
 - Exactly PostgreSQL major 18 is accepted. Earlier and later majors fail verification; the current fixture is 18.6.
 - Jakarta Persistence `4.0.0-M6` is a preview dependency and may change incompatibly.
 - Vev is not Jakarta Persistence TCK compliant and is not a complete persistence provider.

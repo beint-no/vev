@@ -33,7 +33,7 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Include exact JDK 26, PostgreSQL, JDBC driver, operating system, and architecture versions that matter.
+      description: Include exact JDK 27, PostgreSQL, JDBC driver, operating system, and architecture versions that matter.
     validations:
       required: true
   - type: textarea

@@ -11,14 +11,14 @@ import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 
 /**
- * JDK 26 annotation processor for closed Vev models.
+ * JDK 27 annotation processor for closed Vev models.
  *
  * <p>For each source type annotated with {@code @VevModel}, the processor validates the complete immutable entity
  * mapping and generates strongly typed PostgreSQL plans plus a closed-model registry. Invalid or ambiguous mappings
  * fail compilation instead of deferring mapping discovery to application startup.</p>
  */
 @SupportedAnnotationTypes(VevProcessor.VEV_MODEL)
-@SupportedSourceVersion(SourceVersion.RELEASE_26)
+@SupportedSourceVersion(SourceVersion.RELEASE_27)
 public final class VevProcessor extends AbstractProcessor {
     static final String VEV_MODEL = "no.beint.vev.VevModel";
 

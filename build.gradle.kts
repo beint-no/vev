@@ -30,7 +30,7 @@ subprojects {
     description = when (name) {
         "vev-core" -> "Compile-time-safe transaction and entity contracts for Vev"
         "vev-postgres" -> "PostgreSQL 18 runtime for Vev's closed AOT entity model"
-        "vev-processor" -> "JDK 26 annotation processor for Vev entity models"
+        "vev-processor" -> "JDK 27 annotation processor for Vev entity models"
         "vev-jakarta4" -> "Experimental nonconforming Jakarta Persistence 4 EntityAgent-shaped facade for Vev"
         "vev-integration-tests" -> "Synthetic PostgreSQL integration verification for Vev"
         "vev-benchmark-vev" -> "JMH benchmark lane for Vev"
@@ -40,7 +40,7 @@ subprojects {
 
     plugins.withId("java") {
         extensions.configure<JavaPluginExtension> {
-            toolchain.languageVersion = JavaLanguageVersion.of(26)
+            toolchain.languageVersion = JavaLanguageVersion.of(27)
             if (project.name in publicModules) {
                 withSourcesJar()
                 withJavadocJar()
@@ -48,7 +48,7 @@ subprojects {
         }
 
         tasks.withType<JavaCompile>().configureEach {
-            options.release = 26
+            options.release = 27
             options.encoding = "UTF-8"
             options.compilerArgs.addAll(listOf("-Xlint:all,-processing", "-Werror", "-parameters"))
         }

@@ -1,4 +1,4 @@
-/** Provides the JDK 26 annotation processor that compiles closed Vev models and PostgreSQL plans. */
+/** Provides the JDK 27 annotation processor that compiles closed Vev models and PostgreSQL plans. */
 module no.beint.vev.processor {
     requires java.compiler;
     requires jdk.compiler;

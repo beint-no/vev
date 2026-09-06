@@ -9,7 +9,7 @@ Safety and performance are design goals, not established product claims. The rep
 
 The current baseline is:
 
-- JDK 26, with no compatibility target for older JDKs;
+- JDK 27, with no compatibility target for older JDKs;
 - exactly PostgreSQL major 18; the current CI fixture is PostgreSQL 18.6;
 - the preview `jakarta.persistence:jakarta.persistence-api:4.0.0-M6` contract;
 - a closed, documented selection of Jakarta Persistence annotations reused as Vev metadata, not a conforming subset of the provider specification.
@@ -72,7 +72,7 @@ Compilation proves the closed source model, not a live database. `PgVev` perform
 | `vev-benchmark-vev` | Isolated Vev JMH workloads |
 | `vev-benchmark-hibernate` | Isolated Hibernate ORM 8.0.0.Beta1 JMH baseline |
 
-No artifact is currently published. To verify the source tree with JDK 26:
+No artifact is currently published. To verify the source tree with JDK 27:
 
 ```shell
 ./gradlew clean check integrationTest
@@ -82,7 +82,7 @@ Integration verification requires an administrator connection to disposable Post
 
 The [current reviewed A–B–B–A evidence bundle](benchmark-results/final-b0b026d19959b4ca848174e8f2ab4c909363d208/report.md) covers generated indexed reads and the guarded 32-row update against prerelease Hibernate ORM 8.0.0.Beta1. Its latency comparison is explicitly rejected: post-A2 telemetry showed severe unrelated CPU and storage activity, and without comparable pre-run or in-run telemetry host interference cannot be excluded. The unfiltered raw results remain public; only the narrowly scoped, repeatable normalized-allocation observations are retained. An [earlier read-only bundle](benchmark-results/final-4b2b23f10d4352d86834c4f43993d1288ba82020/report.md) is also preserved. Neither campaign is a general performance claim.
 
-CI runs the complete verification on exact Temurin and Oracle builds of the common JDK `26.0.2+10` baseline, plus separate floating JDK 26 lanes that request each vendor's current security update. Every lane records and validates the installed runtime identity.
+Verification runs locally with the checked-in wrapper; this repository has no GitHub Actions CI. The JDK 27 baseline is currently verified on Oracle OpenJDK release candidate `27+35-2325` with PostgreSQL 18.6. JDK 27 general availability is scheduled for September 15, 2026; the 1.0 release gate includes rerunning verification on the final distribution. Preview APIs are permitted only where measured performance or a simpler, safer implementation justifies their use.
 
 ## Safety boundary
 

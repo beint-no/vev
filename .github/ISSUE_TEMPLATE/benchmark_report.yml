@@ -10,7 +10,7 @@ body:
     id: revisions
     attributes:
       label: Revisions and dependency versions
-      description: Include commit IDs and exact JDK 26, PostgreSQL, JDBC, Jakarta Persistence, JMH, and comparison-runtime versions.
+      description: Include commit IDs and exact JDK 27, PostgreSQL, JDBC, Jakarta Persistence, JMH, and comparison-runtime versions.
     validations:
       required: true
   - type: textarea

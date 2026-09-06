@@ -11,7 +11,7 @@ The preview comparison baseline is Hibernate ORM `8.0.0.Beta1`, which itself is 
 A benchmark report is publishable only when it records:
 
 - Vev, benchmark, and comparison commit identifiers;
-- JDK vendor and exact JDK 26 version;
+- JDK vendor and exact JDK 27 version;
 - operating system, architecture, CPU, memory, and power mode;
 - PostgreSQL version, JDBC driver version, and database location;
 - Jakarta Persistence and Hibernate versions, including milestone/beta labels;
