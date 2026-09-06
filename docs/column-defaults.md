@@ -70,13 +70,47 @@ A missing, extra, differently typed, altered, or unapproved default prevents
 startup. Query failures and nested result/statement/connection cleanup failures
 leave the tenant authority unclaimed, permitting a corrected bootstrap retry.
 
-All existing table, column, collation, privilege, RLS, generated-column, and
-missing-value restrictions remain. In particular, PostgreSQL `atthasmissing`
-state is not enabled by this feature. Default acceptance does not prove the
-correctness of another writer or that every evaluation meets the application's
-domain rules. Retain business constraints and review external writes. PostgreSQL
+Existing type, column-bound, collation, privilege, RLS, and generated-column
+checks remain. Default acceptance does not prove the correctness of another
+writer or that every evaluation meets the application's domain rules. Retain business constraints and review external writes. PostgreSQL
 [`pg_attrdef`](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html) stores the
 expression metadata used for this comparison.
+
+## Historical values from column additions
+
+PostgreSQL can add a column with a nonvolatile default without rewriting old
+rows. It evaluates that expression during the migration and retains a datum for
+physically absent attributes. A later default change affects new writes;
+historical reads still use the retained datum. A physical rewrite materializes
+it into the rows. See PostgreSQL's
+[column migration documentation](https://www.postgresql.org/docs/18/ddl-alter.html)
+and [`pg_attribute` catalog contract](https://www.postgresql.org/docs/18/catalog-pg-attribute.html).
+
+Vev accepts this native storage on mapped columns when `atthasmissing` has a
+nonnull `attmissingval`. Bootstrap checks only presence; it never retrieves,
+deparses, or evaluates that datum. PostgreSQL reads it through the already
+verified built-in column type, and Vev validates the resulting row normally.
+A flagged attribute with no catalog datum is rejected. The fingerprint table
+retains its separate stricter storage contract.
+
+The historical value is row data, so it need not equal the current default and
+is not included in a fingerprint, manifest, or generated plan. A migration may
+have dropped the old default entirely, including defaults once used to populate
+an identifier, tenant key, or version. Such columns must still satisfy their
+current no-default mapping and every structural validation. This does not
+permit a current structural-column default or weaken identity generation.
+No application backfill, normalization, or table rewrite is required just to
+remove `atthasmissing`; ordinary validated migrations remain responsible for
+what values they install.
+
+Synthetic coverage retains older tuples across changed and dropped defaults,
+a binary-compatible varchar widening, Java/Kotlin and shared read-only reads,
+tenant/key/version storage, every supported scalar family, indexed predicates,
+explicit single/batch writes, optimistic conflicts, and both JDBC wire modes.
+It also checks unchanged reads after a physical rewrite, current-default drift,
+and transaction rollback after invalid historical versions, enum names, and
+end-of-day times. This storage support requires no generated-plan ABI change,
+new dependency, extra bootstrap query, or request SQL change.
 
 ## Explicit values remain explicit
 

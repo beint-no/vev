@@ -96,6 +96,154 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void historicalMissingValuesSurviveChangedDefaultsAndPhysicalRewrites() throws SQLException {
+        try {
+            database.seedMissingValues("valid");
+            assertEquals(List.of("amount", "clock", "counter", "day", "enabled", "label", "long_value",
+                    "moment", "payload", "small_value", "stamp", "state", "token", "version"), database.missingValueColumns("default_sample"));
+            assertEquals(List.of("attempts", "enabled", "label", "version"), database.missingValueColumns("kotlin_default"));
+            assertEquals(List.of("label", "version"), database.missingValueColumns("only_note"));
+            assertEquals(List.of("id", "tenant_id", "value", "version"), database.missingValueColumns("snapshot_probe"));
+            assertHistoricalValues();
+            database.rewriteMissingValues(false);
+            for (String table : List.of("default_sample", "kotlin_default", "only_note", "snapshot_probe")) {
+                assertTrue(database.missingValueColumns(table).isEmpty(), table);
+            }
+            assertHistoricalValues();
+        } finally {
+            database.rewriteMissingValues(true);
+        }
+    }
+
+    private void assertHistoricalValues() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var row = runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow();
+                assertEquals(new DefaultSample(1001, tenant, 0, false, (short) 0, 1, 0L, new BigDecimal("0.00"),
+                        "prior", null, LocalDate.of(2024, 1, 1), LocalTime.NOON,
+                        LocalDateTime.parse("2024-01-01T12:00:00.123456"), Instant.parse("2024-01-01T00:00:00Z"),
+                        new UUID(0, 0), Binary.copyOf("sample".getBytes(StandardCharsets.UTF_8)), WorkState.OPEN), row);
+                assertEquals(List.of(row), runtime.read(scope, tx -> tx.entities().many(
+                        PgQueries.equal(DefaultSampleVev.ENABLED, false, new QueryLimit(8)))).values());
+                var recent = runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1002))).orElseThrow();
+                assertTrue(recent.enabled());
+                assertEquals(5, recent.counter());
+                assertEquals("fallback", recent.label());
+                assertEquals("defaults; are metadata", recent.body());
+                var kotlin = runtime.read(scope, tx -> tx.entities().find(no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE.key(1001L))).orElseThrow();
+                assertEquals(new no.beint.vev.fixtures.KotlinDefaultEntry(1001L, tenant, 0L, false, "earlier", 3), kotlin);
+                var recentKotlin = runtime.read(scope, tx -> tx.entities().find(no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE.key(1002L))).orElseThrow();
+                assertEquals(new no.beint.vev.fixtures.KotlinDefaultEntry(1002L, tenant, 0L, true, "kotlin", 7), recentKotlin);
+            }
+            var structural = runtime.read(authority.scope(7), tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1001L))).orElseThrow();
+            assertEquals(1001L, structural.id());
+            assertEquals(7, structural.tenantId());
+            assertEquals(0L, structural.version());
+            assertEquals("historical", structural.value());
+            assertTrue(runtime.read(authority.scope(8), tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1001L))).isEmpty());
+            var sharedAuthority = SharedOnlyModelVev.newTenantAuthority();
+            var shared = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, sharedAuthority);
+            for (int tenant : List.of(7, 8)) {
+                var historicNote = shared.read(sharedAuthority.scope(tenant), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1001L))).orElseThrow();
+                assertEquals(0, historicNote.version());
+                assertEquals("historic-note", historicNote.label());
+                assertEquals("from-schema", shared.read(sharedAuthority.scope(tenant), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1002L))).orElseThrow().label());
+            }
+        }
+    }
+
+    @Test
+    void missingValueStoragePreservesExplicitWritesVersionChecksAndRollback() throws SQLException {
+        try {
+            database.seedMissingValues("valid");
+            // Also exercise single/batch creation and replacement while historical storage is present.
+            assertExplicitDefaultWrites();
+            for (boolean binary : List.of(false, true)) {
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+                var scope = authority.scope(7);
+                var old = runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow();
+                var updated = runtime.write(scope, tx -> tx.entities().updateMultiple(DefaultSampleVev.INSTANCE,
+                        Batch.one(defaultSnapshot(old, defaultInput(false, 0))))).get(0).entity();
+                assertEquals(old.version() + 1, updated.version());
+                assertEquals(defaultSnapshot(updated, defaultInput(false, 0)), updated);
+                assertInstanceOf(MutationResult.Conflict.class, runtime.write(scope,
+                        tx -> tx.entities().update(DefaultSampleVev.INSTANCE, old)));
+                var oldStructural = runtime.read(scope, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1001L))).orElseThrow();
+                assertInstanceOf(MutationResult.Missing.class, runtime.write(authority.scope(8), tx -> tx.entities().update(
+                        SnapshotProbeVev.INSTANCE, new SnapshotProbe(1001L, 8, oldStructural.version(), "foreign"))));
+                var replacement = new SnapshotProbe(oldStructural.id(), 7, oldStructural.version(), "explicit");
+                var changed = (MutationResult.Applied<?, SnapshotProbe, ?, ?>) runtime.write(scope,
+                        tx -> tx.entities().update(SnapshotProbeVev.INSTANCE, replacement));
+                assertEquals(oldStructural.version() + 1, changed.entity().version());
+                assertEquals("explicit", changed.entity().value());
+                var before = id("missing-storage-rollback-" + binary);
+                assertThrows(IllegalStateException.class, () -> runtime.write(scope, tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, new Account(before, 7, 0L, null, new BigDecimal("1.0000")));
+                    assertThrows(RuntimeException.class, () -> tx.entities().createMultiple(DefaultSampleVev.INSTANCE,
+                            Batch.copyOf(List.of(defaultInput(true, 9), defaultInput(false, -1)))));
+                    assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)));
+                    return null;
+                }));
+                assertTrue(runtime.read(scope, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty());
+                assertEquals(updated, runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow());
+            }
+        } finally {
+            database.rewriteMissingValues(true);
+        }
+    }
+
+    @Test
+    void invalidHistoricalValuesPoisonTransactionsEvenWhenTheirDefaultWasReplaced() throws SQLException {
+        for (String variant : List.of("negativeVersion", "unknownEnum", "endOfDay")) {
+            try {
+                database.seedMissingValues(variant);
+                for (boolean binary : List.of(false, true)) {
+                    var authority = IntegrationModelVev.newTenantAuthority();
+                    var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+                    var scope = authority.scope(7);
+                    var before = id("historical-invalid-" + variant + "-" + binary);
+                    assertThrows(IllegalStateException.class, () -> runtime.write(scope, tx -> {
+                        tx.entities().insert(AccountVev.INSTANCE, new Account(before, 7, 0L, null, new BigDecimal("1.0000")));
+                        assertThrows(RuntimeException.class, () -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001)), variant);
+                        assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)), variant);
+                        return null;
+                    }), variant);
+                    assertTrue(runtime.read(scope, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty(), variant);
+                    assertEquals(0, runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1002))).orElseThrow().version());
+                }
+            } finally {
+                database.rewriteMissingValues(true);
+            }
+        }
+    }
+
+    @Test
+    void historicalMissingValuesDoNotMaskCurrentDefaultDrift() throws SQLException {
+        try {
+            database.seedMissingValues("valid");
+            for (String variant : List.of("missing", "changed", "arithmetic", "userFunction")) {
+                var authority = IntegrationModelVev.newTenantAuthority();
+                try {
+                    database.defaultVariant(variant);
+                    assertTrue(database.missingValueColumns("default_sample").contains("enabled"));
+                    assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                    assertThrows(IllegalStateException.class, () -> authority.scope(7));
+                } finally {
+                    database.defaultVariant("valid");
+                }
+                var runtime = new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+                assertFalse(runtime.read(authority.scope(7), tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow().enabled());
+            }
+        } finally {
+            database.rewriteMissingValues(true);
+        }
+    }
+
+    @Test
     void defaultMappingsReadExternallyDefaultedValuesAcrossJavaKotlinAndBothWireModes() throws SQLException {
         database.seedDatabaseDefaults();
         for (boolean binary : List.of(false, true)) {
@@ -133,6 +281,10 @@ final class VevPostgresIntegrationTest {
 
     @Test
     void explicitSingleBatchAndUpdatedValuesOverrideEveryDatabaseDefault() {
+        assertExplicitDefaultWrites();
+    }
+
+    private void assertExplicitDefaultWrites() {
         for (boolean binary : List.of(false, true)) {
             var statements = new java.util.ArrayList<String>();
             var delegate = database.applicationDataSource(binary);

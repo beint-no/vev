@@ -1082,13 +1082,16 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             }
         }
 
+        // ADD COLUMN may retain a historical datum for physically older tuples. PostgreSQL
+        // reads that datum using the column's verified built-in type; no old expression runs.
+        // Test presence only here: do not fetch/deparse attmissingval or make row data schema metadata.
         String columnSql = """
                 SELECT attribute.attnotnull,
                        attribute.atttypid = pg_catalog.to_regtype(?),
                        attribute.attidentity,
                        attribute.attgenerated,
                        attribute.atthasdef,
-                       NOT attribute.atthasmissing,
+                       NOT attribute.atthasmissing OR attribute.attmissingval IS NOT NULL,
                        attribute.atttypmod = ?,
                        type_namespace.nspname = 'pg_catalog',
                        type.typtype = 'b',

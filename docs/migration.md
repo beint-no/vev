@@ -75,5 +75,7 @@ Declare an approved VALUE-column default through
 [`@Column(options = "DEFAULT …")`](column-defaults.md), using the exact PostgreSQL
 expression representation. This supports schema verification, not omitted-value
 insertion: Vev's callers still supply every application field. Do not drop a
-default to make a read-only pilot pass. Expressions outside the approved profile
-and PostgreSQL missing-value state still need a verified migration contract.
+default to make a read-only pilot pass. Expressions outside the approved profile still need a verified migration
+contract. Native PostgreSQL historical missing-value storage is supported; do
+not rewrite a table just to clear `atthasmissing`. Historical values remain
+subject to the same row validation as physically stored values.

@@ -235,6 +235,121 @@ final class IntegrationDatabase {
         }
     }
 
+    // Preserve relation and identity-sequence OIDs: the suite's existing runtime owns their contracts.
+    void seedMissingValues(String variant) throws SQLException {
+        List<String> sampleColumns = List.of(
+                "version integer NOT NULL DEFAULT " + (variant.equals("negativeVersion") ? "-1" : "0"),
+                "enabled boolean NOT NULL DEFAULT vev_it.historical_default()",
+                "small_value smallint NOT NULL DEFAULT 0", "counter integer NOT NULL DEFAULT 1",
+                "long_value bigint NOT NULL DEFAULT 0", "amount numeric(12,2) NOT NULL DEFAULT 0",
+                "label varchar(32) DEFAULT 'prior'", "body text DEFAULT NULL",
+                "day date DEFAULT '2024-01-01'::date",
+                "clock time DEFAULT '" + (variant.equals("endOfDay") ? "24:00:00" : "12:00:00") + "'::time",
+                "stamp timestamp DEFAULT '2024-01-01 12:00:00.123456'::timestamp",
+                "moment timestamptz DEFAULT '2024-01-01 00:00:00+00'::timestamptz",
+                "token uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid",
+                "payload bytea DEFAULT '\\x73616d706c65'::bytea",
+                "state varchar(8) NOT NULL DEFAULT '" + (variant.equals("unknownEnum") ? "INVALID" : "OPEN") + "'");
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            connection.setAutoCommit(false);
+            try {
+                statement.execute("TRUNCATE vev_it.default_sample, vev_it.kotlin_default, vev_it.only_note, vev_it.snapshot_probe");
+                var before = new java.util.LinkedHashMap<String, Long>();
+                for (String table : missingValueTables()) before.put(table, storageFile(connection, table));
+                statement.execute("CREATE FUNCTION vev_it.historical_default() RETURNS boolean LANGUAGE plpgsql STABLE AS 'BEGIN RETURN false; END'");
+                replaceMissingColumns(statement, "default_sample", sampleColumns,
+                        "INSERT INTO vev_it.default_sample(id,tenant_id) VALUES (1001,7),(1001,8)");
+                statement.execute("ALTER TABLE vev_it.default_sample ALTER COLUMN version DROP DEFAULT, ALTER COLUMN enabled SET DEFAULT true, ALTER COLUMN counter SET DEFAULT (2 + 3), ALTER COLUMN label TYPE varchar(64), ALTER COLUMN label SET DEFAULT 'fallback'::character varying, ALTER COLUMN body SET DEFAULT 'defaults; are metadata'::text, ALTER COLUMN clock SET DEFAULT '12:00:00'::time, ALTER COLUMN state SET DEFAULT 'OPEN'::character varying");
+                statement.execute("ALTER TABLE vev_it.default_sample ADD CONSTRAINT default_sample_counter_check CHECK(counter >= 0), ADD CONSTRAINT default_sample_body_length CHECK(char_length(body) <= 128), ADD CONSTRAINT default_sample_payload_length CHECK(octet_length(payload) <= 64)");
+                statement.execute("CREATE INDEX default_sample_enabled_idx ON vev_it.default_sample(tenant_id,enabled,id)");
+                statement.execute("GRANT INSERT(id,tenant_id,version,enabled,small_value,counter,long_value,amount,label,body,day,clock,stamp,moment,token,payload,state), UPDATE(version,enabled,small_value,counter,long_value,amount,label,body,day,clock,stamp,moment,token,payload,state) ON vev_it.default_sample TO vev_it_app");
+                // The old expression is no longer present; reads can only use its stored datum.
+                statement.execute("DROP FUNCTION vev_it.historical_default()");
+                replaceMissingColumns(statement, "kotlin_default", List.of("version bigint NOT NULL DEFAULT 0",
+                                "enabled boolean NOT NULL DEFAULT false", "label varchar(64) DEFAULT 'earlier'", "attempts integer DEFAULT 3"),
+                        "INSERT INTO vev_it.kotlin_default(id,tenant_id) OVERRIDING SYSTEM VALUE VALUES (1001,7),(1001,8)");
+                statement.execute("ALTER TABLE vev_it.kotlin_default ALTER COLUMN version DROP DEFAULT, ALTER COLUMN enabled SET DEFAULT true, ALTER COLUMN label SET DEFAULT 'kotlin', ALTER COLUMN attempts SET DEFAULT 7");
+                statement.execute("GRANT INSERT(id,tenant_id,version,enabled,label,attempts), UPDATE(version,enabled,label,attempts) ON vev_it.kotlin_default TO vev_it_app");
+                replaceMissingColumns(statement, "only_note", List.of("version integer NOT NULL DEFAULT 0", "label varchar(64) DEFAULT 'historic-note'"),
+                        "INSERT INTO vev_it.only_note(id) OVERRIDING SYSTEM VALUE VALUES (1001)");
+                statement.execute("ALTER TABLE vev_it.only_note ALTER COLUMN version DROP DEFAULT, ALTER COLUMN label SET DEFAULT 'from-schema'");
+                statement.execute("ALTER TABLE vev_it.snapshot_probe ADD COLUMN placeholder integer");
+                statement.execute("DROP POLICY snapshot_probe_tenant ON vev_it.snapshot_probe");
+                replaceMissingColumns(statement, "snapshot_probe", List.of("id bigint NOT NULL DEFAULT 1001",
+                                "tenant_id integer NOT NULL DEFAULT 7", "version bigint NOT NULL DEFAULT 0", "value varchar(64) NOT NULL DEFAULT 'historical'"),
+                        "INSERT INTO vev_it.snapshot_probe(placeholder) VALUES (1)");
+                statement.execute("ALTER TABLE vev_it.snapshot_probe ALTER COLUMN id DROP DEFAULT, ALTER COLUMN tenant_id DROP DEFAULT, ALTER COLUMN version DROP DEFAULT, ALTER COLUMN value DROP DEFAULT, DROP COLUMN placeholder, ADD PRIMARY KEY(id)");
+                statement.execute("CREATE INDEX snapshot_probe_tenant_id_idx ON vev_it.snapshot_probe(tenant_id,id)");
+                statement.execute("CREATE POLICY snapshot_probe_tenant ON vev_it.snapshot_probe FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id',true)::integer) WITH CHECK (tenant_id = current_setting('vev.tenant_id',true)::integer)");
+                statement.execute("GRANT INSERT(id,tenant_id,version,value), UPDATE(version,value) ON vev_it.snapshot_probe TO vev_it_app");
+                for (var entry : before.entrySet()) {
+                    if (entry.getValue() != storageFile(connection, entry.getKey())) {
+                        throw new SQLException("Historical-value fixture unexpectedly rewrote " + entry.getKey());
+                    }
+                }
+                statement.execute("INSERT INTO vev_it.default_sample(id,tenant_id,version) VALUES (1002,7,0),(1002,8,0)");
+                statement.execute("INSERT INTO vev_it.kotlin_default(id,tenant_id,version) OVERRIDING SYSTEM VALUE VALUES (1002,7,0),(1002,8,0)");
+                statement.execute("INSERT INTO vev_it.only_note(id,version) OVERRIDING SYSTEM VALUE VALUES (1002,0)");
+                for (String sequence : List.of("default_sample_id_seq", "kotlin_default_id_seq", "only_note_id_seq")) {
+                    statement.execute("SELECT pg_catalog.setval('vev_it." + sequence + "', GREATEST((SELECT last_value FROM vev_it." + sequence + "),1002),true)");
+                }
+                connection.commit();
+            } catch (SQLException | RuntimeException failure) {
+                try { connection.rollback(); } catch (SQLException rollbackFailure) { failure.addSuppressed(rollbackFailure); }
+                throw failure;
+            }
+        }
+    }
+
+    private static void replaceMissingColumns(Statement statement, String table, List<String> definitions,
+                                              String insertOldRows) throws SQLException {
+        for (String definition : definitions) {
+            statement.execute("ALTER TABLE vev_it." + table + " DROP COLUMN " + definition.substring(0, definition.indexOf(' ')));
+        }
+        statement.execute(insertOldRows);
+        for (String definition : definitions) statement.execute("ALTER TABLE vev_it." + table + " ADD COLUMN " + definition);
+    }
+
+    List<String> missingValueColumns(String table) throws SQLException {
+        try (Connection connection = adminConnection(); PreparedStatement statement = connection.prepareStatement("""
+                SELECT attname FROM pg_catalog.pg_attribute
+                 WHERE attrelid = pg_catalog.to_regclass(?) AND attnum > 0 AND NOT attisdropped
+                   AND atthasmissing AND attmissingval IS NOT NULL ORDER BY attname
+                """)) {
+            statement.setString(1, "vev_it." + table);
+            try (ResultSet rows = statement.executeQuery()) {
+                var columns = new java.util.ArrayList<String>();
+                while (rows.next()) columns.add(rows.getString(1));
+                return List.copyOf(columns);
+            }
+        }
+    }
+
+    void rewriteMissingValues(boolean truncate) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            if (truncate) statement.execute("TRUNCATE vev_it.default_sample, vev_it.kotlin_default, vev_it.only_note, vev_it.snapshot_probe");
+            for (String table : missingValueTables()) {
+                long before = storageFile(connection, table);
+                statement.execute("VACUUM (FULL, ANALYZE) vev_it." + table);
+                if (before == storageFile(connection, table)) throw new SQLException("Fixture rewrite did not replace storage: " + table);
+            }
+        }
+    }
+
+    private static List<String> missingValueTables() {
+        return List.of("default_sample", "kotlin_default", "only_note", "snapshot_probe");
+    }
+
+    private static long storageFile(Connection connection, String table) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("SELECT pg_catalog.pg_relation_filenode(pg_catalog.to_regclass(?))")) {
+            statement.setString(1, "vev_it." + table);
+            try (ResultSet rows = statement.executeQuery()) {
+                if (!rows.next()) throw new SQLException("Missing fixture relation " + table);
+                return rows.getLong(1);
+            }
+        }
+    }
+
     void defaultVariant(String variant) throws SQLException {
         try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
             statement.execute("ALTER TABLE vev_it.default_sample ALTER COLUMN enabled SET DEFAULT true");
