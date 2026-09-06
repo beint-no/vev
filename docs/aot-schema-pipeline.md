@@ -12,7 +12,30 @@ The annotation processor reads selected source-level Jakarta Persistence annotat
 
 The model is valid only when every encountered Jakarta Persistence or Hibernate annotation and every accepted annotation attribute is either implemented or explicitly rejected. Other provider namespaces are not a compatibility surface and must not be assumed to affect generated behavior. Unresolved Java types fail compilation.
 
-The processor intentionally does not advertise Gradle incremental annotation processing. A closed model and every entity it names must be presented as source in the same `javac` invocation so Vev can prove that accessors, canonical constructors, initializer blocks, and static state contain no hidden hydration behavior. Build tools must fully recompile the affected source set when a closed model is processed; accepting previously compiled entity bytecode would weaken this source-level proof and is rejected.
+The processor intentionally does not advertise Gradle incremental annotation processing.
+The closed `@VevModel` declaration is source. Entity records may be source in the
+same invocation or separately compiled records on the ordinary class path. Source
+records retain the constructor/accessor/initialization checks. Compiled records
+are parsed at build time using the JDK Class-File API; application classes are
+never loaded by this verifier. It requires exact direct canonical assignments,
+pure field accessors, the standard JDK `ObjectMethods` bootstrap with every
+component handle in order, no interfaces, and no executable class initializer or
+nonconstant static state. Each class file is bounded to one MiB.
+
+A compiled record may come from a directory or JAR. The verifier checks the
+version-specific class selected from a multi-release JAR and matches its component
+names, types, and order to javac's resolved declaration. Named-module dependency
+records and Kotlin-generated record methods are not accepted by this first
+compiled-record verifier. The runtime still uses generated direct Java access;
+there is no runtime bytecode parsing or reflective hydration fallback.
+
+All annotation-profile checks also apply to compiled declarations, including
+explicit nullability. Identical source and compiled record mappings produce
+identical plans, manifests, and fingerprints. Build tools must rerun processing
+when the model source or a mapping dependency changes; a cached fingerprint does
+not exempt changed bytecode from verification. The integration fixture compiles
+its record dependency before compiling the registry and executes the resulting
+plans against PostgreSQL.
 
 ## 2. Deterministic generation
 

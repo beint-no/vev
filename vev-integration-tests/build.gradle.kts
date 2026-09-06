@@ -2,17 +2,25 @@ plugins {
     java
 }
 
+val records = sourceSets.create("records")
 val integrationTest = sourceSets.create("integrationTest")
+
+sourceSets.main {
+    compileClasspath += records.output
+    runtimeClasspath += records.output
+}
 
 configurations[integrationTest.implementationConfigurationName].extendsFrom(
     configurations.implementation.get(),
     configurations.testImplementation.get()
 )
 configurations[integrationTest.runtimeOnlyConfigurationName].extendsFrom(configurations.testRuntimeOnly.get())
-integrationTest.compileClasspath += sourceSets.main.get().output
-integrationTest.runtimeClasspath += sourceSets.main.get().output
+integrationTest.compileClasspath += sourceSets.main.get().output + records.output
+integrationTest.runtimeClasspath += sourceSets.main.get().output + records.output
 
 dependencies {
+    add(records.implementationConfigurationName, project(":vev-core"))
+    add(records.implementationConfigurationName, "jakarta.persistence:jakarta.persistence-api:4.0.0-M6")
     implementation(project(":vev-core"))
     implementation(project(":vev-postgres"))
     implementation(project(":vev-jakarta4"))
@@ -24,6 +32,10 @@ dependencies {
     add(integrationTest.implementationConfigurationName, platform("org.junit:junit-bom:6.1.3"))
     add(integrationTest.implementationConfigurationName, "org.junit.jupiter:junit-jupiter")
     add(integrationTest.runtimeOnlyConfigurationName, "org.junit.platform:junit-platform-launcher")
+}
+
+tasks.jar {
+    from(records.output)
 }
 
 tasks.test {

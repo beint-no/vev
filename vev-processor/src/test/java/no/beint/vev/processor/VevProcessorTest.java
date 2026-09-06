@@ -701,6 +701,10 @@ final class VevProcessorTest {
     }
 
     private Compilation compile(Map<String, String> sources) throws IOException {
+        return compile(sources, "", true);
+    }
+
+    private Compilation compile(Map<String, String> sources, String extraClassPath, boolean process) throws IOException {
         Path root = Files.createTempDirectory(temporaryDirectory, "javac-");
         Path sourceDirectory = Files.createDirectories(root.resolve("source"));
         Path classesDirectory = Files.createDirectories(root.resolve("classes"));
@@ -716,20 +720,119 @@ final class VevProcessorTest {
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         try (StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, null)) {
             Iterable<? extends JavaFileObject> units = fileManager.getJavaFileObjectsFromPaths(sourcePaths);
-            List<String> options = List.of(
+            List<String> options = new ArrayList<>(List.of(
                     "--release", "27",
-                    "-classpath", System.getProperty("java.class.path"),
-                    "-processor", VevProcessor.class.getName(),
-                    "-proc:full",
+                    "-classpath", System.getProperty("java.class.path") + java.io.File.pathSeparator + extraClassPath,
+                    process ? "-proc:full" : "-proc:none",
                     "-Xlint:all,-processing",
                     "-Werror",
                     "-d", classesDirectory.toString(),
-                    "-s", generatedDirectory.toString());
+                    "-s", generatedDirectory.toString()));
+            if (process) options.addAll(List.of("-processor", VevProcessor.class.getName()));
             boolean success = Boolean.TRUE.equals(compiler.getTask(null, fileManager, diagnostics, options, null, units).call());
             String diagnosticText = diagnostics.getDiagnostics().stream()
                     .map(VevProcessorTest::formatDiagnostic)
                     .collect(java.util.stream.Collectors.joining("\n"));
             return new Compilation(success, diagnosticText, generatedDirectory, classesDirectory);
+        }
+    }
+
+    @Test
+    void verifiesSeparatelyCompiledRecordSnapshotsWithoutChangingGeneratedContracts() throws IOException {
+        for (var sources : List.of(positiveSources(), referenceSources(), enumSources("OPEN, CLOSED"),
+                uniqueSources("@jakarta.persistence.UniqueConstraint(name = \"account_alias_key\", columnNames = {\"tenant_id\", \"alias\"})"))) {
+            Compilation fromSource = compile(sources);
+            assertTrue(fromSource.success(), fromSource.diagnostics());
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation fromDependency = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(fromDependency.success(), fromDependency.diagnostics());
+            assertEquals(fromSource.manifest("example.BillingModel"), fromDependency.manifest("example.BillingModel"));
+            assertEquals(fromSource.generated("example/AccountVev.java"), fromDependency.generated("example/AccountVev.java"));
+        }
+    }
+
+    @Test
+    void compiledRecordsCannotHideConstructorAccessorEqualityOrInitializationBehavior() throws IOException {
+        for (String body : List.of(
+                "public Account { displayName = displayName.strip(); }",
+                "public Account { System.setProperty(\"vev.verifier.executed\", \"yes\"); }",
+                "public String displayName() { return displayName.toUpperCase(java.util.Locale.ROOT); }",
+                "public String displayName() { return alias; }",
+                "public int version() { return version + 1; }",
+                "public boolean equals(Object other) { return true; }",
+                "public int hashCode() { return 0; }",
+                "public String toString() { return \"custom\"; }",
+                "public int extra() { return 1; }",
+                "static { System.setProperty(\"vev.verifier.executed\", \"yes\"); }",
+                "private static final String VALUE = System.getProperty(\"java.version\");")) {
+            var sources = positiveSources();
+            String model = sources.remove("example/BillingModel.java");
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                    "private static final String ENTITY_KIND = \"account\";", body));
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation consumer = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(consumer.success(), body);
+            assertTrue(consumer.diagnostics().contains("could not verify compiled record"), consumer.diagnostics());
+            assertFalse(Files.exists(consumer.classesDirectory().resolve("META-INF/vev/example.BillingModel.schema.json")));
+            assertEquals(null, System.getProperty("vev.verifier.executed"));
+        }
+    }
+
+    @Test
+    void verifiesPackagedRecordsIncludingTheSelectedMultiReleaseClass() throws IOException {
+        var sources = positiveSources();
+        String model = sources.remove("example/BillingModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        var changedSources = new LinkedHashMap<>(sources);
+        changedSources.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                "private static final String ENTITY_KIND = \"account\";", "public String displayName() { return alias; }"));
+        Compilation changed = compile(changedSources, "", false);
+        assertTrue(changed.success(), changed.diagnostics());
+        for (boolean multiRelease : List.of(false, true)) {
+            Path jar = temporaryDirectory.resolve(multiRelease ? "changed-version.jar" : "records.jar");
+            var manifest = new java.util.jar.Manifest();
+            manifest.getMainAttributes().put(java.util.jar.Attributes.Name.MANIFEST_VERSION, "1.0");
+            if (multiRelease) manifest.getMainAttributes().put(java.util.jar.Attributes.Name.MULTI_RELEASE, "true");
+            try (var output = new java.util.jar.JarOutputStream(Files.newOutputStream(jar), manifest);
+                 var paths = Files.walk(dependency.classesDirectory())) {
+                for (Path file : paths.filter(Files::isRegularFile).sorted().toList()) {
+                    output.putNextEntry(new java.util.jar.JarEntry(dependency.classesDirectory().relativize(file).toString()));
+                    Files.copy(file, output);
+                    output.closeEntry();
+                }
+                if (multiRelease) {
+                    output.putNextEntry(new java.util.jar.JarEntry("META-INF/versions/27/example/Account.class"));
+                    Files.copy(changed.classesDirectory().resolve("example/Account.class"), output);
+                    output.closeEntry();
+                }
+            }
+            Compilation consumer = compile(Map.of("example/BillingModel.java", model), jar.toString(), true);
+            assertEquals(!multiRelease, consumer.success(), consumer.diagnostics());
+            if (multiRelease) {
+                assertTrue(consumer.diagnostics().contains("accessor must directly return"), consumer.diagnostics());
+            }
+        }
+    }
+
+    @Test
+    void compiledRecordAnnotationsRemainSubjectToTheExactMappingProfile() throws IOException {
+        for (String declaration : List.of(
+                "@Column(name = \"alias\", length = 64)",
+                "@jakarta.persistence.Basic @Column(name = \"alias\", nullable = true, length = 64)",
+                "@Column(name = \"alias\", nullable = true, length = 64, unique = true)")) {
+            var sources = positiveSources();
+            String model = sources.remove("example/BillingModel.java");
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                    "@Column(name = \"alias\", nullable = true, length = 64)", declaration));
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation consumer = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(consumer.success(), declaration);
+            assertFalse(Files.exists(consumer.classesDirectory().resolve("META-INF/vev/example.BillingModel.schema.json")));
         }
     }
 

@@ -256,9 +256,6 @@ final class MappingCompiler {
     }
 
     private EntityMapping compileEntity(TypeElement entity, String modelQualifiedName) {
-        if (!sourceTypes.contains(entity.getQualifiedName().toString())) {
-            error(entity, "Every Vev entity must be compiled from source in the same javac invocation as its closed model");
-        }
         validateTopLevelPublicType(entity, "Entity");
         if (entity.getKind() != ElementKind.RECORD) {
             error(entity, "Vev entities must be immutable Java records so hydration uses the canonical constructor without reflection");
@@ -274,9 +271,17 @@ final class MappingCompiler {
             return null;
         }
         rejectImplementedInterfaces(entity);
-        rejectExplicitCanonicalConstructor(entity);
-        rejectExplicitInstanceMethods(entity);
-        rejectInitializationSideEffects(entity);
+        if (sourceTypes.contains(entity.getQualifiedName().toString())) {
+            rejectExplicitCanonicalConstructor(entity);
+            rejectExplicitInstanceMethods(entity);
+            rejectInitializationSideEffects(entity);
+        } else {
+            try {
+                CompiledRecordVerifier.verify(processingEnvironment, entity);
+            } catch (IOException | RuntimeException failure) {
+                error(entity, "Vev could not verify compiled record snapshot operations: " + failure.getMessage());
+            }
+        }
         if (annotation(entity, ENTITY) == null) {
             error(entity, "Entity in @VevModel must declare @jakarta.persistence.Entity");
         } else if (!stringValue(annotation(entity, ENTITY), "name").isEmpty()) {
