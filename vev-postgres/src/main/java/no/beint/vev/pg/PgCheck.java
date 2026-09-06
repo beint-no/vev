@@ -15,7 +15,7 @@ public record PgCheck(String name, String expression, Kind kind, String boundCol
     public static final int MAXIMUM_PER_ENTITY = 32;
     /** Maximum characters in one deparsed expression. */
     public static final int MAXIMUM_EXPRESSION_LENGTH = 4096;
-    /** Maximum total expression characters retained by one closed model. */
+    /** Maximum total check and default expression characters retained by one closed model. */
     public static final int MAXIMUM_MODEL_CHARACTERS = 16 * 1024 * 1024;
 
     /**

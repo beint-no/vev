@@ -13,5 +13,5 @@ import no.beint.vev.VevShared;
 @Table(name = "published_reference", schema = "published_consumer")
 public record PublishedReference(
         @Id @Column(name = "id", nullable = false) Integer id,
-        @Column(name = "label", nullable = false, length = 64) String label) {
+        @Column(name = "label", nullable = false, length = 64, options = "DEFAULT 'published'::character varying") String label) {
 }

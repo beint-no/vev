@@ -45,9 +45,9 @@ final class VevProcessorTest {
         String registry = first.generated("example/BillingModelVev.java");
         assertEquals(accountPlan, second.generated("example/AccountVev.java"));
         assertEquals(registry, second.generated("example/BillingModelVev.java"));
-        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 5;\n    }"));
-        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 5;\n    }"));
-        assertEquals(5, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
+        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 6;\n    }"));
+        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 6;\n    }"));
+        assertEquals(6, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
@@ -1085,6 +1085,102 @@ final class VevProcessorTest {
     }
 
     @Test
+    void columnDefaultsPreserveExactSourceBinaryFingerprintsAndTypedMutationContracts() throws IOException, ReflectiveOperationException {
+        for (boolean readOnly : List.of(false, true)) {
+            var sources = defaultSources(readOnly);
+            Compilation first = compile(sources);
+            assertTrue(first.success(), first.diagnostics());
+            String plan = first.generated("example/DefaultEntryVev.java");
+            String manifest = first.manifest("example.DefaultModel");
+            assertTrue(manifest.contains("\"defaultExpression\": \"true\""));
+            assertTrue(manifest.contains("\"defaultExpression\": \"'fallback'::character varying\""));
+            assertFalse(plan.contains("DEFAULT true"));
+            assertTrue(plan.contains(".readChecked(resultSet, firstColumn"));
+            assertEquals(!readOnly, plan.contains("AssignedEntityType"));
+            assertEquals(!readOnly, plan.contains("PgVersionedEntityPlan"));
+            var normalized = new LinkedHashMap<>(sources);
+            normalized.computeIfPresent("example/DefaultEntry.java", (path, text) -> text.replace("DEFAULT true", "  default  true  "));
+            Compilation same = compile(normalized);
+            assertTrue(same.success(), same.diagnostics());
+            assertEquals(plan, same.generated("example/DefaultEntryVev.java"));
+            assertEquals(manifest, same.manifest("example.DefaultModel"));
+            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{first.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+                var registry = loader.loadClass("example.DefaultModelVev");
+                org.junit.jupiter.api.Assertions.assertNotNull(registry.getField("POSTGRES").get(null));
+                var planType = loader.loadClass("example.DefaultEntryVev");
+                var generated = (no.beint.vev.pg.spi.PgEntityPlan<?, ?, ?, ?>) planType.getField("INSTANCE").get(null);
+                assertEquals("true", generated.columns().stream().filter(column -> column.name().equals("enabled")).findFirst().orElseThrow().defaultExpression());
+                assertTrue(generated.columns().stream().filter(column -> column.role() != no.beint.vev.pg.PgColumn.Role.VALUE).allMatch(column -> column.defaultExpression().isEmpty()));
+            }
+            var changed = new LinkedHashMap<>(sources);
+            changed.computeIfPresent("example/DefaultEntry.java", (path, text) -> text.replace("DEFAULT true", "DEFAULT false"));
+            Compilation different = compile(changed);
+            assertTrue(different.success(), different.diagnostics());
+            assertNotEquals(first.generated("example/DefaultModelVev.java"), different.generated("example/DefaultModelVev.java"));
+            String model = sources.remove("example/DefaultModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/DefaultModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(binary.success(), binary.diagnostics());
+            assertEquals(plan, binary.generated("example/DefaultEntryVev.java"));
+            assertEquals(manifest, binary.manifest("example.DefaultModel"));
+        }
+    }
+
+    @Test
+    void defaultOptionsRejectOtherClausesInvalidMetadataAndStructuralKeyDefaults() throws IOException {
+        for (String invalid : List.of("DEFAULT", "DEFAULT   ", "NOT NULL", "COLLATE C", "DEFAULT NULL", "DEFAULT null",
+                "DEFAULT " + "x".repeat(4097), "DEFAULT \0", "DEFAULT \uD800")) {
+            var sources = defaultSources(false);
+            String escaped = invalid.replace("\0", "\\0").replace("\uD800", "\\uD800");
+            sources.computeIfPresent("example/DefaultEntry.java", (path, text) -> text.replace("DEFAULT true", escaped));
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), invalid);
+            assertTrue(compilation.diagnostics().contains("Default expression") || compilation.diagnostics().contains("@Column.options"), compilation.diagnostics());
+            String model = sources.remove("example/DefaultModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/DefaultModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(binary.success());
+            assertTrue(binary.diagnostics().contains("Default expression") || binary.diagnostics().contains("@Column.options"), binary.diagnostics());
+        }
+        for (String field : List.of("id", "tenant_id", "version")) {
+            var sources = defaultSources(false);
+            sources.computeIfPresent("example/DefaultEntry.java", (path, text) -> text.replace("name = \"" + field + "\", nullable = false", "name = \"" + field + "\", nullable = false, options = \"DEFAULT 0\""));
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), field);
+            assertTrue(compilation.diagnostics().contains("ordinary VALUE components"), compilation.diagnostics());
+        }
+        var sources = defaultSources(false);
+        sources.computeIfPresent("example/DefaultEntry.java", (path, text) -> text.replace("options = \"DEFAULT true\"", "options = \"DEFAULT true\", columnDefinition = \"boolean\""));
+        Compilation definition = compile(sources);
+        assertFalse(definition.success());
+        assertTrue(definition.diagnostics().contains("@Column.columnDefinition"), definition.diagnostics());
+    }
+
+    private static Map<String, String> defaultSources(boolean readOnly) {
+        var sources = new LinkedHashMap<String, String>();
+        sources.put("example/DefaultModel.java", "package example; @no.beint.vev.VevModel(entities = DefaultEntry.class) public final class DefaultModel {}");
+        sources.put("example/DefaultEntry.java", """
+                package example;
+                import jakarta.persistence.*;
+                import no.beint.vev.*;
+                @Entity %s
+                @VevRows(8)
+                @Table(name = "default_entry", schema = "example")
+                public record DefaultEntry(
+                    @Id @Column(name = "id", nullable = false) Integer id,
+                    @TenantKey @Column(name = "tenant_id", nullable = false) Integer tenantId,
+                    @Version @Column(name = "version", nullable = false) Integer version,
+                    @VevIndex(name = "default_entry_enabled_idx") @Column(name = "enabled", nullable = false, options = "DEFAULT true") Boolean enabled,
+                    @Column(name = "label", nullable = true, length = 64, options = "DEFAULT 'fallback'::character varying") String label,
+                    @Column(name = "price", nullable = false, precision = 12, scale = 2, options = "DEFAULT 0") java.math.BigDecimal price,
+                    @Column(name = "counter", nullable = false, options = "DEFAULT (2 + 3)") Integer counter) {}
+                """.formatted(readOnly ? "@VevReadOnly" : ""));
+        return sources;
+    }
+
+    @Test
     void externalIncomingReferencesAreExplicitFingerprintBoundReadOnlyMetadata() throws IOException, ReflectiveOperationException {
         for (boolean shared : List.of(false, true)) {
             var sources = shared ? sharedOnlySources("int") : new LinkedHashMap<>(positiveSources());
@@ -1708,9 +1804,35 @@ final class VevProcessorTest {
                 + String.join(", ", entities) + "}) public final class CheckModel {}");
         Compilation result = compile(sources);
         assertFalse(result.success());
-        assertTrue(result.diagnostics().contains("retained check-expression budget"), result.diagnostics());
+        assertTrue(result.diagnostics().contains("retained check/default-expression budget"), result.diagnostics());
         assertFalse(Files.exists(result.classesDirectory().resolve("META-INF/vev/example.CheckModel.schema.json")));
         assertFalse(Files.exists(result.generatedDirectory().resolve("example/CheckEntity0Vev.java")));
+    }
+
+    @Test
+    void defaultAndCheckExpressionsShareTheRetainedMetadataBudget() throws IOException {
+        var sources = new LinkedHashMap<String, String>();
+        sources.put("example/ExpressionText.java", "package example; public final class ExpressionText { public static final String VALUE = \"" + "x".repeat(4096) + "\"; }");
+        String checks = java.util.stream.IntStream.range(0, 16)
+                .mapToObj(index -> "@jakarta.persistence.CheckConstraint(name = \"check_" + index + "\", constraint = ExpressionText.VALUE)")
+                .collect(java.util.stream.Collectors.joining(", "));
+        String defaults = java.util.stream.IntStream.range(0, 48)
+                .mapToObj(index -> "@Column(name = \"value_" + index + "\", nullable = false, options = \"DEFAULT \" + ExpressionText.VALUE) Integer value" + index)
+                .collect(java.util.stream.Collectors.joining(", "));
+        var entities = new ArrayList<String>();
+        for (int index = 0; index < 65; index++) {
+            String name = "DefaultBudget" + index;
+            sources.put("example/" + name + ".java", appendOnlyEntitySource(name, "default_budget_" + index)
+                    .replace("schema = \"ledger\")", "schema = \"ledger\", check = {" + checks + "})")
+                    .replace("UUID tenantId)", "UUID tenantId, " + defaults + ")"));
+            entities.add(name + ".class");
+        }
+        sources.put("example/DefaultBudgetModel.java", "package example; @no.beint.vev.VevModel(entities = {" + String.join(", ", entities) + "}) public final class DefaultBudgetModel {}");
+        Compilation compilation = compile(sources);
+        assertFalse(compilation.success());
+        assertTrue(compilation.diagnostics().contains("retained check/default-expression budget"), compilation.diagnostics());
+        assertFalse(Files.exists(compilation.classesDirectory().resolve("META-INF/vev/example.DefaultBudgetModel.schema.json")));
+        assertFalse(Files.exists(compilation.generatedDirectory().resolve("example/DefaultBudget0Vev.java")));
     }
 
     @Test

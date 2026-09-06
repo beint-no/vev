@@ -69,3 +69,11 @@ Compatibility work should proceed aggregate by aggregate. An application-wide sw
 ## Explicitly shared reference data
 
 Classify ownership before converting mappings. [Shared read-only records](shared-reference-mappings.md) are appropriate only when every tenant may read every mapped column. Missing legacy tenant annotations do not establish that property. The migration needs SELECT-only grants, disabled/unforced RLS with no policies, exact global keys/indexes, and declared scalar FKs to shared targets. Tenant-to-tenant references and forced RLS remain intact. Complete FK closure is the default. A SELECT-only target may explicitly permit external incoming sources through [`@VevReadOnly(externalIncomingReferences = true)`](read-only-mappings.md#external-incoming-references), retaining every physical constraint and full outgoing/within-model attestation. External write correctness remains an application migration responsibility. A model containing only shared records declares the real lexical tenant type with `@VevModel.tenantType`; a global administrative authority is not implemented.
+
+Retain existing database defaults when they are part of other writers' behavior.
+Declare an approved VALUE-column default through
+[`@Column(options = "DEFAULT …")`](column-defaults.md), using the exact PostgreSQL
+expression representation. This supports schema verification, not omitted-value
+insertion: Vev's callers still supply every application field. Do not drop a
+default to make a read-only pilot pass. Expressions outside the approved profile
+and PostgreSQL missing-value state still need a verified migration contract.

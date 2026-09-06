@@ -18,6 +18,7 @@ import java.util.regex.Pattern;
  * @param maximumLength maximum Unicode code points for a string or enum-name column, bytes for Binary, or zero for other codecs
  * @param numericPrecision precision for a decimal column, or zero for other codecs
  * @param numericScale exact scale for a decimal column, or zero for other codecs
+ * @param defaultExpression exact verified database-default expression, or empty when no default is declared
  */
 public record PgColumn(
         String name,
@@ -26,7 +27,8 @@ public record PgColumn(
         Role role,
         int maximumLength,
         int numericPrecision,
-        int numericScale) {
+        int numericScale,
+        String defaultExpression) {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final LocalDate MINIMUM_DATE = LocalDate.of(1, 1, 1);
     private static final LocalDate MAXIMUM_DATE = LocalDate.of(9_999, 12, 31);
@@ -46,6 +48,7 @@ public record PgColumn(
      * @param maximumLength maximum Unicode code points for a string or enum-name column, bytes for Binary, or zero
      * @param numericPrecision precision for a decimal column, or zero
      * @param numericScale exact scale for a decimal column, or zero
+     * @param defaultExpression exact PostgreSQL expression metadata, or empty for no default
      */
     public PgColumn {
         if (name == null || !IDENTIFIER.matcher(name).matches()) {
@@ -53,6 +56,15 @@ public record PgColumn(
         }
         codec = Objects.requireNonNull(codec, "codec");
         role = Objects.requireNonNull(role, "role");
+        defaultExpression = Objects.requireNonNull(defaultExpression, "defaultExpression");
+        if (!defaultExpression.isEmpty()) {
+            if (role != Role.VALUE || defaultExpression.isBlank()
+                    || defaultExpression.length() > PgCheck.MAXIMUM_EXPRESSION_LENGTH
+                    || defaultExpression.equalsIgnoreCase("NULL")) {
+                throw new IllegalArgumentException("Database defaults require bounded nonempty VALUE-column expression metadata; omit a bare NULL default");
+            }
+            requireWellFormedUnicode(defaultExpression);
+        }
         if ((role == Role.ID || role == Role.TENANT || role == Role.VERSION) && nullable) {
             throw new IllegalArgumentException(role + " columns must be non-null");
         }
@@ -79,6 +91,22 @@ public record PgColumn(
         } else if (numericPrecision != 0 || numericScale != 0) {
             throw new IllegalArgumentException("Only BigDecimal columns may declare numeric precision and scale");
         }
+    }
+
+    /**
+     * Creates complete column metadata without a database default.
+     *
+     * @param name safe unquoted identifier
+     * @param codec standard Vev scalar codec
+     * @param nullable whether SQL NULL is allowed
+     * @param role structural column role
+     * @param maximumLength string/code-point or binary/byte bound, or zero
+     * @param numericPrecision decimal precision, or zero
+     * @param numericScale decimal scale, or zero
+     */
+    public PgColumn(String name, PgCodec<?> codec, boolean nullable, Role role,
+            int maximumLength, int numericPrecision, int numericScale) {
+        this(name, codec, nullable, role, maximumLength, numericPrecision, numericScale, "");
     }
 
     /**

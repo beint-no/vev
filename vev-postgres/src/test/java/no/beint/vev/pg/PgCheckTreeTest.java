@@ -27,6 +27,18 @@ final class PgCheckTreeTest {
     }
 
     @Test
+    void expressionInspectionRetainsTheRootTypeAlongsideAllDependencies() {
+        var comparison = PgCheckTree.inspectExpression(COMPARISON);
+        assertEquals(16L, comparison.resultType());
+        assertEquals(PgCheckTree.inspect(COMPARISON), comparison.dependencies());
+        assertEquals(23L, PgCheckTree.inspectExpression(CONSTANT).resultType());
+        assertEquals(23L, PgCheckTree.inspectExpression(VARIABLE).resultType());
+        String labeled = "{RELABELTYPE :arg " + CONSTANT + " :resulttype 20 :resulttypmod -1 :resultcollid 0 :relabelformat 2 :location -1}";
+        assertEquals(20L, PgCheckTree.inspectExpression(labeled).resultType());
+        assertEquals(Set.of(20L, 23L), PgCheckTree.inspectExpression(labeled).dependencies().types());
+    }
+
+    @Test
     void rejectsUnknownNodesFieldsDuplicateFieldsAndTruncatedOrTrailingInput() {
         for (String tree : List.of("", "<>", "(" + VARIABLE + ")", VARIABLE + " extra", VARIABLE.substring(0, VARIABLE.length() - 1),
                 VARIABLE.replace("VAR", "PARAM"), VARIABLE.replace(":location -1", ":newfield 0"),

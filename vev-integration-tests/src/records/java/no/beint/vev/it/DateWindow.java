@@ -20,7 +20,7 @@ public record DateWindow(
         @TenantKey @Column(name = "tenant_id", nullable = false) Integer tenantId,
         @Column(name = "opened", nullable = false) LocalDate opened,
         @Column(name = "closed", nullable = true) LocalDate closed,
-        @Column(name = "lead_days", nullable = false) Integer leadDays,
+        @Column(name = "lead_days", nullable = false, options = "DEFAULT 0") Integer leadDays,
         @Column(name = "lag_days", nullable = false) Integer lagDays,
         @Column(name = "span_days", nullable = false) Integer spanDays) {
 }

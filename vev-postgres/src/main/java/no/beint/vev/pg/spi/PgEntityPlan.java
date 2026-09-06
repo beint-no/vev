@@ -31,7 +31,7 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * Generated-plan binary contract accepted by this runtime. Incompatible SPI changes increment this value.
      * This version is independent of the database schema fingerprint and the library release version.
      */
-    int ABI_VERSION = 5;
+    int ABI_VERSION = 6;
 
     /**
      * Returns the binary contract embedded by the processor that generated this plan.

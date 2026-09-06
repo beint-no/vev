@@ -27,7 +27,8 @@ record PropertyMapping(
         String referenceTarget,
         boolean identity,
         boolean referenceTenantFirst,
-        String lengthCheckName) {
+        String lengthCheckName,
+        String defaultExpression) {
     String quotedColumn() {
         return '"' + columnName + '"';
     }

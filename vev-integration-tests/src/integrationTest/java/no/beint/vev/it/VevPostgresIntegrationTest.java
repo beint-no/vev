@@ -96,6 +96,231 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void defaultMappingsReadExternallyDefaultedValuesAcrossJavaKotlinAndBothWireModes() throws SQLException {
+        database.seedDatabaseDefaults();
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var row = runtime.read(authority.scope(tenant), tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow();
+                assertEquals(tenant, row.tenantId());
+                assertEquals(0, row.version());
+                assertTrue(row.enabled());
+                assertEquals((short) 0, row.smallValue());
+                assertEquals(5, row.counter());
+                assertEquals(0L, row.longValue());
+                assertEquals(new BigDecimal("0.00"), row.amount());
+                assertEquals("fallback", row.label());
+                assertEquals("defaults; are metadata", row.body());
+                assertEquals(java.time.LocalDate.of(2024,1,1), row.day());
+                assertEquals(java.time.LocalTime.NOON, row.clock());
+                assertEquals(java.time.LocalDateTime.parse("2024-01-01T12:00:00.123456"), row.stamp());
+                assertEquals(java.time.Instant.parse("2024-01-01T00:00:00Z"), row.moment());
+                assertEquals(new UUID(0,0), row.token());
+                assertEquals(no.beint.vev.Binary.copyOf("sample".getBytes(java.nio.charset.StandardCharsets.UTF_8)), row.payload());
+                assertEquals(WorkState.OPEN, row.state());
+                var kotlin = runtime.read(authority.scope(tenant), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE.key(1001L))).orElseThrow();
+                assertEquals(tenant, kotlin.tenantId());
+                assertTrue(kotlin.enabled());
+                assertEquals("kotlin", kotlin.label());
+                assertEquals(7, kotlin.attempts());
+            }
+            var sharedAuthority = SharedOnlyModelVev.newTenantAuthority();
+            var shared = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, sharedAuthority);
+            assertEquals("from-schema", shared.read(sharedAuthority.scope(7), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1001L))).orElseThrow().label());
+        }
+    }
+
+    @Test
+    void explicitSingleBatchAndUpdatedValuesOverrideEveryDatabaseDefault() {
+        for (boolean binary : List.of(false, true)) {
+            var statements = new java.util.ArrayList<String>();
+            var delegate = database.applicationDataSource(binary);
+            var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invokeTarget(delegate, method, arguments);
+                        if (!(result instanceof Connection connection)) return result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    if (connectionMethod.getName().equals("prepareStatement") && connectionArguments[0] instanceof String sql
+                                            && (sql.contains("\"default_sample\"") || sql.contains("\"kotlin_default\""))) statements.add(sql);
+                                    return invokeTarget(connection, connectionMethod, connectionArguments);
+                                });
+                    });
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(source, IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var full = defaultInput(true, 9);
+                var empty = defaultInput(false, 0);
+                var single = runtime.write(scope, tx -> tx.entities().create(DefaultSampleVev.INSTANCE, full));
+                assertEquals(defaultSnapshot(single, full), single);
+                assertEquals(tenant, single.tenantId());
+                assertEquals(0, single.version());
+                var batch = runtime.write(scope, tx -> tx.entities().createMultiple(DefaultSampleVev.INSTANCE, Batch.copyOf(List.of(empty, full))));
+                assertEquals(defaultSnapshot(batch.get(0), empty), batch.get(0));
+                assertEquals(defaultSnapshot(batch.get(1), full), batch.get(1));
+                assertTrue(runtime.read(authority.scope(tenant == 7 ? 8 : 7), tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(single.id()))).isEmpty());
+                var result = runtime.write(scope, tx -> tx.entities().update(DefaultSampleVev.INSTANCE, defaultSnapshot(single, empty)));
+                var updated = ((MutationResult.Applied<?, DefaultSample, ?, ?>) result).entity();
+                assertEquals(1, updated.version());
+                assertEquals(defaultSnapshot(updated, empty), updated);
+                assertEquals(updated, runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(updated.id()))).orElseThrow());
+                var changes = runtime.write(scope, tx -> tx.entities().updateMultiple(DefaultSampleVev.INSTANCE,
+                        Batch.copyOf(List.of(defaultSnapshot(batch.get(0), full), defaultSnapshot(batch.get(1), empty)))));
+                assertEquals(defaultSnapshot(changes.get(0).entity(), full), changes.get(0).entity());
+                assertEquals(defaultSnapshot(changes.get(1).entity(), empty), changes.get(1).entity());
+                var kotlinType = no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE;
+                var kotlin = runtime.write(scope, tx -> tx.entities().createMultiple(kotlinType, Batch.copyOf(List.of(
+                        new no.beint.vev.fixtures.KotlinDefaultEntryVev.New(false, null, null),
+                        new no.beint.vev.fixtures.KotlinDefaultEntryVev.New(false, "explicit", 0)))));
+                assertFalse(kotlin.get(0).enabled());
+                assertNull(kotlin.get(0).label());
+                assertNull(kotlin.get(0).attempts());
+                assertEquals("explicit", kotlin.get(1).label());
+                assertEquals(0, kotlin.get(1).attempts());
+                var replacement = new no.beint.vev.fixtures.KotlinDefaultEntry(kotlin.get(1).id(), tenant, kotlin.get(1).version(), false, null, null);
+                var changed = runtime.write(scope, tx -> tx.entities().updateMultiple(kotlinType, Batch.one(replacement))).get(0).entity();
+                assertFalse(changed.enabled());
+                assertNull(changed.label());
+                assertNull(changed.attempts());
+                assertEquals(1L, changed.version());
+            }
+            assertFalse(statements.isEmpty());
+            for (String sql : statements) {
+                assertFalse(sql.contains("DEFAULT"), sql);
+                assertFalse(sql.contains("fallback") || sql.contains("metadata") || sql.contains("'OPEN'"), sql);
+            }
+        }
+    }
+
+    @Test
+    void defaultsCannotMaskConstraintFailuresAndCaughtBatchFailuresRollBackEarlierWrites() {
+        var before = id("default-batch-rollback");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, new Account(before, 7, 0L, null, new BigDecimal("1.0000")));
+            assertThrows(RuntimeException.class, () -> tx.entities().createMultiple(DefaultSampleVev.INSTANCE,
+                    Batch.copyOf(List.of(defaultInput(true, 9), defaultInput(false, -1)))));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(DefaultSampleVev.INSTANCE, new QueryLimit(8)))).values().isEmpty());
+        var good = vev.write(TENANT_7, tx -> tx.entities().create(DefaultSampleVev.INSTANCE, defaultInput(false, 0)));
+        assertEquals(defaultSnapshot(good, defaultInput(false, 0)), good);
+    }
+
+    @Test
+    void defaultBootstrapRejectsSchemaDriftAndNeverClaimsFailedAuthorities() throws SQLException {
+        for (String variant : List.of("missing", "changed", "arithmetic", "unexpected", "userFunction", "customType", "volatile", "systemExpression", "unapprovedCast")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.defaultVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.defaultVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void defaultCatalogRejectsUnapprovedDependenciesAndInvalidResultsBeforeDeparse() throws SQLException {
+        database.verifyDefaultResultContracts();
+        for (String variant : List.of("userFunction", "customType", "volatile", "systemExpression", "unapprovedCast")) {
+            try {
+                database.defaultVariant(variant);
+                database.verifyRejectedDefaultBeforeDeparse();
+            } finally {
+                database.defaultVariant("valid");
+            }
+        }
+    }
+
+    @Test
+    void defaultCatalogResourceFailuresCloseNestedResultsAndLeaveAuthorityUnclaimed() {
+        for (String stage : List.of("metadataQuery", "metadataResultClose", "metadataStatementClose", "definitionQuery", "definitionResultClose", "definitionStatementClose", "allCleanup")) {
+            var openedStatements = new AtomicInteger();
+            var closedStatements = new AtomicInteger();
+            var openedRows = new AtomicInteger();
+            var closedRows = new AtomicInteger();
+            var connectionsClosed = new AtomicInteger();
+            var commits = new AtomicInteger();
+            var delegate = database.applicationDataSource();
+            var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invokeTarget(delegate, method, arguments);
+                        if (!(result instanceof Connection connection)) return result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    if (connectionMethod.getName().equals("commit")) commits.incrementAndGet();
+                                    if (connectionMethod.getName().equals("prepareStatement") && connectionArguments[0] instanceof String sql
+                                            && (sql.contains("FROM pg_catalog.pg_attrdef definition") || sql.contains("pg_catalog.pg_get_expr(adbin"))) {
+                                        String kind = sql.contains("pg_catalog.pg_get_expr(adbin") ? "definition" : "metadata";
+                                        var statement = (java.sql.PreparedStatement) invokeTarget(connection, connectionMethod, connectionArguments);
+                                        openedStatements.incrementAndGet();
+                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.PreparedStatement.class},
+                                                (statementProxy, statementMethod, statementArguments) -> {
+                                                    if (statementMethod.getName().equals("executeQuery") && stage.equals(kind + "Query")) throw new SQLException("default catalog query fixture", "08006");
+                                                    Object statementResult = invokeTarget(statement, statementMethod, statementArguments);
+                                                    if (statementMethod.getName().equals("close")) {
+                                                        closedStatements.incrementAndGet();
+                                                        if (stage.equals(kind + "StatementClose") || stage.equals("allCleanup")) throw new SQLException("default catalog statement cleanup fixture", "08006");
+                                                    }
+                                                    if (!(statementResult instanceof java.sql.ResultSet rows)) return statementResult;
+                                                    openedRows.incrementAndGet();
+                                                    return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.ResultSet.class},
+                                                            (rowProxy, rowMethod, rowArguments) -> {
+                                                                Object rowResult = invokeTarget(rows, rowMethod, rowArguments);
+                                                                if (rowMethod.getName().equals("close")) {
+                                                                    closedRows.incrementAndGet();
+                                                                    if (stage.equals(kind + "ResultClose") || stage.equals("allCleanup")) throw new SQLException("default catalog result cleanup fixture", "08006");
+                                                                }
+                                                                return rowResult;
+                                                            });
+                                                });
+                                    }
+                                    Object connectionResult = invokeTarget(connection, connectionMethod, connectionArguments);
+                                    if (connectionMethod.getName().equals("close")) {
+                                        connectionsClosed.incrementAndGet();
+                                        if (stage.equals("allCleanup")) throw new SQLException("default catalog connection cleanup fixture", "08006");
+                                    }
+                                    return connectionResult;
+                                });
+                    });
+            var authority = IntegrationModelVev.newTenantAuthority();
+            assertThrows(RuntimeException.class, () -> new PgVev<>(source, IntegrationModelVev.POSTGRES, authority), stage);
+            assertThrows(IllegalStateException.class, () -> authority.scope(7), stage);
+            assertTrue(openedStatements.get() > 0, stage);
+            assertEquals(openedStatements.get(), closedStatements.get(), stage);
+            assertEquals(openedRows.get(), closedRows.get(), stage);
+            assertEquals(1, connectionsClosed.get(), stage);
+            assertEquals(0, commits.get(), stage);
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    private static DefaultSampleVev.New defaultInput(boolean filled, int counter) {
+        return new DefaultSampleVev.New(false, (short) 2, counter, 3L, new BigDecimal("4.25"),
+                filled ? "caller" : null, filled ? "caller text; remains a value" : null,
+                filled ? java.time.LocalDate.of(2025,2,3) : null,
+                filled ? java.time.LocalTime.of(1,2,3,456789000) : null,
+                filled ? java.time.LocalDateTime.parse("2025-02-03T01:02:03.456789") : null,
+                filled ? java.time.Instant.parse("2025-02-03T01:02:03.456789Z") : null,
+                filled ? new UUID(1,2) : null,
+                filled ? no.beint.vev.Binary.copyOf(new byte[]{0,1,2,(byte)255}) : null, WorkState.CLOSED);
+    }
+
+    private static DefaultSample defaultSnapshot(DefaultSample stored, DefaultSampleVev.New values) {
+        return new DefaultSample(stored.id(), stored.tenantId(), stored.version(), values.enabled(), values.smallValue(),
+                values.counter(), values.longValue(), values.amount(), values.label(), values.body(), values.day(),
+                values.clock(), values.stamp(), values.moment(), values.token(), values.payload(), values.state());
+    }
+
+    @Test
     void externalIncomingReadOnlyReferencesPreservePhysicalConstraintsAndBothOwnershipModes() throws SQLException {
         database.seedSharedOnlyRows();
         var key = id("external-incoming-snapshot");

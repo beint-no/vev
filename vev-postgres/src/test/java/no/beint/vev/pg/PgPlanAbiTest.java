@@ -38,7 +38,7 @@ final class PgPlanAbiTest {
 
     @Test
     void incompatibleVersionedBinariesAreRejectedBeforeMetadataAccess() throws ReflectiveOperationException {
-        for (int abi : List.of(1, 2, 3, 4)) {
+        for (int abi : List.of(1, 2, 3, 4, 5)) {
             byte[] bytes = ClassFile.of().build(ClassDesc.of("fixture.LegacyPlan"), builder -> builder
                     .withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL)
                     .withInterfaceSymbols(ClassDesc.of("no.beint.vev.pg.spi.PgEntityPlan"))

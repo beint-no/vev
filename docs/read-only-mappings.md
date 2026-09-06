@@ -45,7 +45,8 @@ be combined with `@VevReadOnly`.
 Bootstrap requires table `SELECT` without grant option, no column/table write
 privileges, and no identity-sequence privileges. Existing restrictions on schema
 creation, table ownership, role capabilities, triggers, indexes, constraints,
-and defaults still apply. Unexpected INSERT, UPDATE, DELETE, or sequence access
+still apply. [Declared VALUE-column defaults](column-defaults.md) are verified as
+metadata and do not grant insertion or change read behavior. Unexpected INSERT, UPDATE, DELETE, or sequence access
 fails verification, including a single column-level write grant.
 
 The model fingerprint records read-only semantics. Its deterministic schema

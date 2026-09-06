@@ -15,6 +15,9 @@ public final class PublishedSharedConsumer {
         if (!PublishedReferenceVev.INSTANCE.externalIncomingReferences()) {
             throw new AssertionError("Published processor must retain the explicit read-only reference boundary");
         }
+        if (!PublishedReferenceVev.INSTANCE.columns().get(1).defaultExpression().equals("'published'::character varying")) {
+            throw new AssertionError("Published processor must preserve exact default metadata");
+        }
         var authority = PublishedReferenceModelVev.newTenantAuthority();
         try {
             authority.scope(new UUID(0L, 1L));

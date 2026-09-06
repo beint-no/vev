@@ -91,7 +91,7 @@ records a matching `directions` array. Its absence means every key is ASC with
 default null placement. Review and apply the matching migration before starting
 a new runtime.
 
-The current generated-plan SPI is ABI 5 (ordered query tokens were introduced in ABI 3). Recompile existing mappings with the matching
+The current generated-plan SPI is ABI 6 (ordered query tokens were introduced in ABI 3). Recompile existing mappings with the matching
 processor/runtime even when an ordinary ID-ordered index's schema is unchanged.
 Ordered tokens and ID-ordered tokens share metadata through `PgQueryIndex` but
 remain distinct query capabilities; casting one into the other is unsupported.

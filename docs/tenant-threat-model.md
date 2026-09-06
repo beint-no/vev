@@ -89,3 +89,12 @@ Tests must use synthetic tenants and synthetic records. Production-derived tenan
 ## Reporting an isolation defect
 
 Any plausible cross-tenant read or write is a security vulnerability. Do not publish a reproduction in an issue. Follow [the security policy](../SECURITY.md).
+
+Declared [column defaults](column-defaults.md) are inert schema expectations.
+Every application value is still explicitly bound. Bootstrap bounds stored trees,
+requires a matching result type and no variables, and approves all dependency
+types before deparsing. Exact definition checks never evaluate a default. Default
+presence cannot confer identity, tenant, version, or omitted-value authority.
+Required adversarial cases include altered/extra defaults, custom functions and
+types, root-type/variable corruption, combined metadata bounds, and nested
+bootstrap cleanup failures that must leave authority unclaimed.

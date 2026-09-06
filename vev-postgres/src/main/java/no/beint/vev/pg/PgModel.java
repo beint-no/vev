@@ -76,12 +76,18 @@ public final class PgModel<M, T> {
         Set<String> mappedIndexes = new HashSet<>();
         Set<String> logicalNames = new HashSet<>();
         Class<T> discoveredTenantType = null;
-        int checkCharacters = 0;
+        int expressionCharacters = 0;
         for (PgPlan<M, ?, ?, T> plan : snapshots) {
             for (PgCheck check : plan.checkConstraints()) {
-                checkCharacters += check.expression().length();
-                if (checkCharacters > PgCheck.MAXIMUM_MODEL_CHARACTERS) {
-                    throw new IllegalArgumentException("Closed model exceeds the retained check-expression budget");
+                expressionCharacters += check.expression().length();
+                if (expressionCharacters > PgCheck.MAXIMUM_MODEL_CHARACTERS) {
+                    throw new IllegalArgumentException("Closed model exceeds the retained check/default-expression budget");
+                }
+            }
+            for (PgColumn column : plan.columns()) {
+                expressionCharacters += column.defaultExpression().length();
+                if (expressionCharacters > PgCheck.MAXIMUM_MODEL_CHARACTERS) {
+                    throw new IllegalArgumentException("Closed model exceeds the retained check/default-expression budget");
                 }
             }
             validatePlan(plan);

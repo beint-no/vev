@@ -493,7 +493,7 @@ final class MappingCompiler {
             error(component, "@Column.unique is forbidden; declare and review unique constraints in the database migration");
         }
         rejectNonEmptyString(component, column, "columnDefinition", "@Column.columnDefinition");
-        rejectNonEmptyString(component, column, "options", "@Column.options");
+        String defaultExpression = compileDefaultExpression(component, column);
         rejectNonEmptyString(component, column, "comment", "@Column.comment");
         rejectNonDefaultInt(component, column, "secondPrecision", -1);
         boolean id = consistentAnnotation(component, annotationSources, ID) != null;
@@ -513,6 +513,9 @@ final class MappingCompiler {
             }
         }
         int roles = (id ? 1 : 0) + (tenant ? 1 : 0) + (version ? 1 : 0);
+        if (roles > 0 && !defaultExpression.isEmpty()) {
+            error(component, "@Column.options DEFAULT is permitted only on ordinary VALUE components, never identifiers, tenant keys, or versions");
+        }
         if (roles > 1) {
             error(component, "@Id, @TenantKey, and @Version must identify distinct record components");
         }
@@ -690,7 +693,28 @@ final class MappingCompiler {
                 referenceTarget,
                 generatedValue != null,
                 reference == null || booleanValue(reference, "tenantFirst"),
-                lengthCheckName);
+                lengthCheckName,
+                defaultExpression);
+    }
+
+    private String compileDefaultExpression(Element component, AnnotationMirror column) {
+        String options = stringValue(column, "options").strip();
+        if (options.isEmpty()) return "";
+        if (options.length() <= 7 || !options.regionMatches(true, 0, "DEFAULT", 0, 7) || !Character.isWhitespace(options.charAt(7))) {
+            error(component, "@Column.options supports only DEFAULT followed by exact PostgreSQL expression metadata");
+            return "";
+        }
+        String expression = options.substring(7).strip();
+        if (expression.isBlank() || expression.length() > 4096 || expression.indexOf('\0') >= 0
+                || expression.codePoints().anyMatch(codePoint -> codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+            error(component, "Default expression must be nonempty Unicode schema metadata of at most 4096 characters");
+            return "";
+        }
+        if (expression.equalsIgnoreCase("NULL")) {
+            error(component, "PostgreSQL omits a bare DEFAULT NULL; omit @Column.options instead");
+            return "";
+        }
+        return expression;
     }
 
     private List<CheckMapping> compileCheckConstraints(TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
@@ -1278,7 +1302,7 @@ final class MappingCompiler {
     private String fingerprint(String modelName, List<EntityMapping> entities, String tenantType) {
         StringBuilder canonical = new StringBuilder("vev-model-v4\n").append(modelName).append('\n');
         if (entities.stream().allMatch(EntityMapping::shared)) canonical.append("tenantScopeType|").append(tenantType).append('\n');
-        int checkCharacters = 0;
+        int expressionCharacters = 0;
         for (EntityMapping entity : entities) {
             canonical.append(entity.qualifiedName()).append('|')
                     .append(entity.tableSql()).append('|')
@@ -1288,9 +1312,9 @@ final class MappingCompiler {
             if (entity.externalIncomingReferences()) canonical.append("externalIncomingReferences\n");
             if (entity.shared()) canonical.append("shared\n");
             for (CheckMapping check : entity.checkConstraints()) {
-                checkCharacters += check.expression().length();
-                if (checkCharacters > 16 * 1024 * 1024) {
-                    error(entity.declaration(), "Closed model exceeds the retained check-expression budget");
+                expressionCharacters += check.expression().length();
+                if (expressionCharacters > 16 * 1024 * 1024) {
+                    error(entity.declaration(), "Closed model exceeds the retained check/default-expression budget");
                     return "";
                 }
                 canonical.append("check|").append(check.name()).append('|')
@@ -1316,6 +1340,15 @@ final class MappingCompiler {
                         .append(property.tenant()).append('|')
                         .append(property.version()).append('|')
                         .append(property.indexName()).append('\n');
+                if (!property.defaultExpression().isEmpty()) {
+                    expressionCharacters += property.defaultExpression().length();
+                    if (expressionCharacters > 16 * 1024 * 1024) {
+                        error(entity.declaration(), "Closed model exceeds the retained check/default-expression budget");
+                        return "";
+                    }
+                    canonical.append("default|").append(property.defaultExpression().length()).append('|')
+                            .append(property.defaultExpression()).append('\n');
+                }
                 if (!property.indexOrderBy().isEmpty()) canonical.append("indexOrder|").append(property.indexOrderBy()).append('\n');
                 if (property.indexDirection().equals("DESC")) canonical.append("indexDirection|DESC\n");
                 if (property.identity()) {

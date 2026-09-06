@@ -43,7 +43,8 @@ final class JavaSourceGenerator {
                     .append(columnRole(property)).append(", ")
                     .append(property.maximumLength()).append(", ")
                     .append(property.numericPrecision()).append(", ")
-                    .append(property.numericScale()).append(")")
+                    .append(property.numericScale())
+                    .append(property.defaultExpression().isEmpty() ? "" : ", \"" + escape(property.defaultExpression()) + "\"").append(")")
                     .append(index + 1 == entity.properties().size() ? ");\n\n" : ",\n");
         }
         appendIndexTokens(source, entity, modelMarker);
@@ -52,7 +53,7 @@ final class JavaSourceGenerator {
         appendUniqueConstraints(source, entity);
         appendCheckConstraints(source, entity);
         // Embed this generator's contract, never a runtime version lookup in generated output.
-        method(source, "public int generatedPlanAbi()", "return 5;");
+        method(source, "public int generatedPlanAbi()", "return 6;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");

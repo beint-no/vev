@@ -186,6 +186,49 @@ final class PgModelBoundsTest {
     }
 
     @Test
+    void defaultMetadataCannotOverrideStructuralRolesOrWeakenValueValidation() {
+        var column = new PgColumn("enabled", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0, "true");
+        assertEquals("true", column.defaultExpression());
+        column.validateValue(false);
+        assertThrows(IllegalArgumentException.class, () -> column.validateValue(null));
+        assertThrows(IllegalArgumentException.class, () -> column.validateValue("false"));
+        new PgColumn("optional", PgCodecs.BOOLEAN, true, PgColumn.Role.VALUE, 0, 0, 0, "true").validateValue(null);
+        assertEquals("", new PgColumn("plain", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0).defaultExpression());
+        for (PgColumn.Role role : List.of(PgColumn.Role.ID, PgColumn.Role.TENANT, PgColumn.Role.VERSION)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("structural", PgCodecs.INTEGER, false, role, 0, 0, 0, "0"));
+        }
+        for (String invalid : List.of(" ", "x".repeat(4097), "\0", "\uD800", "NULL", "null")) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("bad", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0, invalid));
+        }
+        assertThrows(NullPointerException.class, () -> new PgColumn("bad", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0, null));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void runtimeBoundsCombinedDefaultAndCheckMetadataAcrossTheWholeModel() {
+        var columns = new java.util.ArrayList<>(List.of(ID, TENANT));
+        for (int index = 0; index < 48; index++) columns.add(new PgColumn("value_" + index, PgCodecs.INTEGER, false, PgColumn.Role.VALUE, 0, 0, 0, "x".repeat(4096)));
+        var checks = java.util.stream.IntStream.range(0, 16).mapToObj(index -> new PgCheck("check_" + index, "x".repeat(4096))).toList();
+        var base = plan(columns, List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks);
+        var sources = new java.util.ArrayList<PgEntityPlan<TestModel, ?, ?, Integer>>();
+        Class<?> marker = Object.class;
+        for (int index = 0; index < 65; index++) {
+            Class<?> javaType = marker = marker.arrayType();
+            String name = "default_budget_" + index;
+            var source = (PgEntityPlan<TestModel, ?, ?, Integer>) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class},
+                    (proxy, method, arguments) -> switch (method.getName()) {
+                        case "javaType" -> javaType;
+                        case "logicalName", "tableName" -> name;
+                        default -> method.invoke(base, arguments);
+                    });
+            sources.add(source);
+        }
+        assertEquals(64, new PgModel<>(IDENTITY, sources.subList(0, 64)).plans().size());
+        var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, sources));
+        assertEquals("Closed model exceeds the retained check/default-expression budget", failure.getMessage());
+    }
+
+    @Test
     void capturesCheckMetadataAndRejectsDuplicatesAndHostileUnboundedLists() {
         var checks = new java.util.ArrayList<>(List.of(new PgCheck("test_check", "(id > 0)")));
         var source = plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks);
@@ -330,7 +373,7 @@ final class PgModelBoundsTest {
 
     @Test
     void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
-        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, 5, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
             var source = plan(null, null, null, null, () -> {
                 throw new AssertionError("Incompatible plans must fail before metadata access");
             }, abi == null ? null : () -> abi);

@@ -23,5 +23,5 @@ data class KotlinOnlyNote(
     @field:VevIndex(name = "only_note_id_idx")
     @field:Column(name = "id", nullable = false) val id: Long,
     @field:Version @field:Column(name = "version", nullable = false) val version: Int,
-    @field:Column(name = "label", nullable = true, length = 64) val label: String?
+    @field:Column(name = "label", nullable = true, length = 64, options = "DEFAULT 'from-schema'::character varying") val label: String?
 )

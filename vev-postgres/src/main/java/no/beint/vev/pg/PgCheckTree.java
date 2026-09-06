@@ -43,6 +43,9 @@ final class PgCheckTree {
                         Set<Long> collations, Set<Variable> variables, Map<Long, Set<Long>> functionInputs) {
     }
 
+    record Inspection(Dependencies dependencies, long resultType) {
+    }
+
     private record Node(String tag, Map<String, Object> fields) {
     }
 
@@ -62,14 +65,18 @@ final class PgCheckTree {
     }
 
     static Dependencies inspect(String source) {
+        return inspectExpression(source).dependencies();
+    }
+
+    static Inspection inspectExpression(String source) {
         PgCheckTree parser = new PgCheckTree(source);
-        if (!(parser.value(0) instanceof Node)) throw unsupported();
+        if (!(parser.value(0) instanceof Node root)) throw unsupported();
         parser.whitespace();
         if (parser.position != source.length()) throw unsupported();
         Map<Long, Set<Long>> inputs = new HashMap<>();
         parser.functionInputs.forEach((function, types) -> inputs.put(function, Set.copyOf(types)));
-        return new Dependencies(Set.copyOf(parser.functions), Map.copyOf(parser.operators), Set.copyOf(parser.types),
-                Set.copyOf(parser.collations), Set.copyOf(parser.variables), Map.copyOf(inputs));
+        return new Inspection(new Dependencies(Set.copyOf(parser.functions), Map.copyOf(parser.operators), Set.copyOf(parser.types),
+                Set.copyOf(parser.collations), Set.copyOf(parser.variables), Map.copyOf(inputs)), resultType(root));
     }
 
     private Object value(int depth) {

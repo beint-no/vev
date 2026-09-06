@@ -998,6 +998,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     }
                 }
                 verifyColumns(connection, plan);
+                PgDefaults.verify(connection, checkCatalog, plan);
                 verifyColumnPrivileges(connection, plan);
                 verifyPrimaryKey(connection, plan);
                 verifyStructuralConstraints(connection, checkCatalog, plan);
@@ -1134,7 +1135,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             || (plan.generatedIdentity() && column.role() == PgColumn.Role.ID
                                     ? !identity.equals("a") && !identity.equals("d") : !identity.isEmpty())
                             || !generated.isEmpty()
-                            || resultSet.getBoolean(5)
+                            || resultSet.getBoolean(5) != !column.defaultExpression().isEmpty()
                             || !resultSet.getBoolean(6)
                             || !resultSet.getBoolean(7)
                             || !resultSet.getBoolean(8)
