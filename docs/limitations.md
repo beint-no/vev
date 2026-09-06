@@ -34,6 +34,7 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 - A closed model is limited to 512 entities, each entity to 64 columns, one batch or bounded scan result to its declared `@VevRows` limit (at most 1,000 application values), and one generated materialized-result estimate to 64 MiB including a paging sentinel. See [row limits](row-limits.md).
 - Binary values use immutable `Binary`, explicit byte bounds, and validated database length checks. Raw arrays and LOB streaming are unsupported; large payloads require smaller row limits and cannot be indexed beyond the B-tree key budget. See [binary values](binary-values.md).
 - PostgreSQL `text` requires `@VevText`, an explicit code-point limit, and a verified database length check. Unbounded text and DDL snippets remain rejected. See [text values](text-values.md).
+- `LocalTime` requires exact microseconds and excludes PostgreSQL `24:00:00`; reading that value rolls back the transaction. Offset time and explicit column precision overrides are unsupported. See [local time](local-time.md).
 
 ## Operations
 

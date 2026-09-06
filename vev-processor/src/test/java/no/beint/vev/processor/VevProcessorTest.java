@@ -513,6 +513,44 @@ final class VevProcessorTest {
     }
 
     @Test
+    void localTimeMappingsCompileTypedIndexesAcrossSourceAndClasspathBoundaries() throws IOException {
+        String entity = localTimeRecordSource();
+        Compilation source = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(source.success(), source.diagnostics());
+        assertTrue(source.generated("example/BrokenVev.java").contains("java.time.LocalTime> DISPLAY_NAME"));
+        assertTrue(source.generated("example/BrokenVev.java").contains("PgCodecs.LOCAL_TIME"));
+        assertTrue(source.manifest("example.BrokenModel").contains("\"databaseType\": \"time\""));
+        Compilation dependency = compile(Map.of("example/Broken.java", entity), "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BrokenModel.java", brokenModelSource()), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(source.generated("example/BrokenVev.java"), binary.generated("example/BrokenVev.java"));
+        assertEquals(source.manifest("example.BrokenModel"), binary.manifest("example.BrokenModel"));
+    }
+
+    @Test
+    void localTimeRejectsLegacyTypesOffsetsStructuralKeysAndLossyPrecisionMetadata() throws IOException {
+        String valid = localTimeRecordSource();
+        for (String entity : List.of(valid.replace("java.time.LocalTime", "java.sql.Time"),
+                valid.replace("java.time.LocalTime", "java.time.OffsetTime"),
+                valid.replace("name = \"display_name\"", "secondPrecision = 3, name = \"display_name\""),
+                valid.replace("name = \"display_name\"", "length = 8, name = \"display_name\""),
+                valid.replace("name = \"display_name\"", "columnDefinition = \"time\", name = \"display_name\""),
+                valid.replace("@VevIndex", "@Temporal(TemporalType.TIME) @VevIndex"),
+                valid.replace("Long id", "java.time.LocalTime id"), valid.replace("UUID tenantId", "java.time.LocalTime tenantId"),
+                valid.replace("int version", "java.time.LocalTime version"))) {
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success(), entity);
+            assertFalse(Files.exists(result.classesDirectory().resolve("META-INF/vev/example.BrokenModel.schema.json")));
+        }
+    }
+
+    private static String localTimeRecordSource() {
+        return recordSource(validTable(), validComponents().replace("String displayName", "java.time.LocalTime displayName")
+                .replace(", length = 255", "").replace("@Column(name = \"display_name\"", "@VevIndex(name = \"clock_idx\") @Column(name = \"display_name\""), "");
+    }
+
+    @Test
     void referenceColumnOrderIsExplicitAndStableAcrossCompilationBoundaries() throws IOException {
         var sources = referenceSources();
         Compilation tenantFirst = compile(sources);

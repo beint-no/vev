@@ -24,6 +24,8 @@ import no.beint.vev.fixtures.KotlinIdentityVev;
 import no.beint.vev.fixtures.KotlinBinary;
 import no.beint.vev.fixtures.KotlinBinaryVev;
 import no.beint.vev.fixtures.KotlinTextVev;
+import no.beint.vev.fixtures.KotlinClock;
+import no.beint.vev.fixtures.KotlinClockVev;
 import no.beint.vev.jakarta.VevEntityAgents;
 import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
@@ -46,6 +48,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -668,6 +671,73 @@ final class VevPostgresIntegrationTest {
         runtime(database.applicationDataSource());
         SQLException oversized = assertThrows(SQLException.class, () -> database.insertTextBeyondDatabaseBound());
         assertEquals("23514", oversized.getSQLState());
+    }
+
+    @Test
+    void localTimePreservesMicrosecondsNullableBatchesAndIndexResultsInBothTransferModes() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            var scope = authority.scope(binary ? 8 : 7);
+            var inputs = List.of(new KotlinClockVev.New(null), new KotlinClockVev.New(LocalTime.MIDNIGHT),
+                    new KotlinClockVev.New(LocalTime.of(12, 34, 56, 123456000)),
+                    new KotlinClockVev.New(LocalTime.of(23, 59, 59, 999999000)));
+            var created = runtime.write(scope, tx -> tx.entities().createMultiple(KotlinClockVev.INSTANCE, Batch.copyOf(inputs)));
+            for (int index = 0; index < inputs.size(); index++) assertEquals(inputs.get(index).observedAt(), created.get(index).observedAt());
+            assertEquals(created.get(3), runtime.read(scope, tx -> tx.entities().find(KotlinClockVev.INSTANCE.key(created.get(3).id()))).orElseThrow());
+            assertEquals(List.of(created.get(1)), runtime.read(scope, tx -> tx.entities().many(
+                    PgQueries.equal(KotlinClockVev.OBSERVED_AT, LocalTime.MIDNIGHT, new QueryLimit(10)))).values());
+            assertEquals(List.of(created.get(0)), runtime.read(scope, tx -> tx.entities().many(
+                    PgQueries.isNull(KotlinClockVev.OBSERVED_AT, new QueryLimit(10)))).values());
+            var changed = runtime.write(scope, tx -> tx.entities().updateMultiple(KotlinClockVev.INSTANCE,
+                    Batch.copyOf(created.values().stream().map(row -> row.copy(row.id(), row.tenantId(), row.version(), LocalTime.NOON)).toList())));
+            assertTrue(changed.values().stream().allMatch(result -> result.entity().version() == 1 && result.entity().observedAt().equals(LocalTime.NOON)));
+            assertEquals(4, runtime.read(scope, tx -> tx.entities().many(
+                    PgQueries.equal(KotlinClockVev.OBSERVED_AT, LocalTime.NOON, new QueryLimit(10)))).values().size());
+            var first = changed.get(0).entity();
+            var single = runtime.write(scope, tx -> tx.entities().update(KotlinClockVev.INSTANCE, first.copy(first.id(), first.tenantId(), first.version(), null)));
+            assertNull(((MutationResult.Applied<?, KotlinClock, ?, ?>) single).entity().observedAt());
+        }
+    }
+
+    @Test
+    void localTimeRejectsLossyInputsBeforeSqlAndUnrepresentableStoredValuesPoisonTransactions() throws SQLException {
+        var counter = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), counter), IntegrationModelVev.POSTGRES, authority);
+        counter.set(0);
+        runtime.write(authority.scope(7), tx -> {
+            for (LocalTime invalid : List.of(LocalTime.MAX, LocalTime.of(1, 2, 3, 1), LocalTime.of(1, 2, 3, 999999999))) {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().create(KotlinClockVev.INSTANCE, new KotlinClockVev.New(invalid)));
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().many(
+                        PgQueries.equal(KotlinClockVev.OBSERVED_AT, invalid, new QueryLimit(1))));
+            }
+            assertEquals(0, counter.get());
+            return tx.entities().create(KotlinClockVev.INSTANCE, new KotlinClockVev.New(LocalTime.NOON));
+        });
+        int invalidKey = database.insertEndOfDayClock();
+        for (boolean binary : List.of(false, true)) {
+            var readAuthority = IntegrationModelVev.newTenantAuthority();
+            var reader = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, readAuthority);
+            UUID earlier = id("clock-invalid-" + binary);
+            assertThrows(IllegalStateException.class, () -> reader.write(readAuthority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "clock-failure@example.test", "1.0000"));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(KotlinClockVev.INSTANCE.key(invalidKey)));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        }
+    }
+
+    @Test
+    void localTimeBootstrapRejectsDatabasePrecisionThatWouldRoundValues() throws SQLException {
+        try {
+            database.clockUsesMilliseconds(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.clockUsesMilliseconds(false);
+        }
+        runtime(database.applicationDataSource());
     }
 
     @Test

@@ -559,7 +559,7 @@ final class MappingCompiler {
         }
         if (codec == null) {
             error(component, "No safe PostgreSQL codec exists for " + component.asType()
-                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, Instant, bounded Binary, and explicit STRING enums");
+                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, LocalTime, Instant, bounded Binary, and explicit STRING enums");
             return null;
         }
         boolean nullable = booleanValue(column, "nullable");
@@ -1398,6 +1398,7 @@ final class MappingCompiler {
         addCodec(codecs, "java.math.BigDecimal", "java.math.BigDecimal", "BIG_DECIMAL", "numeric");
         addCodec(codecs, "java.time.LocalDate", "java.time.LocalDate", "LOCAL_DATE", "date");
         addCodec(codecs, "java.time.LocalDateTime", "java.time.LocalDateTime", "LOCAL_DATE_TIME", "timestamp");
+        addCodec(codecs, "java.time.LocalTime", "java.time.LocalTime", "LOCAL_TIME", "time");
         addCodec(codecs, "java.time.Instant", "java.time.Instant", "INSTANT", "timestamptz");
         return Map.copyOf(codecs);
     }

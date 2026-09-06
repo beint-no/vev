@@ -7,6 +7,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Set;
 import java.util.HashMap;
 import java.util.Map;
@@ -51,6 +52,8 @@ public final class PgCodecs {
     public static final PgCodec<LocalDate> LOCAL_DATE = objectCodec(LocalDate.class, "date");
     /** Java {@link LocalDateTime} mapped to PostgreSQL {@code timestamp} without a time zone. */
     public static final PgCodec<LocalDateTime> LOCAL_DATE_TIME = objectCodec(LocalDateTime.class, "timestamp");
+    /** Java LocalTime mapped to PostgreSQL time without a time zone at exact microsecond precision. */
+    public static final PgCodec<LocalTime> LOCAL_TIME = objectCodec(LocalTime.class, "time");
     /** Java {@link Instant} mapped to PostgreSQL {@code timestamptz} at microsecond precision. */
     public static final PgCodec<Instant> INSTANT = codec(
             Instant.class,
@@ -63,7 +66,7 @@ public final class PgCodecs {
             value -> value.atOffset(java.time.ZoneOffset.UTC));
     private static final Set<PgCodec<?>> STANDARD = Set.of(
             BOOLEAN, INTEGER, LONG, SHORT, STRING, TEXT, BINARY, UUID, BIG_DECIMAL,
-            LOCAL_DATE, LOCAL_DATE_TIME, INSTANT);
+            LOCAL_DATE, LOCAL_DATE_TIME, LOCAL_TIME, INSTANT);
 
     private PgCodecs() {
     }

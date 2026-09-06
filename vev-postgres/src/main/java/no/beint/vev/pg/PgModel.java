@@ -34,7 +34,7 @@ public final class PgModel<M, T> {
     private static final long MAXIMUM_MATERIALIZED_RESULT_BYTES = 64L * 1_024L * 1_024L;
     private static final Set<String> DATABASE_TYPES = Set.of(
             "boolean", "integer", "bigint", "smallint", "character varying", "uuid", "numeric",
-            "date", "timestamp", "timestamptz", "bytea", "text");
+            "date", "timestamp", "timestamptz", "time", "bytea", "text");
     private static final Set<Class<?>> KEY_TYPES = Set.of(
             Integer.class, Long.class, Short.class, String.class, java.util.UUID.class);
     private static final Set<PgCodec<?>> VERSION_CODECS = Set.of(

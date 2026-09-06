@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -154,6 +155,8 @@ public record PgColumn(
                     || instant.isBefore(MINIMUM_INSTANT)
                     || instant.isAfter(MAXIMUM_INSTANT))) {
             throw new IllegalArgumentException(name + " is outside Vev's finite microsecond instant range");
+        } else if (value instanceof LocalTime time && time.getNano() % 1_000 != 0) {
+            throw new IllegalArgumentException(name + " must be a time before 24:00 at exact microsecond precision");
         } else if (value instanceof LocalDateTime dateTime
                 && (dateTime.getNano() % 1_000 != 0
                     || dateTime.isBefore(MINIMUM_DATE_TIME)

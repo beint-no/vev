@@ -10,7 +10,7 @@ import java.util.Set;
 /** Bootstrap-only allowlist; no database function in a check is invoked to verify it. */
 final class PgCheckCatalog {
     private static final Set<String> SCALAR_TYPES = Set.of("bool", "int2", "int4", "int8", "numeric", "text",
-            "varchar", "bpchar", "uuid", "date", "timestamp", "timestamptz", "interval", "bytea", "jsonb");
+            "varchar", "bpchar", "uuid", "date", "timestamp", "timestamptz", "time", "interval", "bytea", "jsonb");
     private static final Set<String> FUNCTIONS = functions();
     // These operations use approved scalar inputs and the verified UTC/ISO/MDY/postgres display context.
     private static final Set<String> STABLE_FUNCTIONS = Set.of("concat", "concat_ws", "date", "date_trunc", "timestamptz");
@@ -148,7 +148,7 @@ final class PgCheckCatalog {
                 "text", "bpchar", "varchar", "int2", "int4", "int8", "numeric", "date", "timestamp", "timestamptz",
                 "date_trunc", "numeric_abs", "numeric_round", "numeric_trunc", "numeric_ceil", "numeric_floor"));
         for (String type : Set.of("bool", "int2", "int4", "int8", "int24", "int28", "int42", "int48", "int82", "int84",
-                "text", "bpchar", "numeric_", "date_", "timestamp_", "timestamptz_", "uuid_")) {
+                "text", "bpchar", "numeric_", "date_", "timestamp_", "timestamptz_", "time_", "uuid_")) {
             for (String comparison : Set.of("eq", "ne", "lt", "le", "gt", "ge")) result.add(type + comparison);
         }
         for (String type : Set.of("int2", "int4", "int8", "int24", "int28", "int42", "int48", "int82", "int84")) {

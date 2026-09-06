@@ -76,6 +76,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : clockSchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -88,7 +93,7 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock");
         }
     }
 
@@ -606,6 +611,27 @@ final class IntegrationDatabase {
         return applicationDataSource("pg_catalog");
     }
 
+    DataSource applicationDataSource(boolean binaryTransfer) {
+        var source = (PGSimpleDataSource) applicationDataSource();
+        source.setBinaryTransfer(binaryTransfer);
+        source.setPrepareThreshold(binaryTransfer ? -1 : 0);
+        return source;
+    }
+
+    int insertEndOfDayClock() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement();
+             var rows = statement.executeQuery("INSERT INTO vev_it.kotlin_clock(tenant_id, version, observed_at) VALUES (7, 0, '24:00:00') RETURNING id")) {
+            if (!rows.next()) throw new SQLException("Synthetic clock insert returned no identifier");
+            return rows.getInt(1);
+        }
+    }
+
+    void clockUsesMilliseconds(boolean milliseconds) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.kotlin_clock ALTER COLUMN observed_at TYPE " + (milliseconds ? "time(3)" : "time"));
+        }
+    }
+
     DataSource hostileSearchPathDataSource() {
         return applicationDataSource("vev_hostile,pg_catalog");
     }
@@ -1039,6 +1065,21 @@ final class IntegrationDatabase {
                 }
             }
         }
+    }
+
+    private static List<String> clockSchemaStatements() {
+        return List.of(
+                "CREATE TABLE vev_it.kotlin_clock (id integer GENERATED ALWAYS AS IDENTITY, tenant_id integer NOT NULL, version integer NOT NULL,"
+                        + " observed_at time, PRIMARY KEY (tenant_id, id), CONSTRAINT kotlin_clock_time_check CHECK (observed_at <= '24:00:00'::time))",
+                "ALTER TABLE vev_it.kotlin_clock OWNER TO " + OWNER_ROLE,
+                "ALTER TABLE vev_it.kotlin_clock ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.kotlin_clock FORCE ROW LEVEL SECURITY",
+                "CREATE INDEX kotlin_clock_time_idx ON vev_it.kotlin_clock (tenant_id, observed_at, id)",
+                "CREATE POLICY kotlin_clock_tenant ON vev_it.kotlin_clock FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer) WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)",
+                "GRANT SELECT ON vev_it.kotlin_clock TO " + APPLICATION_USER,
+                "GRANT INSERT (id, tenant_id, version, observed_at) ON vev_it.kotlin_clock TO " + APPLICATION_USER,
+                "GRANT UPDATE (version, observed_at) ON vev_it.kotlin_clock TO " + APPLICATION_USER,
+                "GRANT USAGE ON SEQUENCE vev_it.kotlin_clock_id_seq TO " + APPLICATION_USER);
     }
 
     private static List<String> textSchemaStatements() {

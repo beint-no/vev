@@ -232,6 +232,19 @@ final class PgModelBoundsTest {
     }
 
     @Test
+    void localTimeRequiresExactMicrosecondsWithoutLegacyJdbcCoercion() {
+        var time = new PgColumn("clock", PgCodecs.LOCAL_TIME, true, PgColumn.Role.VALUE, 0, 0, 0);
+        assertEquals(-1, time.expectedTypeModifier());
+        time.validateValue(java.time.LocalTime.MIDNIGHT);
+        time.validateValue(java.time.LocalTime.of(23, 59, 59, 999999000));
+        time.validateValue(null);
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.time.LocalTime.MAX));
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.time.LocalTime.ofNanoOfDay(1)));
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.sql.Time.valueOf("12:00:00")));
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.time.OffsetTime.of(java.time.LocalTime.NOON, java.time.ZoneOffset.UTC)));
+    }
+
+    @Test
     void capturesRowLimitsOnceAndKeepsTheMaterializedResultBudget() {
         var bound = new java.util.concurrent.atomic.AtomicInteger(8);
         var calls = new java.util.concurrent.atomic.AtomicInteger();
