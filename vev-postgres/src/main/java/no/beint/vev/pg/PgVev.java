@@ -968,7 +968,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             || !resultSet.getBoolean(9)
                             || resultSet.getBoolean(10)
                             || resultSet.getBoolean(11)
-                            || resultSet.getBoolean(12)
+                            || resultSet.getBoolean(12) != plan.deletable()
                             || resultSet.getBoolean(13)
                             || resultSet.getBoolean(14)
                             || resultSet.getBoolean(15)

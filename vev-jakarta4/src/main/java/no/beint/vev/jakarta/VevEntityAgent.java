@@ -194,14 +194,14 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     public void delete(Object entity) {
         requireOpen();
         throw unsupported(
-                "Physical delete is absent from Vev; model lifecycle retirement as an explicit versioned update");
+                "Physical delete requires the native typed deletion capability and explicit versioned outcome");
     }
 
     @Override
     public void deleteMultiple(List<?> values) {
         requireOpen();
         throw unsupported(
-                "Physical delete is absent from Vev; model lifecycle retirement as an explicit versioned update");
+                "Physical delete requires the native typed deletion capability and explicit versioned outcome");
     }
 
     @Override

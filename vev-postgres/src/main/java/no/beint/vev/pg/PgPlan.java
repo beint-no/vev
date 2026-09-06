@@ -36,6 +36,8 @@ class PgPlan<M, E, K, T> {
     private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
     private String creationSql;
+    private PgDeletionSql deletionSql;
+    private final boolean deletable;
 
     PgPlan(PgEntityPlan<M, E, K, T> source) {
         this.source = Objects.requireNonNull(source, "source");
@@ -61,6 +63,10 @@ class PgPlan<M, E, K, T> {
         this.primaryKeyShape = Objects.requireNonNull(source.primaryKeyShape(), "primaryKeyShape");
         this.creationType = source instanceof PgGeneratedEntityPlan<?, ?, ?, ?, ?> generated
                 ? Objects.requireNonNull(generated.creationType(), "creationType") : null;
+        this.deletable = source instanceof no.beint.vev.DeletableEntityType<?, ?, ?, ?>;
+        if (deletable && (creationType == null || !(source instanceof PgVersionedEntityPlan<?, ?, ?, ?, ?>))) {
+            throw new IllegalArgumentException("Physical deletion requires a versioned generated identity plan");
+        }
         if (creationType != null && source instanceof no.beint.vev.AssignedEntityType<?, ?, ?>) {
             throw new IllegalArgumentException("An entity cannot expose both assigned and generated identity insertion");
         }
@@ -115,6 +121,14 @@ class PgPlan<M, E, K, T> {
 
     boolean generatedIdentity() {
         return creationType != null;
+    }
+
+    boolean deletable() {
+        return deletable;
+    }
+
+    PgDeletionSql deletionSql() {
+        return Objects.requireNonNull(deletionSql, "deletionSql");
     }
 
     no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
@@ -256,6 +270,7 @@ class PgPlan<M, E, K, T> {
         }
         sql = Objects.requireNonNull(compiledSql, "compiledSql");
         creationSql = generatedIdentity() ? PgCreationSql.compile(this) : null;
+        deletionSql = deletable ? PgDeletionSql.compile(this) : null;
         for (PgIndex<M, E, K, ?> index : indexes) {
             indexSql.put(index, compiledSql.index(index));
         }

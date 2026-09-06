@@ -20,6 +20,7 @@ record EntityMapping(
         PropertyMapping tenant,
         PropertyMapping version,
         boolean appendOnly,
+        boolean deletable,
         String primaryKeyShape,
         int maximumRows) {
 }

@@ -8,6 +8,7 @@ import no.beint.vev.VevPrimaryKey;
 import java.util.UUID;
 
 @Entity
+@no.beint.vev.VevDelete
 @VevPrimaryKey(VevPrimaryKey.Shape.ID)
 @Table(name = "identity_entry", schema = "vev_it", uniqueConstraints = {
         @UniqueConstraint(name = "identity_entry_code_key", columnNames = {"tenant_id", "code"}),

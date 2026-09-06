@@ -25,7 +25,7 @@ Consumers must reject unknown format versions or profiles. The resource includes
 - named exact check expressions and generated length bounds: `BINARY_MAXIMUM` with `maximumBytes`, or `TEXT_MAXIMUM` with `maximumCodePoints`, plus the column and canonical expression;
 - assigned/identity identifier strategy and the required owned-sequence contract for identity creation;
 - required enabled/forced tenant row security and its transaction-local setting;
-- the exact application insert/update column sets and the absence of delete access.
+- the exact application insert/update column sets and whether `@VevDelete` requires table-level delete access.
 
 The profile also requires the catalog restrictions in
 [the schema pipeline](aot-schema-pipeline.md#3-schema-verification), including

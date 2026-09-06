@@ -920,11 +920,66 @@ final class VevProcessorTest {
     }
 
     @Test
+    void deletionCapabilitiesPreserveSourceAndBinaryContractsAndFingerprintPrivileges() throws IOException {
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@Id @Column", "@Id @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY) @Column"));
+        Compilation retained = compile(sources);
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@Entity", "@Entity @no.beint.vev.VevDelete"));
+        Compilation source = compile(sources);
+        assertTrue(source.success(), source.diagnostics());
+        assertTrue(source.generated("example/AccountVev.java").contains(
+                "no.beint.vev.DeletableEntityType<example.BillingModelVev.Model, example.Account, java.lang.Long, java.lang.Integer>"));
+        assertTrue(source.manifest("example.BillingModel").contains("\"delete\": true"));
+        assertFalse(retained.generated("example/AccountVev.java").contains("DeletableEntityType"));
+        assertNotEquals(source.manifest("example.BillingModel"), retained.manifest("example.BillingModel"));
+        String model = sources.remove("example/BillingModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(source.generated("example/AccountVev.java"), binary.generated("example/AccountVev.java"));
+        assertEquals(source.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+    }
+
+    @Test
+    void deletionRejectsAssignedKeysAppendOnlyMappingsAndMissingCapabilitiesAtCompilation() throws IOException {
+        for (String path : List.of("example/Account.java", "example/AuditEvent.java")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.computeIfPresent(path, (name, source) -> source.replace("@Entity", "@Entity @no.beint.vev.VevDelete"));
+            if (path.endsWith("AuditEvent.java")) {
+                sources.computeIfPresent(path, (name, source) -> source.replace("UUID id", "Long id")
+                        .replace("@Id @Column", "@Id @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY) @Column"));
+            }
+            Compilation rejected = compile(sources);
+            assertFalse(rejected.success());
+            assertTrue(rejected.diagnostics().contains("@VevDelete requires a versioned entity with a generated IDENTITY"), rejected.diagnostics());
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(binary.success());
+            assertTrue(binary.diagnostics().contains("@VevDelete requires a versioned entity with a generated IDENTITY"), binary.diagnostics());
+        }
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.put("example/InvalidDelete.java", """
+                package example;
+                class InvalidDelete {
+                    Object target = new no.beint.vev.DeleteTarget<>(AccountVev.INSTANCE, 1L, 0);
+                }
+                """);
+        Compilation consumer = compile(sources);
+        assertFalse(consumer.success());
+        assertTrue(consumer.diagnostics().contains("DeleteTarget"), consumer.diagnostics());
+    }
+
+    @Test
     void identityMappingsGenerateTypedCreationInputsForSourceAndBinaryRecords() throws IOException {
         for (String keyType : List.of("short", "int", "long", "Short", "Integer", "Long")) {
             var sources = new LinkedHashMap<>(positiveSources());
             sources.computeIfPresent("example/Account.java", (path, source) -> source
                     .replace("Long id", keyType + " id")
+                    .replace("@Entity", "@Entity @no.beint.vev.VevDelete")
                     .replace("@Id @Column", "@Id @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY) @Column"));
             Compilation source = compile(sources);
             assertTrue(source.success(), source.diagnostics());

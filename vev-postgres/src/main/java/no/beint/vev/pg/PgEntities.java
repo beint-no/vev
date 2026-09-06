@@ -3,6 +3,9 @@ package no.beint.vev.pg;
 import no.beint.vev.Batch;
 import no.beint.vev.AssignedEntityType;
 import no.beint.vev.GeneratedEntityType;
+import no.beint.vev.DeletableEntityType;
+import no.beint.vev.DeleteTarget;
+import no.beint.vev.DeleteResult;
 import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityKey;
 import no.beint.vev.EntityLookup;
@@ -234,6 +237,111 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     public <E, K, N> E create(GeneratedEntityType<M, E, K, N> type, N input) {
         requireWrite();
         return createMultiple(type, Batch.one(input)).get(0);
+    }
+
+    @Override
+    public <E, K, V> DeleteResult<M, E, K, V> delete(DeleteTarget<M, E, K, V> target) {
+        requireWrite();
+        Objects.requireNonNull(target, "target");
+        PgVersionPlan<M, E, K, T, V> plan = deletionPlan(target.entityType());
+        validateDeleteTarget(plan, target);
+        try (PreparedStatement statement = prepare(plan.deletionSql().single())) {
+            bindUnknown(plan.keyCodec(), statement, 1, target.value());
+            bindTenant(plan, statement, 2);
+            bindUnknown(plan.versionCodec(), statement, 3, target.expectedVersion());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) return new DeleteResult.Missing<>(target);
+                int outcome = resultSet.getInt(1);
+                if (resultSet.wasNull() || outcome < 0 || outcome > 1) {
+                    throw invariant("Delete returned an invalid outcome");
+                }
+                verifyDeleteResult(plan, target, resultSet, outcome == 0);
+                requireNoMore(resultSet, "Delete returned multiple rows");
+                return outcome == 0 ? new DeleteResult.Deleted<>(target) : new DeleteResult.Conflict<>(target);
+            }
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL deletion failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    @Override
+    public <E, K, V> Batch<DeleteResult.Deleted<M, E, K, V>> deleteMultiple(
+            DeletableEntityType<M, E, K, V> type, Batch<DeleteTarget<M, E, K, V>> targets) {
+        requireWrite();
+        Objects.requireNonNull(targets, "targets");
+        PgVersionPlan<M, E, K, T, V> plan = deletionPlan(type);
+        plan.requireRowCount(targets.size());
+        Set<K> uniqueKeys = new HashSet<>(Math.max(16, targets.size() * 2));
+        for (var target : targets) {
+            validateDeleteTarget(plan, target);
+            if (!uniqueKeys.add(target.value())) throw new IllegalArgumentException("Delete batch contains duplicate entity keys");
+        }
+        if (targets.isEmpty()) return Batch.empty();
+        Object[] keys = new Object[targets.size()];
+        Object[] versions = new Object[targets.size()];
+        for (int index = 0; index < targets.size(); index++) {
+            keys[index] = targets.get(index).value();
+            versions[index] = targets.get(index).expectedVersion();
+        }
+        try (JdbcArrays arrays = new JdbcArrays(connection);
+             PreparedStatement statement = prepare(plan.deletionSql().multiple())) {
+            arrays.bind(statement, 1, plan.keyCodec(), keys);
+            arrays.bind(statement, 2, plan.versionCodec(), versions);
+            bindTenant(plan, statement, 3);
+            statement.setInt(4, targets.size());
+            List<DeleteResult.Deleted<M, E, K, V>> results = new ArrayList<>(targets.size());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                for (int index = 0; index < targets.size(); index++) {
+                    if (!resultSet.next()) throw invariant("Delete batch was rejected atomically because one target was stale or missing");
+                    long ordinal = resultSet.getLong(1);
+                    if (resultSet.wasNull() || ordinal != index + 1L) throw invariant("Delete batch returned an invalid ordinal");
+                    var target = targets.get(index);
+                    verifyDeleteResult(plan, target, resultSet, true);
+                    results.add(new DeleteResult.Deleted<>(target));
+                }
+                requireNoMore(resultSet, "Delete batch returned extra rows");
+            }
+            return Batch.copyOf(results);
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL deletion failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    private <E, K, V> PgVersionPlan<M, E, K, T, V> deletionPlan(DeletableEntityType<M, E, K, V> type) {
+        PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
+        if (!plan.deletable()) throw new IllegalArgumentException("Entity has no generated deletion capability");
+        return plan;
+    }
+
+    private <E, K, V> void validateDeleteTarget(PgVersionPlan<M, E, K, T, V> plan, DeleteTarget<M, E, K, V> target) {
+        Objects.requireNonNull(target, "target");
+        if (target.entityType() != plan.source()) throw new IllegalArgumentException("Delete target belongs to a different generated mapping");
+        plan.deletionSql().id().validateValue(target.value());
+        plan.deletionSql().version().validateValue(target.expectedVersion());
+        requireNonNegativeVersion(plan, target.expectedVersion());
+    }
+
+    private <E, K, V> void verifyDeleteResult(PgVersionPlan<M, E, K, T, V> plan, DeleteTarget<M, E, K, V> target,
+            ResultSet resultSet, boolean deleted) throws SQLException {
+        PgDeletionSql sql = plan.deletionSql();
+        K key = plan.keyCodec().readChecked(resultSet, 2, sql.id());
+        T returnedTenant = plan.tenantCodec().readChecked(resultSet, 3, sql.tenant());
+        V version = plan.versionCodec().readChecked(resultSet, 4, sql.version());
+        requireNonNegativeVersion(plan, version);
+        if (!target.value().equals(key) || !tenant.tenantId().equals(returnedTenant)
+                || deleted != target.expectedVersion().equals(version)) {
+            throw invariant("Delete returned an unexpected identity, tenant, or version");
+        }
     }
 
     @Override

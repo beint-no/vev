@@ -288,6 +288,24 @@ final class PgModelBoundsTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void deletionMetadataRequiresBothGeneratedIdentityAndVersionedSpiCapabilities() {
+        var source = plan(List.of(ID, TENANT));
+        for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgGeneratedEntityPlan.class,
+                no.beint.vev.pg.spi.PgVersionedEntityPlan.class)) {
+            var inconsistent = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{extra, no.beint.vev.DeletableEntityType.class},
+                    (proxy, method, arguments) -> {
+                        if (method.getName().equals("creationType")) return Object.class;
+                        if (method.getName().equals("columns")) throw new AssertionError("Invalid capabilities must fail before column capture");
+                        return method.invoke(source, arguments);
+                    });
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(inconsistent)));
+            assertEquals("Physical deletion requires a versioned generated identity plan", failure.getMessage());
+        }
+    }
+
+    @Test
     void capturesGeneratedPlanAbiOnceDuringModelConstruction() {
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var source = plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(),

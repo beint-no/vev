@@ -6,6 +6,7 @@ import no.beint.vev.VevIndex;
 import no.beint.vev.VevPrimaryKey;
 
 @Entity
+@no.beint.vev.VevDelete
 @VevPrimaryKey(VevPrimaryKey.Shape.ID_TENANT)
 @Table(name = "identity_counter", schema = "vev_it")
 public record IdentityCounter(

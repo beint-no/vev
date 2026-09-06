@@ -97,6 +97,26 @@ final class IntegrationDatabase {
         }
     }
 
+    void deletionPrivilege(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("REVOKE DELETE ON vev_it.identity_counter, vev_it.audit_event FROM vev_it_app CASCADE");
+            if (!variant.equals("missing")) {
+                statement.execute("GRANT DELETE ON vev_it.identity_counter TO vev_it_app"
+                        + (variant.equals("grantOption") ? " WITH GRANT OPTION" : ""));
+            }
+            if (variant.equals("undeclared")) statement.execute("GRANT DELETE ON vev_it.audit_event TO vev_it_app");
+        }
+    }
+
+    void setCounterVersion(int id, int version) throws SQLException {
+        try (Connection connection = adminConnection(); PreparedStatement statement = connection.prepareStatement(
+                "UPDATE vev_it.identity_counter SET version = ? WHERE id = ? AND tenant_id = 7")) {
+            statement.setInt(1, version);
+            statement.setInt(2, id);
+            if (statement.executeUpdate() != 1) throw new IllegalStateException("Expected one synthetic counter");
+        }
+    }
+
     void verifyCheckExpressionCatalog() throws SQLException {
         try (Connection connection = adminConnection()) {
             no.beint.vev.pg.CheckCatalogProbe.verify(connection);
@@ -1195,6 +1215,7 @@ final class IntegrationDatabase {
             statements.add("GRANT SELECT ON vev_it." + table + " TO " + APPLICATION_USER);
             statements.add("GRANT INSERT (id, tenant_id, " + mutable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
             if (!table.equals("identity_event")) {
+                statements.add("GRANT DELETE ON vev_it." + table + " TO " + APPLICATION_USER);
                 statements.add("GRANT UPDATE (" + mutable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
             }
             statements.add("GRANT USAGE ON SEQUENCE vev_it." + table + "_id_seq TO " + APPLICATION_USER);

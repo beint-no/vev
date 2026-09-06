@@ -11,6 +11,7 @@ import jakarta.persistence.Version
 import no.beint.vev.TenantKey
 
 @Entity
+@no.beint.vev.VevDelete
 @Table(name = "kotlin_identity", schema = "vev_it")
 @JvmRecord
 @no.beint.vev.VevRows(8)

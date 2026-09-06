@@ -65,6 +65,7 @@ final class MappingCompiler {
     private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final String VEV_ROWS = "no.beint.vev.VevRows";
+    private static final String VEV_DELETE = "no.beint.vev.VevDelete";
     private static final String VEV_BINARY = "no.beint.vev.VevBinary";
     private static final String VEV_TEXT = "no.beint.vev.VevText";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
@@ -373,6 +374,10 @@ final class MappingCompiler {
         PropertyMapping id = ids.size() == 1 ? ids.getFirst() : null;
         PropertyMapping tenant = tenants.size() == 1 ? tenants.getFirst() : null;
         PropertyMapping version = versions.size() == 1 ? versions.getFirst() : null;
+        boolean deletable = annotation(entity, VEV_DELETE) != null;
+        if (deletable && (appendOnly || id == null || !id.identity() || version == null)) {
+            error(entity, "@VevDelete requires a versioned entity with a generated IDENTITY; assigned and append-only entities cannot be deleted");
+        }
         AnnotationMirror primaryKey = annotation(entity, VEV_PRIMARY_KEY);
         String primaryKeyShape = primaryKey == null ? "TENANT_ID" : enumValue(primaryKey, "value");
         if (!Set.of("TENANT_ID", "ID_TENANT", "ID").contains(primaryKeyShape)) {
@@ -432,6 +437,7 @@ final class MappingCompiler {
                 tenant,
                 version,
                 appendOnly,
+                deletable,
                 primaryKeyShape,
                 maximumRows);
     }
@@ -895,7 +901,8 @@ final class MappingCompiler {
     private void scanTypeAnnotations(TypeElement entity) {
         for (AnnotationMirror annotation : entity.getAnnotationMirrors()) {
             String name = annotationName(annotation);
-            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY) || name.equals(VEV_ROWS)) {
+            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY)
+                    || name.equals(VEV_ROWS) || name.equals(VEV_DELETE)) {
                 validateAnnotationShape(entity, annotation);
                 continue;
             }
@@ -1124,6 +1131,7 @@ final class MappingCompiler {
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
+            case VEV_DELETE -> Set.of();
             case VEV_BINARY -> Set.of("maximumBytes", "check");
             case VEV_TEXT -> Set.of("check");
             default -> ANNOTATION_MEMBERS.get(annotationName);
@@ -1210,6 +1218,7 @@ final class MappingCompiler {
             canonical.append(entity.qualifiedName()).append('|')
                     .append(entity.tableSql()).append('|')
                     .append(entity.appendOnly()).append('\n');
+            if (entity.deletable()) canonical.append("delete|versionedIdentity\n");
             for (CheckMapping check : entity.checkConstraints()) {
                 checkCharacters += check.expression().length();
                 if (checkCharacters > 16 * 1024 * 1024) {

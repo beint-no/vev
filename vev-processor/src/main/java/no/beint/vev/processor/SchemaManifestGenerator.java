@@ -52,7 +52,7 @@ final class SchemaManifestGenerator {
                       "checkConstraints": [%s],
                       "references": [%s],
                       "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": %s, "setting": "vev.tenant_id"},
-                      "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": false}
+                      "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": %s}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
                 entity.appendOnly(), identity(entity), entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
@@ -66,7 +66,7 @@ final class SchemaManifestGenerator {
                         .collect(Collectors.joining(", ")),
                 references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
-                        .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates);
+                        .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates, entity.deletable());
     }
 
     private String identity(EntityMapping entity) {

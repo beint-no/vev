@@ -12,6 +12,8 @@ import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityLookup;
 import no.beint.vev.ModelIdentity;
 import no.beint.vev.MutationResult;
+import no.beint.vev.DeleteTarget;
+import no.beint.vev.DeleteResult;
 import no.beint.vev.QueryLimit;
 import no.beint.vev.Rows;
 import no.beint.vev.TenantAuthority;
@@ -89,6 +91,263 @@ final class VevPostgresIntegrationTest {
     @BeforeEach
     void truncate() throws SQLException {
         database.truncateAccounts();
+    }
+
+    @Test
+    void corruptDeleteResultsAndCleanupFailuresPoisonEvenWhenTheCallerCatchesThem() {
+        for (boolean batch : List.of(false, true)) {
+            var corruptions = new java.util.ArrayList<>(List.of("key", "tenant", "version", "null", "extra",
+                    "readerError", "driverFailure", "resultClose", "statementClose"));
+            corruptions.addAll(batch ? List.of("ordinal", "missing", "arrayLength") : List.of("outcome"));
+            for (String corruption : corruptions) {
+                var rows = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                        Batch.copyOf(java.util.Collections.nCopies(2, new IdentityCounterVev.New()))));
+                var targets = Batch.copyOf(rows.values().stream()
+                        .map(row -> new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version())).toList());
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var count = new AtomicInteger();
+                var runtime = new PgVev<>(DeleteObservationDataSource.observe(database.applicationDataSource(), count, corruption),
+                        IntegrationModelVev.POSTGRES, authority);
+                UUID earlier = id("delete-" + batch + '-' + corruption);
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, batch + corruption + "@example.test", "1.0000"));
+                    org.junit.jupiter.api.function.Executable operation = () -> {
+                        if (batch) tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, targets);
+                        else tx.entities().delete(targets.get(0));
+                    };
+                    if (corruption.equals("readerError")) assertThrows(AssertionError.class, operation);
+                    else assertThrows(IllegalStateException.class, operation);
+                    assertThrows(IllegalStateException.class, () -> tx.entities().find(IdentityCounterVev.INSTANCE.key(rows.get(0).id())));
+                    return null;
+                }), batch + corruption);
+                assertEquals(1, count.get());
+                assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+                for (var row : rows) assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+            }
+        }
+    }
+
+    @Test
+    void deletionCannotEscapeWriteOwnershipOrUseAForeignMappingToken() {
+        var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        var target = new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version());
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var count = new AtomicInteger();
+        var runtime = new PgVev<>(DeleteObservationDataSource.observe(database.applicationDataSource(), count, ""),
+                IntegrationModelVev.POSTGRES, authority);
+        runtime.read(authority.scope(7), tx -> {
+            var write = (WriteEntities<IntegrationModelVev.Model>) tx.entities();
+            assertThrows(IllegalStateException.class, () -> write.delete(target));
+            assertThrows(IllegalStateException.class, () -> write.deleteMultiple(IdentityCounterVev.INSTANCE, Batch.one(target)));
+            return null;
+        });
+        var escaped = new AtomicReference<WriteEntities<IntegrationModelVev.Model>>();
+        runtime.write(authority.scope(7), tx -> {
+            escaped.set(tx.entities());
+            @SuppressWarnings("unchecked")
+            var foreignType = (no.beint.vev.DeletableEntityType<IntegrationModelVev.Model, IdentityCounter, Integer, Integer>)
+                    Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{no.beint.vev.DeletableEntityType.class},
+                            (proxy, method, arguments) -> method.invoke(IdentityCounterVev.INSTANCE, arguments));
+            var foreign = new DeleteTarget<>(foreignType, row.id(), row.version());
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().delete(foreign));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                    Batch.copyOf(List.of(target, foreign))));
+            assertThrows(NullPointerException.class, () -> tx.entities().delete(null));
+            assertThrows(NullPointerException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, null));
+            return null;
+        });
+        assertThrows(IllegalStateException.class, () -> escaped.get().delete(target));
+        assertThrows(IllegalStateException.class, () -> escaped.get().deleteMultiple(IdentityCounterVev.INSTANCE, Batch.one(target)));
+        assertEquals(0, count.get());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+    }
+
+    @Test
+    void concurrentDeleteAndUpdateCannotBothApplyToTheSameVersion() throws Exception {
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int attempt = 0; attempt < 8; attempt++) {
+                var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+                var ready = new java.util.concurrent.CountDownLatch(2);
+                var release = new java.util.concurrent.CountDownLatch(1);
+                var futures = new java.util.ArrayList<java.util.concurrent.Future<Object>>();
+                for (boolean delete : List.of(false, true)) {
+                    futures.add(executor.submit(() -> {
+                        try {
+                            return vev.write(TENANT_7, tx -> {
+                                var snapshot = tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id())).orElseThrow();
+                                ready.countDown();
+                                try {
+                                    if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Concurrent fixture did not release");
+                                } catch (InterruptedException interrupted) {
+                                    Thread.currentThread().interrupt();
+                                    throw new IllegalStateException(interrupted);
+                                }
+                                return delete ? tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), snapshot.version()))
+                                        : tx.entities().update(IdentityCounterVev.INSTANCE, snapshot);
+                            });
+                        } catch (IllegalStateException failure) {
+                            return failure;
+                        }
+                    }));
+                }
+                try {
+                    assertTrue(ready.await(10, TimeUnit.SECONDS));
+                } finally {
+                    release.countDown();
+                }
+                var first = futures.get(0).get(15, TimeUnit.SECONDS);
+                var second = futures.get(1).get(15, TimeUnit.SECONDS);
+                assertTrue(first instanceof MutationResult.Applied<?, ?, ?, ?> && second instanceof IllegalStateException
+                        || first instanceof IllegalStateException && second instanceof DeleteResult.Deleted<?, ?, ?, ?>);
+                var rejected = (IllegalStateException) (first instanceof IllegalStateException ? first : second);
+                assertTrue(rejected.getMessage().contains("SQLSTATE 40001"), rejected.getMessage());
+                var remaining = vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id())));
+                if (first instanceof MutationResult.Applied<?, ?, ?, ?>) assertEquals(1, remaining.orElseThrow().version());
+                else assertTrue(remaining.isEmpty());
+            }
+        }
+    }
+
+    @Test
+    void explicitDeletionClassifiesOneSnapshotAndNeverReusesTheGeneratedIdentifier() throws SQLException {
+        var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        var target = new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version());
+        assertInstanceOf(DeleteResult.Missing.class, vev.write(TENANT_8, tx -> tx.entities().delete(target)));
+        assertInstanceOf(DeleteResult.Conflict.class, vev.write(TENANT_7, tx -> tx.entities().delete(
+                new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), 1))));
+        UUID earlier = id("recoverable-delete-conflict");
+        vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "delete-conflict@example.test", "1.0000"));
+            assertInstanceOf(DeleteResult.Conflict.class, tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), 1)));
+            assertInstanceOf(DeleteResult.Missing.class, tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, -1, 0)));
+            return null;
+        });
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isPresent());
+        assertEquals(new DeleteResult.Deleted<>(target), vev.write(TENANT_7, tx -> tx.entities().delete(target)));
+        assertInstanceOf(DeleteResult.Missing.class, vev.write(TENANT_7, tx -> tx.entities().delete(target)));
+        var next = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        assertTrue(next.id() > row.id());
+        database.setCounterVersion(next.id(), Integer.MAX_VALUE);
+        assertInstanceOf(DeleteResult.Deleted.class, vev.write(TENANT_7, tx -> tx.entities().delete(
+                new DeleteTarget<>(IdentityCounterVev.INSTANCE, next.id(), Integer.MAX_VALUE))));
+    }
+
+    @Test
+    void deletionBatchUsesOneStatementAndPreservesOrderAtTheMaximumBound() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(DeleteObservationDataSource.observe(database.applicationDataSource(), count, ""),
+                IntegrationModelVev.POSTGRES, authority);
+        var rows = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                Batch.copyOf(java.util.Collections.nCopies(1000, new IdentityCounterVev.New()))));
+        var targets = Batch.copyOf(rows.values().reversed().stream()
+                .map(row -> new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version())).toList());
+        var results = runtime.write(authority.scope(7), tx -> {
+            assertTrue(tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, Batch.empty()).isEmpty());
+            assertEquals(0, count.get());
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                    Batch.copyOf(List.of(targets.get(0), targets.get(0)))));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().delete(
+                    new DeleteTarget<>(IdentityCounterVev.INSTANCE, targets.get(0).value(), -1)));
+            assertEquals(0, count.get());
+            return tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, targets);
+        });
+        assertEquals(1, count.get());
+        assertEquals(targets.values(), results.values().stream().map(DeleteResult.Deleted::target).toList());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityCounterVev.INSTANCE,
+                new QueryLimit(1000)))).values().isEmpty());
+    }
+
+    @Test
+    void staleMissingAndForeignTenantDeleteBatchesRollBackAllEarlierMutations() {
+        for (String failure : List.of("stale", "missing", "tenant")) {
+            var rows = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                    Batch.copyOf(java.util.Collections.nCopies(3, new IdentityCounterVev.New()))));
+            var foreign = vev.write(TENANT_8, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+            var valid = new DeleteTarget<>(IdentityCounterVev.INSTANCE, rows.get(1).id(), 0);
+            var bad = new DeleteTarget<>(IdentityCounterVev.INSTANCE,
+                    failure.equals("missing") ? -1 : failure.equals("tenant") ? foreign.id() : rows.get(2).id(),
+                    failure.equals("stale") ? 1 : 0);
+            UUID earlier = id("atomic-delete-" + failure);
+            assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, failure + "@example.test", "1.0000"));
+                assertInstanceOf(DeleteResult.Deleted.class, tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, rows.get(0).id(), 0)));
+                assertThrows(IllegalStateException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                        Batch.copyOf(List.of(valid, bad))));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(IdentityCounterVev.INSTANCE.key(rows.get(0).id())));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+            for (var row : rows) assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+            assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(foreign.id()))).isPresent());
+        }
+    }
+
+    @Test
+    void deletionKeepsImmediateForeignKeysAndRollsBackEarlierWrites() {
+        var parent = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("parent", null, null)));
+        var child = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEventVev.INSTANCE, new IdentityEventVev.New("child", parent.id())));
+        UUID earlier = id("delete-foreign-key");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "fk@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().delete(new DeleteTarget<>(IdentityEntryVev.INSTANCE, parent.id(), parent.version())));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(parent.id()))).isPresent());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityEventVev.INSTANCE.key(child.id()))).isPresent());
+        var free = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("free", null, null)));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> tx.entities().deleteMultiple(IdentityEntryVev.INSTANCE,
+                Batch.copyOf(List.of(new DeleteTarget<>(IdentityEntryVev.INSTANCE, free.id(), free.version()),
+                        new DeleteTarget<>(IdentityEntryVev.INSTANCE, parent.id(), parent.version()))))));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(free.id()))).isPresent());
+        assertInstanceOf(DeleteResult.Deleted.class, vev.write(TENANT_7, tx -> tx.entities().delete(
+                new DeleteTarget<>(IdentityEntryVev.INSTANCE, free.id(), free.version()))));
+    }
+
+    @Test
+    void kotlinDeleteTargetsAndRowBoundsWorkInBothTransferModes() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            var rows = runtime.write(authority.scope(7), tx -> tx.entities().createMultiple(KotlinIdentityVev.INSTANCE,
+                    Batch.copyOf(java.util.Collections.nCopies(8, new KotlinIdentityVev.New("delete", null)))));
+            var targets = Batch.copyOf(rows.values().reversed().stream()
+                    .map(row -> new DeleteTarget<>(KotlinIdentityVev.INSTANCE, row.id(), row.version())).toList());
+            var results = runtime.write(authority.scope(7), tx -> {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().deleteMultiple(KotlinIdentityVev.INSTANCE,
+                        Batch.copyOf(java.util.Collections.nCopies(9, targets.get(0)))));
+                return tx.entities().deleteMultiple(KotlinIdentityVev.INSTANCE, targets);
+            });
+            assertEquals(targets.values(), results.values().stream().map(DeleteResult.Deleted::target).toList());
+        }
+    }
+
+    @Test
+    void deletionPrivilegesMustMatchTheCapabilityWithoutGrantOptions() throws SQLException {
+        try {
+            for (String variant : List.of("missing", "undeclared", "grantOption")) {
+                database.deletionPrivilege(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.deletionPrivilege("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void deleteArrayCleanupFailureRollsBackTheDeletion() {
+        var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var failures = new AtomicInteger();
+        var runtime = new PgVev<>(arrayCleanupFailureDataSource(database.applicationDataSource(), failures),
+                IntegrationModelVev.POSTGRES, authority);
+        assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx ->
+                tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                        Batch.one(new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), 0)))));
+        assertEquals(1, failures.get());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
     }
 
     @Test

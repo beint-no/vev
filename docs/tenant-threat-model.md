@@ -41,7 +41,7 @@ An explicitly declared global `(id)` primary key enforces uniqueness across tena
 
 Explicit identity sequences are shared within a mapped table. Their progression can reveal aggregate allocation activity across tenants, and rollback leaves gaps. This profile protects row access, not sequence-activity confidentiality. Applications needing opaque identifiers must use assigned IDs.
 
-The current runtime requires PostgreSQL row-level security as defense in depth, including a forced, exact role-specific policy and least-privilege grants. The application role has no physical `DELETE` privilege; lifecycle retirement is a versioned update. Vev must not use RLS as an excuse to omit generated tenant predicates, and generated predicates do not replace those database controls.
+The current runtime requires PostgreSQL row-level security as defense in depth, including a forced, exact role-specific policy and least-privilege grants. The application role has `DELETE` only on explicitly opted-in, versioned generated-identity entities, without grant option. Other mappings forbid the privilege. Deletion uses the same lexical tenant predicates and RLS; assigned-ID and append-only deletion remain unavailable. Vev must not use RLS as an excuse to omit generated tenant predicates, and generated predicates do not replace those database controls.
 
 ## Required adversarial tests
 
@@ -50,7 +50,7 @@ A tenant-capable release needs automated PostgreSQL tests for:
 - colliding identifiers in two tenants;
 - missing, null, wrong-type, changed, and foreign-authority tenant context;
 - cross-tenant entity insertion and update;
-- point, generated-index equality/null, range, count, existence, batch, and bulk operations, plus proof that physical delete remains unavailable;
+- point, generated-index equality/null, range, count, existence, batch, and bulk operations, plus optimistic single/batch deletion and proof that undeclared deletion capabilities remain unavailable;
 - continuation after a documented recoverable pre-SQL tenant rejection, and rollback after a poisoned tenant-context failure;
 - transaction suspension/resumption and nested boundaries;
 - virtual-thread and structured-concurrency context propagation;

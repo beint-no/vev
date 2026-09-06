@@ -3,14 +3,40 @@ package no.beint.vev;
 /**
  * Explicit mutations available inside a lexical write transaction.
  *
- * <p>There is deliberately no {@code save}, {@code merge}, dirty checking, cascade, flush, physical delete, or
- * create-capable upsert. Mutable operations accept only generated versioned entity types. Lifecycle retirement must
- * be modeled as an explicit versioned update, so the runtime cannot accidentally make an assigned identifier
- * reusable.</p>
+ * <p>There is deliberately no {@code save}, {@code merge}, dirty checking, cascade, flush, or create-capable upsert.
+ * Mutable operations accept only generated versioned entity types. Physical deletion additionally requires an
+ * explicit {@link VevDelete} capability and a database-generated identity that cannot be reinserted through Vev.</p>
  *
  * @param <M> closed-model marker type
  */
 public interface WriteEntities<M> extends ReadEntities<M> {
+    /**
+     * Deletes exactly the requested version, or returns a recoverable conflict or missing outcome.
+     * No entity payload is read; tenant, identifier, and version are verified against PostgreSQL's returned row.
+     *
+     * @param target type-bound identifier and expected version
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> version-token type
+     * @return explicit deleted, conflict, or missing outcome
+     */
+    <E, K, V> DeleteResult<M, E, K, V> delete(DeleteTarget<M, E, K, V> target);
+
+    /**
+     * Deletes one homogeneous bounded batch in one statement, preserving input order.
+     * Every target must apply. A stale or missing row poisons and rolls back the entire lexical transaction.
+     * Duplicate keys, foreign mapping tokens, and invalid bounds are rejected before SQL; empty batches issue none.
+     *
+     * @param type generated deletion capability shared by every target
+     * @param targets type-bound identifiers and expected versions in input order
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> version-token type
+     * @return one confirmed deletion per target, in input order
+     */
+    <E, K, V> Batch<DeleteResult.Deleted<M, E, K, V>> deleteMultiple(
+            DeletableEntityType<M, E, K, V> type, Batch<DeleteTarget<M, E, K, V>> targets);
+
     /**
      * Creates an identified snapshot from application values using the lexical tenant and initial version zero.
      *

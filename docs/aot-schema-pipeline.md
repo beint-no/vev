@@ -99,7 +99,7 @@ Compilation proves source consistency, not database consistency. In particular, 
 - the exact generated set of non-unique, immediate, built-in B-tree secondary indexes, each with no predicate, expression, included column, constraint ownership, custom option, or non-default ordering and with keys exactly `(tenant, indexed value, id)` under the expected collation and built-in default operator classes;
 - named `@UniqueConstraint` declarations and their backing B-trees, with exact tenant-first value-column order, immediate validated/enforced distinct-null semantics, built-in default operator classes, matching collations, and no predicate, expression, included column, custom options, or non-default ordering;
 - permanent logged nonpartitioned non-inherited built-in heap tables, with no rewrite rules, undeclared checks, or undeclared indexes touching a mapped table;
-- schema `USAGE` without `CREATE`, table `SELECT`, exact column-level `INSERT`, exact mutable-value/version column-level `UPDATE`, no table `DELETE`, and no effective `TRUNCATE`, `REFERENCES`, `TRIGGER`, or `MAINTAIN` privilege;
+- schema `USAGE` without `CREATE`, table `SELECT`, exact column-level `INSERT`, exact mutable-value/version column-level `UPDATE`, table `DELETE` exactly when `@VevDelete` opts in (without grant option), and no effective `TRUNCATE`, `REFERENCES`, `TRIGGER`, or `MAINTAIN` privilege;
 - no enabled user trigger; and
 - enabled and forced RLS with exactly one permissive `FOR ALL` policy, restricted to the application role, whose `USING` and `WITH CHECK` expressions exactly compare the tenant column with `vev.tenant_id`.
 

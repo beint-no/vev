@@ -28,7 +28,7 @@
 - broaden version-token conformance while preserving mandatory optimistic locking for mutable entities;
 - use the generated canonical schema manifest in a build task that compares reviewed migrations with generated expectations; retain live startup attestation for database facts a compiler cannot prove;
 - apply the verified check constraints, tenant-scoped unique constraints, and immediate scalar references to representative application migrations without weakening database integrity;
-- design and attest an incarnation token or append-only identifier registry before reconsidering physical delete or create-capable upsert;
+- design and attest an incarnation token or append-only identifier registry before reconsidering assigned-ID physical delete or create-capable upsert; generated-identity deletion now has a separate explicit capability;
 - verify virtual-thread and structured-concurrency ownership;
 - test pool state reset, cancellation, timeout, and failure recovery;
 - fuzz processor inputs and generated SQL boundaries.

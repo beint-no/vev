@@ -24,7 +24,10 @@ final class JavaSourceGenerator {
                 .append(entity.id().identity() ? ", no.beint.vev.pg.spi.PgGeneratedEntityPlan<" : ", no.beint.vev.AssignedEntityType<")
                 .append(modelMarker).append(", ").append(entity.qualifiedName()).append(", ").append(entity.id().boxedType())
                 .append(entity.id().identity() ? ", " + entity.tenant().boxedType() + ", " + entity.simpleName() + "Vev.New" : "")
-                .append("> {\n")
+                .append(">")
+                .append(entity.deletable() ? ", no.beint.vev.DeletableEntityType<" + modelMarker + ", "
+                        + entity.qualifiedName() + ", " + entity.id().boxedType() + ", " + entity.version().boxedType() + ">" : "")
+                .append(" {\n")
                 .append("    /** Singleton generated mapping plan for {@link ")
                 .append(entity.qualifiedName()).append("}. */\n")
                 .append("    public static final ").append(entity.simpleName()).append("Vev INSTANCE = new ")
