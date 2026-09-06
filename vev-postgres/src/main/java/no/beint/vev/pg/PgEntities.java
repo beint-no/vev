@@ -736,7 +736,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     @SuppressWarnings("unchecked")
     private static void bindUnknown(PgCodec<?> codec, PreparedStatement statement, int index, Object value)
             throws SQLException {
-        if (value != null && value.getClass() != codec.javaType()) {
+        if (value != null && !codec.accepts(value)) {
             throw new IllegalArgumentException("Value does not match the generated PostgreSQL codec");
         }
         ((PgCodec<Object>) codec).bind(statement, index, value);

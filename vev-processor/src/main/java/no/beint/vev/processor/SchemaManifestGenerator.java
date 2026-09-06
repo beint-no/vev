@@ -58,10 +58,11 @@ final class SchemaManifestGenerator {
 
     private String columns(List<PropertyMapping> properties) {
         return properties.stream().map(property -> """
-                        {"name": %s, "javaType": %s, "databaseType": %s, "nullable": %s, "role": %s, "maximumLength": %d, "numericPrecision": %d, "numericScale": %d}"""
+                        {"name": %s, "javaType": %s, "databaseType": %s, "nullable": %s, "role": %s, "maximumLength": %d, "numericPrecision": %d, "numericScale": %d, "enumNames": [%s]}"""
                 .formatted(quote(property.columnName()), quote(property.boxedType()),
                         quote(property.arrayElementType()), property.nullable(), quote(role(property)),
-                        property.maximumLength(), property.numericPrecision(), property.numericScale()))
+                        property.maximumLength(), property.numericPrecision(), property.numericScale(),
+                        property.enumConstants().stream().map(SchemaManifestGenerator::quote).collect(Collectors.joining(", "))))
                 .collect(Collectors.joining(",\n")).indent(8).stripTrailing();
     }
 

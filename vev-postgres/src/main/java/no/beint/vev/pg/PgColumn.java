@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
  * @param codec standard Vev codec for the column value
  * @param nullable whether the value column accepts {@code null}; identity, tenant, and version columns never do
  * @param role structural role of the column in its entity plan
- * @param maximumLength maximum Unicode code points for a string column, or zero for other codecs
+ * @param maximumLength maximum Unicode code points for a string or enum-name column, or zero for other codecs
  * @param numericPrecision precision for a decimal column, or zero for other codecs
  * @param numericScale exact scale for a decimal column, or zero for other codecs
  */
@@ -42,7 +42,7 @@ public record PgColumn(
      * @param codec standard Vev codec for the column value
      * @param nullable whether the value column accepts {@code null}
      * @param role structural role of the column
-     * @param maximumLength maximum Unicode code points for a string column, or zero
+     * @param maximumLength maximum Unicode code points for a string or enum-name column, or zero
      * @param numericPrecision precision for a decimal column, or zero
      * @param numericScale exact scale for a decimal column, or zero
      */
@@ -55,12 +55,12 @@ public record PgColumn(
         if ((role == Role.ID || role == Role.TENANT || role == Role.VERSION) && nullable) {
             throw new IllegalArgumentException(role + " columns must be non-null");
         }
-        if (codec == PgCodecs.STRING) {
+        if (codec.usesCharacterVarying()) {
             if (maximumLength < 1 || maximumLength > 65_535) {
-                throw new IllegalArgumentException("String columns require a maximum length from 1 through 65535");
+                throw new IllegalArgumentException("String and enum-name columns require a maximum length from 1 through 65535");
             }
         } else if (maximumLength != 0) {
-            throw new IllegalArgumentException("Only String columns may declare a maximum length");
+            throw new IllegalArgumentException("Only String and enum-name columns may declare a maximum length");
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
             if (numericPrecision < 1 || numericPrecision > 128
@@ -90,13 +90,13 @@ public record PgColumn(
                 codec,
                 nullable,
                 role,
-                codec == PgCodecs.STRING ? 255 : 0,
+                codec.usesCharacterVarying() ? 255 : 0,
                 codec == PgCodecs.BIG_DECIMAL ? 38 : 0,
                 codec == PgCodecs.BIG_DECIMAL ? 2 : 0);
     }
 
     int expectedTypeModifier() {
-        if (codec == PgCodecs.STRING) {
+        if (codec.usesCharacterVarying()) {
             return Math.addExact(maximumLength, 4);
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
@@ -106,7 +106,7 @@ public record PgColumn(
     }
 
     long maximumRetainedBytes() {
-        if (codec == PgCodecs.STRING) {
+        if (codec.usesCharacterVarying()) {
             return Math.addExact(64L, Math.multiplyExact(4L, maximumLength));
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
@@ -122,10 +122,11 @@ public record PgColumn(
             }
             return;
         }
-        if (value.getClass() != codec.javaType()) {
+        if (!codec.accepts(value)) {
             throw new IllegalArgumentException(name + " does not match its generated PostgreSQL codec");
         }
-        if (value instanceof String text) {
+        Object storedValue = value instanceof Enum<?> constant ? constant.name() : value;
+        if (storedValue instanceof String text) {
             requireWellFormedUnicode(text);
             if (text.codePointCount(0, text.length()) > maximumLength) {
                 throw new IllegalArgumentException(name + " exceeds its generated character bound");

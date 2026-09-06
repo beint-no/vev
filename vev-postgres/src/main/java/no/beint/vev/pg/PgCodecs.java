@@ -8,6 +8,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Set;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 /** Standard, non-extensible codecs accepted by Vev's PostgreSQL runtime and generated plans. */
@@ -53,8 +56,46 @@ public final class PgCodecs {
     private PgCodecs() {
     }
 
+    /**
+     * Creates an exact enum-name codec for an ahead-of-time generated mapping.
+     *
+     * <p>Generated plans pass the enum's {@code values()} array once during initialization. Names are bound as
+     * strings, never ordinals or {@code toString()} values. Unknown database names fail hydration.</p>
+     *
+     * @param javaType declared enum type
+     * @param constants complete generated enum constant set
+     * @param <E> enum type
+     * @return immutable name codec without reflective lookup during hydration
+     */
+    public static <E extends Enum<E>> PgCodec<E> enumNames(Class<E> javaType, E[] constants) {
+        Objects.requireNonNull(javaType, "javaType");
+        Objects.requireNonNull(constants, "constants");
+        if (!javaType.isEnum() || constants.length == 0 || constants.length > 1_024) {
+            throw new IllegalArgumentException("An enum codec requires between 1 and 1024 declared constants");
+        }
+        Map<String, E> names = new HashMap<>();
+        for (E constant : constants) {
+            Objects.requireNonNull(constant, "constant");
+            if (constant.getDeclaringClass() != javaType || names.putIfAbsent(constant.name(), constant) != null) {
+                throw new IllegalArgumentException("Enum constants must be distinct members of the declared enum type");
+            }
+        }
+        Map<String, E> values = Map.copyOf(names);
+        return codec(javaType, "character varying", (resultSet, index) -> {
+            String name = resultSet.getString(index);
+            if (name == null) {
+                return null;
+            }
+            E value = values.get(name);
+            if (value == null) {
+                throw new SQLException("Database enum name is outside the generated mapping for " + javaType.getName());
+            }
+            return value;
+        }, (statement, index, value) -> statement.setString(index, value.name()), Enum::name);
+    }
+
     static boolean isStandard(PgCodec<?> codec) {
-        return STANDARD.contains(codec);
+        return STANDARD.contains(codec) || codec.javaType().isEnum();
     }
 
     private static <T> PgCodec<T> codec(

@@ -252,7 +252,7 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException(
                         "Generated index nullability does not match its mapped column: " + index.indexName());
             }
-            if (value.codec() == PgCodecs.STRING
+            if (value.codec().usesCharacterVarying()
                     && value.maximumLength() > VevIndex.MAXIMUM_STRING_LENGTH) {
                 throw new IllegalArgumentException(
                         "Indexed String columns must not exceed " + VevIndex.MAXIMUM_STRING_LENGTH
@@ -269,7 +269,7 @@ public final class PgModel<M, T> {
     }
 
     private static long maximumIndexKeyBytes(PgColumn column) {
-        if (column.codec() == PgCodecs.STRING) {
+        if (column.codec().usesCharacterVarying()) {
             return Math.multiplyExact(4L, column.maximumLength());
         }
         if (column.codec() == PgCodecs.BIG_DECIMAL) {

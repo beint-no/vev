@@ -77,6 +77,15 @@ public final class PgCodec<T> {
         return jdbcType;
     }
 
+    boolean accepts(Object value) {
+        return value.getClass() == javaType
+                || value instanceof Enum<?> constant && constant.getDeclaringClass() == javaType;
+    }
+
+    boolean usesCharacterVarying() {
+        return databaseType.equals("character varying");
+    }
+
     T read(ResultSet resultSet, int index) throws SQLException {
         T value = reader.read(resultSet, index);
         return resultSet.wasNull() ? null : value;
@@ -94,7 +103,7 @@ public final class PgCodec<T> {
         if (value == null) {
             return null;
         }
-        if (value.getClass() != javaType) {
+        if (!accepts(value)) {
             throw new IllegalArgumentException("Array value does not match the generated PostgreSQL codec");
         }
         return arrayElement.apply(javaType.cast(value));

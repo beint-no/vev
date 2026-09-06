@@ -19,7 +19,7 @@ Consumers must reject unknown format versions or profiles. The resource includes
 - the model's qualified name and the exact generated mapping fingerprint;
 - entity Java types, schema/table identifiers, and append-only semantics;
 - ordered columns with boxed Java type, PostgreSQL type, nullability, structural
-  role, string length, decimal precision, and scale;
+  role, string length, decimal precision, scale, and sorted enum names;
 - ordered primary-key and secondary-index columns;
 - required enabled/forced tenant row security and its transaction-local setting;
 - the exact application insert/update column sets and the absence of delete access.

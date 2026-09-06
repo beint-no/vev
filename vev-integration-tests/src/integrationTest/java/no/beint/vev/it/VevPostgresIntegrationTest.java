@@ -103,6 +103,43 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void enumNamesRoundTripThroughBatchesUpdatesAndTypedIndexQueries() {
+        var first = new WorkItem(id("enum-first"), 7, 0L, WorkState.OPEN);
+        var second = new WorkItem(id("enum-second"), 7, 0L, null);
+        var input = Batch.copyOf(List.of(first, second));
+        var stored = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, input));
+        assertEquals(input, stored);
+        assertEquals(List.of(first), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(WorkItemVev.STATE, WorkState.OPEN, new QueryLimit(10)))).values());
+        assertEquals(List.of(second), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.isNull(WorkItemVev.STATE, new QueryLimit(10)))).values());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().many(
+                PgQueries.equal(WorkItemVev.STATE, WorkState.OPEN, new QueryLimit(10)))).values().isEmpty());
+        var changes = Batch.copyOf(List.of(
+                new WorkItem(first.id(), 7, 0L, WorkState.CLOSED),
+                new WorkItem(second.id(), 7, 0L, WorkState.OPEN)));
+        var updated = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(WorkItemVev.INSTANCE, changes));
+        assertEquals(new WorkItem(first.id(), 7, 1L, WorkState.CLOSED), updated.get(0).entity());
+        assertEquals(new WorkItem(second.id(), 7, 1L, WorkState.OPEN), updated.get(1).entity());
+        assertEquals(List.of(updated.get(1).entity()), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(WorkItemVev.STATE, WorkState.OPEN, new QueryLimit(10)))).values());
+    }
+
+    @Test
+    void unknownDatabaseEnumNamePoisonsAndRollsBackTheWholeTransaction() throws SQLException {
+        var work = new WorkItem(id("enum-corrupt"), 7, 0L, WorkState.OPEN);
+        vev.write(TENANT_7, tx -> tx.entities().insert(WorkItemVev.INSTANCE, work));
+        database.corruptWorkState(work.id());
+        UUID accountId = id("enum-rollback");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(accountId, 7, 0, "enum@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(WorkItemVev.INSTANCE.key(work.id())));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(accountId))).isEmpty());
+    }
+
+    @Test
     void batchInsertPreservesInputOrderAndRejectsDuplicateKeysAtomicallyBeforeSql() {
         Account third = account(
                 UUID.fromString("00000000-0000-0000-0000-000000000003"),

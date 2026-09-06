@@ -166,7 +166,8 @@ public final class PgQueries {
 
     private static <M, E, K, V> void requireValue(PgIndex<M, E, K, V> index, V value) {
         Objects.requireNonNull(value, "value");
-        if (value.getClass() != index.valueType()) {
+        if (value.getClass() != index.valueType()
+                && !(value instanceof Enum<?> constant && constant.getDeclaringClass() == index.valueType())) {
             throw new IllegalArgumentException("Query value does not match the exact generated PostgreSQL codec");
         }
     }

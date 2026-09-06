@@ -56,6 +56,7 @@ final class MappingCompiler {
     private static final String COLUMN = "jakarta.persistence.Column";
     private static final String VERSION = "jakarta.persistence.Version";
     private static final String GENERATED_VALUE = "jakarta.persistence.GeneratedValue";
+    private static final String ENUMERATED = "jakarta.persistence.Enumerated";
     private static final String TENANT_KEY = "no.beint.vev.TenantKey";
     private static final String APPEND_ONLY = "no.beint.vev.AppendOnly";
     private static final String VEV_INDEX = "no.beint.vev.VevIndex";
@@ -424,10 +425,35 @@ final class MappingCompiler {
                 }
             }
         }
+        AnnotationMirror enumerated = consistentAnnotation(component, annotationSources, ENUMERATED);
+        List<String> enumConstants = List.of();
         CodecMapping codec = CODECS.get(component.asType().toString());
+        Element valueType = processingEnvironment.getTypeUtils().asElement(component.asType());
+        if (valueType instanceof TypeElement enumType && enumType.getKind() == ElementKind.ENUM) {
+            if (enumerated == null || !enumValue(enumerated, "value").equals("STRING")) {
+                error(component, "Enum components require explicit @Enumerated(EnumType.STRING); ordinal persistence is forbidden");
+            }
+            for (Element member : enumType.getEnclosedElements()) {
+                if (annotation(member, "jakarta.persistence.EnumeratedValue") != null) {
+                    error(component, "@EnumeratedValue is not supported; enum columns store the exact declared constant name");
+                }
+            }
+            enumConstants = enumType.getEnclosedElements().stream()
+                    .filter(member -> member.getKind() == ElementKind.ENUM_CONSTANT)
+                    .map(member -> member.getSimpleName().toString()).sorted().toList();
+            if (enumConstants.isEmpty() || enumConstants.size() > 1_024) {
+                error(component, "An enum mapping requires between 1 and 1024 declared constants");
+            }
+            String type = enumType.getQualifiedName().toString();
+            codec = new CodecMapping(type,
+                    "no.beint.vev.pg.PgCodecs.enumNames(" + type + ".class, " + type + ".values())",
+                    "character varying");
+        } else if (enumerated != null) {
+            error(component, "@Enumerated may only annotate an enum component");
+        }
         if (codec == null) {
             error(component, "No safe PostgreSQL codec exists for " + component.asType()
-                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, and Instant");
+                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, Instant, and explicit STRING enums");
             return null;
         }
         boolean nullable = booleanValue(column, "nullable");
@@ -437,10 +463,15 @@ final class MappingCompiler {
         int maximumLength = 0;
         int numericPrecision = 0;
         int numericScale = 0;
-        if (codec.codec().endsWith(".STRING")) {
+        if (codec.arrayElementType().equals("character varying")) {
             maximumLength = intValue(column, "length");
             if (maximumLength < 1 || maximumLength > 65_535) {
                 error(component, "String @Column.length must be between 1 and 65535");
+            }
+            for (String constant : enumConstants) {
+                if (constant.codePointCount(0, constant.length()) > maximumLength) {
+                    error(component, "Enum constant " + constant + " exceeds @Column.length");
+                }
             }
             if ((id || tenant) && maximumLength != 128) {
                 error(component, "String @Id and @TenantKey columns must declare @Column(length = 128)");
@@ -481,7 +512,8 @@ final class MappingCompiler {
                 tenant,
                 version,
                 indexName,
-                indexFieldName);
+                indexFieldName,
+                enumConstants);
     }
 
     private void validateIndexes(TypeElement entity, List<PropertyMapping> properties) {
@@ -616,7 +648,8 @@ final class MappingCompiler {
             for (AnnotationMirror annotation : member.getAnnotationMirrors()) {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
-                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)) {
+                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
+                        || name.equals(ENUMERATED)) {
                     if (!componentElements.contains(member)) {
                         error(member, "Persistence mapping @" + simpleName(name)
                                 + " is forbidden on members unrelated to a record component");
@@ -637,7 +670,8 @@ final class MappingCompiler {
             for (AnnotationMirror annotation : source.getAnnotationMirrors()) {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
-                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)) {
+                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
+                        || name.equals(ENUMERATED)) {
                     validateAnnotationShape(component, annotation);
                     continue;
                 }
@@ -820,7 +854,7 @@ final class MappingCompiler {
 
     private void validateAnnotationShape(Element use, AnnotationMirror annotation) {
         String annotationName = annotationName(annotation);
-        Set<String> expected = ANNOTATION_MEMBERS.get(annotationName);
+        Set<String> expected = annotationName.equals(ENUMERATED) ? Set.of("value") : ANNOTATION_MEMBERS.get(annotationName);
         if (expected == null) {
             return;
         }
@@ -914,6 +948,9 @@ final class MappingCompiler {
                         .append(property.tenant()).append('|')
                         .append(property.version()).append('|')
                         .append(property.indexName()).append('\n');
+                if (!property.enumConstants().isEmpty()) {
+                    canonical.append("enumNames|").append(String.join("|", property.enumConstants())).append('\n');
+                }
             }
         }
         try {

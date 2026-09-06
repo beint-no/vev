@@ -130,6 +130,75 @@ final class VevProcessorTest {
     }
 
     @Test
+    void enumNamesGenerateTypedQueriesAndOrderIndependentMappingIdentity() throws IOException {
+        Compilation first = compile(enumSources("OPEN, CLOSED"));
+        Compilation reordered = compile(enumSources("CLOSED, OPEN"));
+        Compilation renamed = compile(enumSources("OPEN, ARCHIVED"));
+        assertTrue(first.success(), first.diagnostics());
+        assertTrue(reordered.success(), reordered.diagnostics());
+        assertTrue(renamed.success(), renamed.diagnostics());
+        assertEquals(first.manifest("example.BillingModel"), reordered.manifest("example.BillingModel"));
+        assertNotEquals(first.generated("example/BillingModelVev.java"), renamed.generated("example/BillingModelVev.java"));
+        assertTrue(first.generated("example/AccountVev.java").contains(
+                "no.beint.vev.pg.PgCodecs.enumNames(example.State.class, example.State.values())"));
+        assertTrue(first.generated("example/AccountVev.java").contains(
+                "PgRequiredIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, example.State> DISPLAY_NAME"));
+        assertTrue(first.manifest("example.BillingModel").contains("\"enumNames\": [\"CLOSED\", \"OPEN\"]"));
+
+        var wrongPredicate = enumSources("OPEN, CLOSED");
+        wrongPredicate.put("example/WrongPredicate.java", """
+                package example;
+                public class WrongPredicate {
+                    Object query() {
+                        return no.beint.vev.pg.PgQueries.equal(AccountVev.DISPLAY_NAME, "OPEN", new no.beint.vev.QueryLimit(1));
+                    }
+                }
+                """);
+        assertFalse(compile(wrongPredicate).success(), "Enum query tokens must not accept arbitrary strings");
+    }
+
+    @Test
+    void rejectsAmbiguousOrdinalAndTruncatedEnumMappings() throws IOException {
+        var cases = new LinkedHashMap<String, Map<String, String>>();
+        var implicit = enumSources("OPEN, CLOSED");
+        implicit.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                "@jakarta.persistence.Enumerated(jakarta.persistence.EnumType.STRING)", ""));
+        cases.put("require explicit STRING", implicit);
+        var ordinal = enumSources("OPEN, CLOSED");
+        ordinal.computeIfPresent("example/Account.java", (path, source) -> source.replace("EnumType.STRING", "EnumType.ORDINAL"));
+        cases.put("reject ordinal", ordinal);
+        var nonEnum = enumSources("OPEN, CLOSED");
+        nonEnum.computeIfPresent("example/Account.java", (path, source) -> source.replace("State displayName", "String displayName"));
+        cases.put("reject non-enum annotation", nonEnum);
+        var tooShort = enumSources("OPEN, CLOSED");
+        tooShort.computeIfPresent("example/Account.java", (path, source) -> source.replace("length = 255", "length = 4"));
+        cases.put("reject truncated names", tooShort);
+        cases.put("reject empty enum", enumSources(""));
+        cases.put("reject custom EnumeratedValue", enumSources("""
+                OPEN("o"), CLOSED("c");
+                @jakarta.persistence.EnumeratedValue final String code;
+                State(String code) { this.code = code; }
+                """));
+        for (var entry : cases.entrySet()) {
+            Compilation compilation = compile(entry.getValue());
+            assertFalse(compilation.success(), entry.getKey());
+            assertFalse(Files.exists(compilation.classesDirectory()
+                    .resolve("META-INF/vev/example.BillingModel.schema.json")), entry.getKey());
+        }
+    }
+
+    private static Map<String, String> enumSources(String constants) {
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.put("example/State.java", "package example; public enum State { " + constants + " }");
+        sources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@VevIndex(name = \"account_display_name_idx\")",
+                        "@jakarta.persistence.Enumerated(jakarta.persistence.EnumType.STRING)\n"
+                                + "@VevIndex(name = \"account_display_name_idx\")")
+                .replace("String displayName", "State displayName"));
+        return sources;
+    }
+
+    @Test
     void rejectsEveryImplicitOrUnsafeMappingAtCompilation() throws IOException {
         Map<String, NegativeCase> cases = new LinkedHashMap<>();
         cases.put("implicitTable", new NegativeCase(

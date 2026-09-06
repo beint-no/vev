@@ -68,7 +68,15 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item");
+        }
+    }
+
+    void corruptWorkState(UUID id) throws SQLException {
+        try (Connection connection = adminConnection();
+             PreparedStatement statement = connection.prepareStatement("UPDATE vev_it.work_item SET state = 'UNKNOWN' WHERE id = ?")) {
+            statement.setObject(1, id);
+            statement.executeUpdate();
         }
     }
 
@@ -804,6 +812,28 @@ final class IntegrationDatabase {
                             WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)
                         """,
                 "GRANT USAGE ON SCHEMA vev_it TO " + APPLICATION_USER,
+                """
+                        CREATE TABLE vev_it.work_item (
+                            id uuid NOT NULL,
+                            tenant_id integer NOT NULL,
+                            version bigint NOT NULL,
+                            state varchar(16),
+                            PRIMARY KEY (tenant_id, id)
+                        )
+                        """,
+                "ALTER TABLE vev_it.work_item OWNER TO " + OWNER_ROLE,
+                "CREATE INDEX work_item_state_vev_idx ON vev_it.work_item USING btree (tenant_id, state, id)",
+                "ALTER TABLE vev_it.work_item ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.work_item FORCE ROW LEVEL SECURITY",
+                """
+                        CREATE POLICY work_item_tenant ON vev_it.work_item
+                            FOR ALL TO vev_it_app
+                            USING (tenant_id = current_setting('vev.tenant_id', true)::integer)
+                            WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)
+                        """,
+                "GRANT SELECT ON TABLE vev_it.work_item TO " + APPLICATION_USER,
+                "GRANT INSERT (id, tenant_id, version, state) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
+                "GRANT UPDATE (version, state) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
                 "GRANT SELECT ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
