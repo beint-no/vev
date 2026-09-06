@@ -22,7 +22,8 @@ record PropertyMapping(
         String indexFieldName,
         List<String> enumConstants,
         String referenceName,
-        String referenceTarget) {
+        String referenceTarget,
+        boolean identity) {
     String quotedColumn() {
         return '"' + columnName + '"';
     }

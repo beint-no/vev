@@ -6,6 +6,7 @@ import no.beint.vev.VevIndex;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
 import no.beint.vev.pg.spi.PgVersionedEntityPlan;
+import no.beint.vev.pg.spi.PgGeneratedEntityPlan;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -28,8 +29,10 @@ class PgPlan<M, E, K, T> {
     private final List<PgIndex<M, E, K, ?>> indexes;
     private final List<PgReference> references;
     private final List<PgUnique> uniqueConstraints;
+    private final Class<?> creationType;
     private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
+    private String creationSql;
 
     PgPlan(PgEntityPlan<M, E, K, T> source) {
         this.source = Objects.requireNonNull(source, "source");
@@ -42,6 +45,11 @@ class PgPlan<M, E, K, T> {
         this.schemaName = Objects.requireNonNull(source.schemaName(), "schemaName");
         this.tableName = Objects.requireNonNull(source.tableName(), "tableName");
         this.tenantColumn = Objects.requireNonNull(source.tenantColumn(), "tenantColumn");
+        this.creationType = source instanceof PgGeneratedEntityPlan<?, ?, ?, ?, ?> generated
+                ? Objects.requireNonNull(generated.creationType(), "creationType") : null;
+        if (creationType != null && source instanceof no.beint.vev.AssignedEntityType<?, ?, ?>) {
+            throw new IllegalArgumentException("An entity cannot expose both assigned and generated identity insertion");
+        }
         List<PgColumn> boundedColumns = new ArrayList<>(VevModel.MAXIMUM_COLUMNS);
         for (PgColumn column : Objects.requireNonNull(source.columns(), "columns")) {
             if (boundedColumns.size() == VevModel.MAXIMUM_COLUMNS) {
@@ -81,6 +89,19 @@ class PgPlan<M, E, K, T> {
 
     List<PgReference> references() {
         return references;
+    }
+
+    boolean generatedIdentity() {
+        return creationType != null;
+    }
+
+    Class<?> creationType() {
+        return creationType;
+    }
+
+    @SuppressWarnings("unchecked")
+    Object creationColumnValue(Object input, int columnIndex) {
+        return ((PgGeneratedEntityPlan<M, E, K, T, Object>) source).creationColumnValue(input, columnIndex);
     }
 
     List<PgUnique> uniqueConstraints() {
@@ -176,6 +197,7 @@ class PgPlan<M, E, K, T> {
             throw new IllegalStateException("PostgreSQL SQL was already compiled for " + logicalName);
         }
         sql = Objects.requireNonNull(compiledSql, "compiledSql");
+        creationSql = generatedIdentity() ? PgCreationSql.compile(this) : null;
         for (PgIndex<M, E, K, ?> index : indexes) {
             indexSql.put(index, compiledSql.index(index));
         }
@@ -183,6 +205,10 @@ class PgPlan<M, E, K, T> {
 
     PgSql sql() {
         return Objects.requireNonNull(sql, "sql");
+    }
+
+    String creationSql() {
+        return Objects.requireNonNull(creationSql, "creationSql");
     }
 
     PgIndexSql indexSql(PgIndex<M, E, K, ?> index) {

@@ -357,7 +357,7 @@ final class MappingCompiler {
         PropertyMapping tenant = tenants.size() == 1 ? tenants.getFirst() : null;
         PropertyMapping version = versions.size() == 1 ? versions.getFirst() : null;
         if (id != null && id.nullable()) {
-            error(id.declaration(), "Assigned identifier columns must declare @Column(nullable = false)");
+            error(id.declaration(), "Identifier columns must declare @Column(nullable = false)");
         }
         if (id != null && !KEY_TYPES.contains(id.boxedType())) {
             error(id.declaration(), "@Id must use equality-stable Integer, Long, Short, String, or UUID semantics");
@@ -446,8 +446,15 @@ final class MappingCompiler {
         AnnotationMirror index = consistentAnnotation(component, annotationSources, VEV_INDEX);
         AnnotationMirror generatedValue = consistentAnnotation(component, annotationSources, GENERATED_VALUE);
         if (generatedValue != null) {
-            error(component,
-                    "@GeneratedValue is forbidden because shared database generators leak cross-tenant activity; use an assigned stable identifier");
+            if (!id || !enumValue(generatedValue, "strategy").equals("IDENTITY")
+                    || !hasExplicitValue(generatedValue, "strategy")
+                    || !stringValue(generatedValue, "generator").isEmpty()) {
+                error(component, "@GeneratedValue requires an @Id, explicit strategy = IDENTITY, and an empty generator");
+            }
+            if (!Set.of("short", "int", "long", "java.lang.Short", "java.lang.Integer", "java.lang.Long")
+                    .contains(component.asType().toString())) {
+                error(component, "PostgreSQL IDENTITY requires a Short, Integer, or Long identifier");
+            }
         }
         int roles = (id ? 1 : 0) + (tenant ? 1 : 0) + (version ? 1 : 0);
         if (roles > 1) {
@@ -576,7 +583,8 @@ final class MappingCompiler {
                 indexFieldName,
                 enumConstants,
                 referenceName,
-                referenceTarget);
+                referenceTarget,
+                generatedValue != null);
     }
 
     private List<UniqueMapping> compileUniqueConstraints(
@@ -1074,6 +1082,9 @@ final class MappingCompiler {
                         .append(property.tenant()).append('|')
                         .append(property.version()).append('|')
                         .append(property.indexName()).append('\n');
+                if (property.identity()) {
+                    canonical.append("identity|POSTGRESQL IDENTITY|START 1|INCREMENT 1|NO CYCLE\n");
+                }
                 if (!property.enumConstants().isEmpty()) {
                     canonical.append("enumNames|").append(String.join("|", property.enumConstants())).append('\n');
                 }

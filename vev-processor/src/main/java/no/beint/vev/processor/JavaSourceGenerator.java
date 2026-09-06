@@ -21,14 +21,19 @@ final class JavaSourceGenerator {
                         : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + modelMarker + ", "
                                 + entity.qualifiedName() + ", " + entity.id().boxedType() + ", "
                                 + entity.tenant().boxedType() + ", " + entity.version().boxedType() + ">")
-                .append(", no.beint.vev.AssignedEntityType<").append(modelMarker).append(", ")
-                .append(entity.qualifiedName()).append(", ").append(entity.id().boxedType()).append("> {\n")
+                .append(entity.id().identity() ? ", no.beint.vev.pg.spi.PgGeneratedEntityPlan<" : ", no.beint.vev.AssignedEntityType<")
+                .append(modelMarker).append(", ").append(entity.qualifiedName()).append(", ").append(entity.id().boxedType())
+                .append(entity.id().identity() ? ", " + entity.tenant().boxedType() + ", " + entity.simpleName() + "Vev.New" : "")
+                .append("> {\n")
                 .append("    /** Singleton generated mapping plan for {@link ")
                 .append(entity.qualifiedName()).append("}. */\n")
                 .append("    public static final ").append(entity.simpleName()).append("Vev INSTANCE = new ")
                 .append(entity.simpleName()).append("Vev();\n\n")
                 .append("    private ").append(entity.simpleName()).append("Vev() {\n")
                 .append("    }\n\n");
+        if (entity.id().identity()) {
+            appendCreationInput(source, entity);
+        }
         source.append("    private static final java.util.List<no.beint.vev.pg.PgColumn> COLUMNS = java.util.List.of(\n");
         for (int index = 0; index < entity.properties().size(); index++) {
             PropertyMapping property = entity.properties().get(index);
@@ -97,6 +102,33 @@ final class JavaSourceGenerator {
         }
         source.append("}\n");
         return source.toString();
+    }
+
+    private void appendCreationInput(StringBuilder source, EntityMapping entity) {
+        List<PropertyMapping> values = entity.properties().stream()
+                .filter(property -> !property.id() && !property.tenant() && !property.version()).toList();
+        source.append("    /**\n     * Immutable application values for a new database-identified snapshot.\n     *\n");
+        for (PropertyMapping value : values) {
+            source.append("     * @param ").append(value.name()).append(" value for column ").append(value.columnName()).append("\n");
+        }
+        source.append("     */\n    public record New(")
+                .append(values.stream().map(value -> value.javaType() + " " + value.name())
+                        .collect(java.util.stream.Collectors.joining(", "))).append(") {\n    }\n\n");
+        method(source, "public Class<New> creationType()", "return New.class;");
+        if (values.isEmpty()) {
+            method(source, "public Object creationColumnValue(New input, int columnIndex)",
+                    "throw new IndexOutOfBoundsException(columnIndex);");
+            return;
+        }
+        source.append("    @Override\n    public Object creationColumnValue(New input, int columnIndex) {\n")
+                .append("        java.util.Objects.requireNonNull(input, \"input\");\n")
+                .append("        return switch (columnIndex) {\n");
+        for (PropertyMapping value : values) {
+            source.append("            case ").append(entity.properties().indexOf(value)).append(" -> input.")
+                    .append(value.name()).append("();\n");
+        }
+        source.append("            default -> throw new IndexOutOfBoundsException(columnIndex);\n")
+                .append("        };\n    }\n\n");
     }
 
     private void appendUniqueConstraints(StringBuilder source, EntityMapping entity) {

@@ -43,6 +43,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     private final TenantAuthority.Claim<M> tenantClaim;
     private final PgSettings settings;
     private final DatabaseIdentity databaseIdentity;
+    private final java.util.Map<PgPlan<?, ?, ?, ?>, Long> identitySequences;
+
+    private record VerifiedDatabase(DatabaseIdentity identity, java.util.Map<PgPlan<?, ?, ?, ?>, Long> sequences) {
+    }
 
     /**
      * Verifies and creates a runtime using {@link PgSettings#SAFE_DEFAULTS}.
@@ -77,13 +81,14 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             + model.tenantType().getName());
         }
         this.settings = Objects.requireNonNull(settings, "settings");
-        DatabaseIdentity verifiedDatabaseIdentity;
+        VerifiedDatabase verifiedDatabase;
         TenantAuthority.Claim<M> verifiedTenantClaim;
         try (TenantAuthority.Reservation<M> reservation = tenantAuthority.reserve(model.identity())) {
-            verifiedDatabaseIdentity = verifyDatabase();
+            verifiedDatabase = verifyDatabase();
             verifiedTenantClaim = reservation.claim();
         }
-        this.databaseIdentity = verifiedDatabaseIdentity;
+        this.databaseIdentity = verifiedDatabase.identity();
+        this.identitySequences = verifiedDatabase.sequences();
         this.tenantClaim = verifiedTenantClaim;
     }
 
@@ -124,7 +129,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             try {
                 connection = acquireConnection();
                 configure(connection, tenant, readOnly);
-                PgEntities<M, T> entities = new PgEntities<>(connection, model, tenant, guard, settings, !readOnly);
+                PgEntities<M, T> entities = new PgEntities<>(connection, model, tenant, guard, settings, !readOnly, identitySequences);
                 ReadTx<M, T> transaction = readOnly
                         ? new PgReadTransaction<>(tenant, entities, guard)
                         : new PgWriteTransaction<>(tenant, entities, guard);
@@ -253,7 +258,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         }
     }
 
-    private DatabaseIdentity verifyDatabase() {
+    private VerifiedDatabase verifyDatabase() {
         BootstrapStage stage = BootstrapStage.CONNECTION_ACQUISITION;
         try (Connection connection = acquireConnection()) {
             Throwable verificationFailure = null;
@@ -272,9 +277,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 verifyFingerprintValue(connection);
                 stage = BootstrapStage.TENANT_ISOLATION;
                 verifyTenantIsolation(connection);
+                java.util.Map<PgPlan<?, ?, ?, ?>, Long> sequences = PgIdentities.verify(connection, model.frozenPlans());
                 stage = BootstrapStage.BOOTSTRAP_CONTEXT;
                 verifyBootstrapContext(connection, identity);
-                return identity;
+                return new VerifiedDatabase(identity, sequences);
             } catch (SQLException | RuntimeException | Error failure) {
                 verificationFailure = failure;
                 throw failure;
@@ -1121,7 +1127,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     String generated = resultSet.getString(4);
                     if (resultSet.getBoolean(1) != !column.nullable()
                             || !resultSet.getBoolean(2)
-                            || !identity.isEmpty()
+                            || (plan.generatedIdentity() && column.role() == PgColumn.Role.ID
+                                    ? !identity.equals("a") && !identity.equals("d") : !identity.isEmpty())
                             || !generated.isEmpty()
                             || resultSet.getBoolean(5)
                             || !resultSet.getBoolean(6)

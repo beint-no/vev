@@ -2,6 +2,7 @@ package no.beint.vev.pg;
 
 import no.beint.vev.Batch;
 import no.beint.vev.AssignedEntityType;
+import no.beint.vev.GeneratedEntityType;
 import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityKey;
 import no.beint.vev.EntityLookup;
@@ -33,6 +34,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private final TransactionGuard guard;
     private final PgSettings settings;
     private final boolean writeAllowed;
+    private final java.util.Map<PgPlan<?, ?, ?, ?>, Long> identitySequences;
 
     PgEntities(
             Connection connection,
@@ -40,13 +42,15 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             TenantScope<M, T> tenant,
             TransactionGuard guard,
             PgSettings settings,
-            boolean writeAllowed) {
+            boolean writeAllowed,
+            java.util.Map<PgPlan<?, ?, ?, ?>, Long> identitySequences) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.model = Objects.requireNonNull(model, "model");
         this.tenant = Objects.requireNonNull(tenant, "tenant");
         this.guard = Objects.requireNonNull(guard, "guard");
         this.settings = Objects.requireNonNull(settings, "settings");
         this.writeAllowed = writeAllowed;
+        this.identitySequences = Objects.requireNonNull(identitySequences, "identitySequences");
     }
 
     @Override
@@ -217,6 +221,88 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             throw PgVev.databaseFailure(guard, failure);
         } catch (RuntimeException failure) {
             throw invariant("Vev PostgreSQL execution failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    @Override
+    public <E, K, N> E create(GeneratedEntityType<M, E, K, N> type, N input) {
+        requireWrite();
+        return createMultiple(type, Batch.one(input)).get(0);
+    }
+
+    @Override
+    public <E, K, N> Batch<E> createMultiple(GeneratedEntityType<M, E, K, N> type, Batch<N> inputs) {
+        requireWrite();
+        Objects.requireNonNull(inputs, "inputs");
+        PgPlan<M, E, K, T> plan = plan(type);
+        if (!plan.generatedIdentity() || !identitySequences.containsKey(plan)) {
+            throw new IllegalArgumentException("Creation requires a verified generated-identity plan");
+        }
+        List<PgColumn> columns = plan.columns();
+        for (N input : inputs) {
+            if (!plan.creationType().isInstance(input)) {
+                throw new IllegalArgumentException("Creation input must be " + plan.creationType().getName());
+            }
+            for (int index = 0; index < columns.size(); index++) {
+                PgColumn column = columns.get(index);
+                if (column.role() == PgColumn.Role.VALUE) {
+                    column.validateValue(plan.creationColumnValue(input, index));
+                }
+            }
+        }
+        if (inputs.isEmpty()) return Batch.empty();
+        List<E> created = new ArrayList<>(inputs.size());
+        Set<K> keys = new HashSet<>(inputs.size() * 2);
+        try (JdbcArrays arrays = new JdbcArrays(connection);
+             PreparedStatement statement = prepare(plan.creationSql())) {
+            statement.setLong(1, identitySequences.get(plan));
+            bindTenant(plan, statement, 2);
+            statement.setInt(3, inputs.size());
+            int parameter = 4;
+            for (int index = 0; index < columns.size(); index++) {
+                PgColumn column = columns.get(index);
+                if (column.role() != PgColumn.Role.VALUE) continue;
+                Object[] values = new Object[inputs.size()];
+                for (int row = 0; row < inputs.size(); row++) {
+                    values[row] = column.codec().arrayElement(plan.creationColumnValue(inputs.get(row), index));
+                }
+                arrays.bind(statement, parameter++, column.codec(), values);
+            }
+            try (ResultSet rows = statement.executeQuery()) {
+                for (int index = 0; index < inputs.size(); index++) {
+                    if (!rows.next() || rows.getLong(1) != index + 1L || rows.wasNull()) {
+                        throw invariant("Identity creation returned an unexpected input ordinal");
+                    }
+                    K allocated = plan.keyCodec().read(rows, 2);
+                    if (!(allocated instanceof Number number) || number.longValue() < 1 || !keys.add(allocated)) {
+                        throw invariant("Identity creation returned an invalid or repeated allocated key");
+                    }
+                    E actual = readEntity(plan, rows, 3);
+                    validateDatabaseEntity(plan, actual);
+                    if (!allocated.equals(plan.keyOf(actual))) {
+                        throw invariant("Identity creation returned a different key from its allocated input key");
+                    }
+                    for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+                        PgColumn column = columns.get(columnIndex);
+                        Object value = plan.columnValue(actual, columnIndex);
+                        if (column.role() == PgColumn.Role.VERSION && ((Number) value).longValue() != 0L
+                                || column.role() == PgColumn.Role.VALUE
+                                && !Objects.equals(value, plan.creationColumnValue(inputs.get(index), columnIndex))) {
+                            throw invariant("Identity creation returned a snapshot differing from its input values");
+                        }
+                    }
+                    created.add(actual);
+                }
+                requireNoMore(rows, "Identity creation returned extra rows");
+            }
+            return Batch.copyOf(created);
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL identity creation failed an internal invariant", failure);
         } catch (Error failure) {
             poison(failure);
             throw failure;

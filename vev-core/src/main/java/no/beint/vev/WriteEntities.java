@@ -12,6 +12,33 @@ package no.beint.vev;
  */
 public interface WriteEntities<M> extends ReadEntities<M> {
     /**
+     * Creates an identified snapshot from application values using the lexical tenant and initial version zero.
+     *
+     * @param type generated identity-creation capability
+     * @param input immutable input without identity, tenant, or version fields
+     * @param <E> persisted snapshot type
+     * @param <K> generated integer primary-key type
+     * @param <N> generated creation-input type
+     * @return newly identified snapshot
+     */
+    <E, K, N> E create(GeneratedEntityType<M, E, K, N> type, N input);
+
+    /**
+     * Creates a bounded batch in one statement and returns identified snapshots in exact input order.
+     *
+     * <p>Any failing row rolls back the complete lexical transaction. Allocated sequence values are not rolled
+     * back and must never be used as gapless business numbering.</p>
+     *
+     * @param type generated identity-creation capability
+     * @param inputs immutable creation inputs in input order
+     * @param <E> persisted snapshot type
+     * @param <K> generated integer primary-key type
+     * @param <N> generated creation-input type
+     * @return identified snapshots in input order
+     */
+    <E, K, N> Batch<E> createMultiple(GeneratedEntityType<M, E, K, N> type, Batch<N> inputs);
+
+    /**
      * Inserts one entity and returns the detached snapshot verified against PostgreSQL's {@code RETURNING} row.
      *
      * @param type generated mapping for the entity

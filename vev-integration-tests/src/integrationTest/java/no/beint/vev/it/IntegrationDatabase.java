@@ -56,6 +56,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : identitySchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -68,7 +73,48 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity");
+        }
+    }
+
+    void identityMode(String mode) throws SQLException {
+        if (!List.of("ALWAYS", "BY DEFAULT").contains(mode)) throw new IllegalArgumentException(mode);
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            for (String table : List.of("identity_entry", "identity_counter", "identity_event", "kotlin_identity")) {
+                statement.execute("ALTER TABLE vev_it." + table + " ALTER COLUMN id SET GENERATED " + mode);
+            }
+        }
+    }
+
+    void identitySequenceVariant(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("REVOKE ALL ON SEQUENCE vev_it.identity_event_id_seq FROM vev_it_app");
+            statement.execute("GRANT USAGE ON SEQUENCE vev_it.identity_event_id_seq TO vev_it_app");
+            statement.execute("ALTER SEQUENCE vev_it.identity_event_id_seq AS smallint INCREMENT 1 MINVALUE 1 MAXVALUE 32767 START 1 NO CYCLE CACHE 1");
+            String mutation = switch (variant) {
+                case "valid" -> null;
+                case "increment" -> "ALTER SEQUENCE vev_it.identity_event_id_seq INCREMENT 2";
+                case "minimum" -> "ALTER SEQUENCE vev_it.identity_event_id_seq MINVALUE 0";
+                case "maximum" -> "ALTER SEQUENCE vev_it.identity_event_id_seq MAXVALUE 32000";
+                case "start" -> "ALTER SEQUENCE vev_it.identity_event_id_seq START 2";
+                case "cycle" -> "ALTER SEQUENCE vev_it.identity_event_id_seq CYCLE";
+                case "type" -> "ALTER SEQUENCE vev_it.identity_event_id_seq AS bigint";
+                case "missingUsage" -> "REVOKE USAGE ON SEQUENCE vev_it.identity_event_id_seq FROM vev_it_app";
+                case "select" -> "GRANT SELECT ON SEQUENCE vev_it.identity_event_id_seq TO vev_it_app";
+                case "update" -> "GRANT UPDATE ON SEQUENCE vev_it.identity_event_id_seq TO vev_it_app";
+                case "grantOption" -> "GRANT USAGE ON SEQUENCE vev_it.identity_event_id_seq TO vev_it_app WITH GRANT OPTION";
+                case "cache" -> "ALTER SEQUENCE vev_it.identity_event_id_seq CACHE 10";
+                default -> throw new IllegalArgumentException(variant);
+            };
+            if (mutation != null) statement.execute(mutation);
+        }
+    }
+
+    void restartSmallIdentity(int next) throws SQLException {
+        try (Connection connection = adminConnection(); PreparedStatement statement = connection.prepareStatement(
+                "SELECT pg_catalog.setval('vev_it.identity_event_id_seq'::pg_catalog.regclass, ?, false)")) {
+            statement.setInt(1, next);
+            statement.execute();
         }
     }
 
@@ -141,10 +187,12 @@ final class IntegrationDatabase {
              Statement statement = connection.createStatement()) {
             if (enabled) {
                 statement.execute("ALTER TABLE vev_it.work_item SET UNLOGGED");
+                statement.execute("ALTER TABLE vev_it.identity_entry SET UNLOGGED");
             }
             statement.execute("ALTER TABLE vev_it.account SET " + (enabled ? "UNLOGGED" : "LOGGED"));
             if (!enabled) {
                 statement.execute("ALTER TABLE vev_it.work_item SET LOGGED");
+                statement.execute("ALTER TABLE vev_it.identity_entry SET LOGGED");
             }
         }
     }
@@ -822,6 +870,42 @@ final class IntegrationDatabase {
                 }
             }
         }
+    }
+
+    private static List<String> identitySchemaStatements() {
+        var statements = new java.util.ArrayList<String>();
+        for (String table : List.of("identity_entry", "identity_counter", "identity_event", "kotlin_identity")) {
+            String idType = (table.equals("identity_entry") || table.equals("kotlin_identity")) ? "bigint" : table.equals("identity_counter") ? "integer" : "smallint";
+            String values = switch (table) {
+                case "identity_entry" -> ", version smallint NOT NULL, label varchar(64) NOT NULL, code varchar(64), account_id uuid"
+                        + ", CONSTRAINT identity_entry_code_key UNIQUE (tenant_id, code)"
+                        + ", CONSTRAINT identity_entry_account_fk FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account(tenant_id, id)";
+                case "identity_counter" -> ", version integer NOT NULL";
+                case "kotlin_identity" -> ", version bigint NOT NULL, label varchar(64) NOT NULL, note varchar(64)";
+                default -> ", message varchar(64)";
+            };
+            String mutable = switch (table) {
+                case "identity_entry" -> "version, label, code, account_id";
+                case "identity_counter" -> "version";
+                case "kotlin_identity" -> "version, label, note";
+                default -> "message";
+            };
+            statements.add("CREATE TABLE vev_it." + table + "(id " + idType
+                    + " GENERATED ALWAYS AS IDENTITY, tenant_id integer NOT NULL" + values + ", PRIMARY KEY (tenant_id, id))");
+            statements.add("ALTER TABLE vev_it." + table + " OWNER TO " + OWNER_ROLE);
+            statements.add("ALTER TABLE vev_it." + table + " ENABLE ROW LEVEL SECURITY");
+            statements.add("ALTER TABLE vev_it." + table + " FORCE ROW LEVEL SECURITY");
+            statements.add("CREATE POLICY " + table + "_tenant ON vev_it." + table
+                    + " FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer)"
+                    + " WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)");
+            statements.add("GRANT SELECT ON vev_it." + table + " TO " + APPLICATION_USER);
+            statements.add("GRANT INSERT (id, tenant_id, " + mutable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
+            if (!table.equals("identity_event")) {
+                statements.add("GRANT UPDATE (" + mutable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
+            }
+            statements.add("GRANT USAGE ON SEQUENCE vev_it." + table + "_id_seq TO " + APPLICATION_USER);
+        }
+        return statements;
     }
 
     private static List<String> schemaStatements() {

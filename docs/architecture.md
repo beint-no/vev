@@ -32,7 +32,7 @@ outside the accepted snapshot contract.
 
 A mapped record returned by the facade is an ordinary detached snapshot. Vev does not promise that two reads of the same row return the same Java object. Mutation of that object does not schedule a database update. Writes occur only through explicit operations backed by generated plans.
 
-With the current immutable record profile, the facade can perform assigned-value insert, including a homogeneous bounded batch. Insert is permitted only because the verified schema forbids generated/default values, triggers, and rewrite rules; Vev compares every returned database snapshot with its input and prevents commit on a mismatch. The facade cannot safely discard the replacement state or explicit outcome of update or refresh, so those operations fail before SQL. Physical delete and create-capable upsert are absent from the native API and rejected by the facade. The native typed API returns the verified snapshot from insert and an exhaustive applied/missing/conflict result from a single versioned update.
+With the current immutable record profile, the facade can perform assigned-value insert, including a homogeneous bounded batch. Insert is permitted only because its assigned-ID capability forbids generated/default values, and the verified schema forbids user triggers and rewrite rules; Vev compares every returned database snapshot with its input and prevents commit on a mismatch. The facade cannot safely discard the replacement state or explicit outcome of update or refresh, so those operations fail before SQL. Physical delete and create-capable upsert are absent from the native API and rejected by the facade. The native typed API returns the verified snapshot from insert and an exhaustive applied/missing/conflict result from a single versioned update.
 
 Native `insertMultiple` is one fixed set-based PostgreSQL statement: one typed array per column is expanded with ordinality, inserted, returned, restored to input order, and snapshot-verified. Duplicate keys fail before SQL. Native `updateMultiple` uses one fixed typed-array statement too. A materialized preflight must match every tenant, identifier, and expected version before its data-modifying CTE can update any row. Results are restored to input order and every non-version scalar plus the exact one-step version transition is verified. Duplicate keys fail before SQL; a stale, missing, malformed, or unexpectedly returned member poisons and rolls back the complete lexical transaction.
 
@@ -106,3 +106,11 @@ One optimistic update is classified atomically against one PostgreSQL command sn
 Selected Jakarta annotations are reused as nonconforming source metadata; they are not evidence that the record is a Jakarta entity and are not Vev's runtime architecture. Future adapters may interpret other metadata formats, but each adapter must produce the same closed intermediate model and the same rejection guarantees.
 
 Hibernate compatibility is a migration concern, not a runtime dependency. Vev does not load Hibernate metadata, implement Hibernate SPIs, or claim session-semantic equivalence.
+
+## Identity creation
+
+[Generated identity inputs](generated-identifiers.md) are separate from persisted snapshots.
+The processor grants either assigned insertion or database-generated creation.
+Creation obtains tenant state from the lexical scope, correlates each generated ID
+with an input ordinal, and returns a new snapshot. Verified sequence OIDs belong to
+each database runtime; a shared immutable model contains no database-local OIDs.

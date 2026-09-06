@@ -227,6 +227,9 @@ public final class PgModel<M, T> {
             throw new IllegalArgumentException(
                     "Entity IDs require an equality-stable Integer, Long, Short, String, or UUID codec");
         }
+        if (plan.generatedIdentity() && !Set.of(Short.class, Integer.class, Long.class).contains(plan.keyType())) {
+            throw new IllegalArgumentException("Generated identity requires a Short, Integer, or Long codec");
+        }
         if (tenant.codec() != plan.tenantCodec() || !tenant.name().equals(plan.tenantColumn())) {
             throw new IllegalArgumentException(
                     "Entity tenant metadata does not match its tenant codec: " + plan.logicalName());

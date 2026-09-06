@@ -428,7 +428,7 @@ final class VevProcessorTest {
                 recordSource(validTable(), validComponents().replace(
                         "@Id @Column(name = \"id\", nullable = false) Long id",
                         "@Id @GeneratedValue(strategy = GenerationType.IDENTITY) @Column(name = \"id\", nullable = false) UUID id"), ""),
-                "@GeneratedValue is forbidden"));
+                "PostgreSQL IDENTITY requires a Short, Integer, or Long identifier"));
         cases.put("association", new NegativeCase(
                 recordSource(validTable(), validComponents().replace(
                         "@Column(name = \"display_name\", nullable = false, length = 255)",
@@ -560,6 +560,68 @@ final class VevProcessorTest {
         assertTrue(compilation.diagnostics().contains(
                 "PostgreSQL index ledger.shared_value_idx collides with a mapped relation"),
                 compilation.diagnostics());
+    }
+
+    @Test
+    void identityMappingsGenerateTypedCreationInputsForSourceAndBinaryRecords() throws IOException {
+        for (String keyType : List.of("short", "int", "long", "Short", "Integer", "Long")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.computeIfPresent("example/Account.java", (path, source) -> source
+                    .replace("Long id", keyType + " id")
+                    .replace("@Id @Column", "@Id @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY) @Column"));
+            Compilation source = compile(sources);
+            assertTrue(source.success(), source.diagnostics());
+            String plan = source.generated("example/AccountVev.java");
+            assertTrue(plan.contains("public record New(java.lang.String displayName, java.math.BigDecimal balance, java.lang.String alias)"), plan);
+            assertFalse(plan.contains("AssignedEntityType"), plan);
+            assertTrue(source.manifest("example.BillingModel").contains("\"sequenceOwnership\": \"INTERNAL\""));
+            assertNotEquals(compile(positiveSources()).manifest("example.BillingModel"), source.manifest("example.BillingModel"));
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(binary.success(), binary.diagnostics());
+            assertEquals(plan, binary.generated("example/AccountVev.java"));
+            assertEquals(source.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+        }
+    }
+
+    @Test
+    void identityMappingsRejectAdjacentGeneratorShapesAndAssignedInsertion() throws IOException {
+        for (String annotation : List.of("@jakarta.persistence.GeneratedValue",
+                "@jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.AUTO)",
+                "@jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.SEQUENCE)",
+                "@jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.TABLE)",
+                "@jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.UUID)",
+                "@jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY, generator = \"custom\")")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@Id @Column", "@Id " + annotation + " @Column"));
+            Compilation result = compile(sources);
+            assertFalse(result.success(), annotation);
+            assertTrue(result.diagnostics().contains("explicit strategy = IDENTITY"), result.diagnostics());
+        }
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@Id @Column",
+                "@Id @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY) @Column"));
+        String usage = """
+                package example;
+                public final class IdentityUse {
+                    public static void use(no.beint.vev.WriteEntities<BillingModelVev.Model> entities, Account snapshot) {
+                        var input = new AccountVev.New("created", new java.math.BigDecimal("1.00"), null);
+                        Account result = entities.create(AccountVev.INSTANCE, input);
+                        entities.createMultiple(AccountVev.INSTANCE, no.beint.vev.Batch.one(input));
+                        OPERATION
+                    }
+                }
+                """;
+        for (String operation : List.of("", "entities.insert(AccountVev.INSTANCE, snapshot);",
+                "entities.insertMultiple(AccountVev.INSTANCE, no.beint.vev.Batch.one(snapshot));",
+                "entities.create(AccountVev.INSTANCE, snapshot);",
+                "entities.create(AuditEventVev.INSTANCE, input);")) {
+            sources.put("example/IdentityUse.java", usage.replace("OPERATION", operation));
+            Compilation result = compile(sources);
+            assertEquals(operation.isEmpty(), result.success(), operation + ": " + result.diagnostics());
+        }
     }
 
     @Test
