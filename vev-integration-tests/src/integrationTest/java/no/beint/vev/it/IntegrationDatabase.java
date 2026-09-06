@@ -77,6 +77,38 @@ final class IntegrationDatabase {
         }
     }
 
+    void verifyCheckExpressionCatalog() throws SQLException {
+        try (Connection connection = adminConnection()) {
+            no.beint.vev.pg.CheckCatalogProbe.verify(connection);
+        }
+    }
+
+    void identityEntryCheck(String variant) throws SQLException {
+        String check = switch (variant) {
+            case "valid", "renamed", "unvalidated", "unenforced", "noinherit", "extra" -> "length(btrim(label)) > 0";
+            case "weakened" -> "length(btrim(label)) >= 0";
+            case "unsafe" -> "length(btrim(label)) > 0 AND current_setting('application_name') IS NOT NULL";
+            case "missing" -> null;
+            default -> throw new IllegalArgumentException(variant);
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT IF EXISTS identity_entry_label_check");
+            statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT IF EXISTS renamed_label_check");
+            statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT IF EXISTS extra_label_check");
+            if (check != null) {
+                String name = variant.equals("renamed") ? "renamed_label_check" : "identity_entry_label_check";
+                String suffix = switch (variant) {
+                    case "unvalidated" -> " NOT VALID";
+                    case "unenforced" -> " NOT ENFORCED";
+                    case "noinherit" -> " NO INHERIT";
+                    default -> "";
+                };
+                statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT " + name + " CHECK (" + check + ")" + suffix);
+                if (variant.equals("extra")) statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT extra_label_check CHECK (label IS NOT NULL)");
+            }
+        }
+    }
+
     void identityMode(String mode) throws SQLException {
         if (!List.of("ALWAYS", "BY DEFAULT").contains(mode)) throw new IllegalArgumentException(mode);
         try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
@@ -931,12 +963,17 @@ final class IntegrationDatabase {
         for (String table : List.of("identity_entry", "identity_counter", "identity_event", "kotlin_identity")) {
             String idType = (table.equals("identity_entry") || table.equals("kotlin_identity")) ? "bigint" : table.equals("identity_counter") ? "integer" : "smallint";
             String values = switch (table) {
-                case "identity_entry" -> ", version smallint NOT NULL, label varchar(64) NOT NULL, code varchar(64), account_id uuid"
+                case "identity_entry" -> ", version smallint NOT NULL"
+                        + java.util.stream.IntStream.range(0, 67).mapToObj(index -> ", retired_" + index + " integer")
+                                .collect(java.util.stream.Collectors.joining())
+                        + ", label varchar(64) NOT NULL, code varchar(64), account_id uuid"
+                        + ", CONSTRAINT identity_entry_label_check CHECK (length(btrim(label)) > 0)"
                         + ", CONSTRAINT identity_entry_code_key UNIQUE (tenant_id, code)"
                         + ", CONSTRAINT identity_entry_id_tenant_key UNIQUE (id, tenant_id)"
                         + ", CONSTRAINT identity_entry_account_fk FOREIGN KEY (account_id, tenant_id) REFERENCES vev_it.account(id, tenant_id)";
                 case "identity_counter" -> ", version integer NOT NULL";
-                case "kotlin_identity" -> ", version bigint NOT NULL, label varchar(64) NOT NULL, note varchar(64)";
+                case "kotlin_identity" -> ", version bigint NOT NULL, label varchar(64) NOT NULL, note varchar(64)"
+                        + ", CONSTRAINT kotlin_identity_label_check CHECK (length(label) > 0)";
                 default -> ", message varchar(64), entry_id bigint"
                         + ", CONSTRAINT identity_event_entry_fk FOREIGN KEY (entry_id, tenant_id) REFERENCES vev_it.identity_entry(id, tenant_id)";
             };
@@ -950,6 +987,12 @@ final class IntegrationDatabase {
                     + " GENERATED ALWAYS AS IDENTITY, tenant_id integer NOT NULL" + values + ", PRIMARY KEY ("
                     + (table.equals("kotlin_identity") ? "tenant_id, id" : table.equals("identity_counter") ? "id, tenant_id" : "id") + "))");
             statements.add("ALTER TABLE vev_it." + table + " OWNER TO " + OWNER_ROLE);
+            if (table.equals("identity_entry")) {
+                // Retired migration columns leave real attnum values above the generated record-width bound.
+                for (int retired = 0; retired < 67; retired++) {
+                    statements.add("ALTER TABLE vev_it.identity_entry DROP COLUMN retired_" + retired);
+                }
+            }
             if (!table.equals("kotlin_identity")) {
                 statements.add("CREATE INDEX " + table + "_tenant_id_idx ON vev_it." + table + " (tenant_id, id)");
             }

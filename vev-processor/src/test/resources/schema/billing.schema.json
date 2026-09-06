@@ -25,6 +25,7 @@
         {"name": "account_alias_idx", "method": "btree", "unique": false, "columns": ["tenant_id", "alias", "id"]}
       ],
       "uniqueConstraints": [],
+      "checkConstraints": [],
       "references": [],
       "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": "tenant_id", "setting": "vev.tenant_id"},
       "privileges": {"select": true, "insert": ["id", "tenant_id", "version", "display_name", "balance", "alias"], "update": ["version", "display_name", "balance", "alias"], "delete": false}
@@ -42,6 +43,7 @@
       "primaryKey": ["tenant_id", "id"],
       "indexes": [],
       "uniqueConstraints": [],
+      "checkConstraints": [],
       "references": [],
       "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": "tenant_id", "setting": "vev.tenant_id"},
       "privileges": {"select": true, "insert": ["id", "tenant_id", "occurred_at"], "update": [], "delete": false}

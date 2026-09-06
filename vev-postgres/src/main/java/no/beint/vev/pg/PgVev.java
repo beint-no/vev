@@ -417,6 +417,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 || !"UTF8".equals(postgres.getParameterStatus("client_encoding"))
                 || !"UTF8".equals(postgres.getParameterStatus("server_encoding"))
                 || !"on".equals(postgres.getParameterStatus("standard_conforming_strings"))
+                || !"ISO, MDY".equals(postgres.getParameterStatus("DateStyle"))
+                || !"postgres".equals(postgres.getParameterStatus("IntervalStyle"))
                 || !"on".equals(postgres.getParameterStatus("integer_datetimes"))) {
             throw new IllegalStateException(
                     "Vev requires a dedicated pgjdbc connection with a trusted immutable session baseline");
@@ -455,6 +457,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             String expectedTenant,
             boolean readOnly,
             DatabaseIdentity identity) throws SQLException {
+        requireTrustedSessionBaseline(connection);
         if (connection.getNetworkTimeout() != Math.toIntExact(settings.networkTimeout().toMillis())) {
             throw new IllegalStateException("PostgreSQL connection escaped Vev's network deadline");
         }
@@ -890,6 +893,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyTenantIsolation(Connection connection) throws SQLException {
+        PgCheckCatalog checkCatalog = new PgCheckCatalog(connection);
         String sql = """
                 SELECT c.relkind,
                        c.relpersistence,
@@ -996,7 +1000,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 verifyColumns(connection, plan);
                 verifyColumnPrivileges(connection, plan);
                 verifyPrimaryKey(connection, plan);
-                verifyStructuralConstraints(connection, plan);
+                verifyStructuralConstraints(connection, checkCatalog, plan);
                 verifyPolicy(connection, plan);
             }
         }
@@ -1257,10 +1261,11 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         }
     }
 
-    private void verifyStructuralConstraints(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
+    private void verifyStructuralConstraints(Connection connection, PgCheckCatalog checkCatalog, PgPlan<M, ?, ?, T> plan) throws SQLException {
         PgIndexes.verify(connection, plan);
 
         PgReferences.verify(connection, model, plan);
+        if (!plan.checkConstraints().isEmpty()) PgChecks.verify(connection, checkCatalog, plan);
 
         String executableConstraintSql = """
                 SELECT pg_catalog.count(*) FILTER (
@@ -1286,7 +1291,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             try (ResultSet resultSet = statement.executeQuery()) {
                 long requiredNotNullConstraints = plan.columns().stream().filter(column -> !column.nullable()).count();
                 if (!resultSet.next()
-                        || resultSet.getInt(1) != 0
+                        || resultSet.getInt(1) != plan.checkConstraints().size()
                         || resultSet.getLong(2) != requiredNotNullConstraints
                         || resultSet.getInt(3) != 1
                         || !resultSet.getBoolean(4)

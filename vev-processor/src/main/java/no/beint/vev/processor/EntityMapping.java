@@ -15,6 +15,7 @@ record EntityMapping(
         String tableSql,
         List<PropertyMapping> properties,
         List<UniqueMapping> uniqueConstraints,
+        List<CheckMapping> checkConstraints,
         PropertyMapping id,
         PropertyMapping tenant,
         PropertyMapping version,

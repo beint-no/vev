@@ -465,6 +465,45 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void checkCatalogAcceptsReviewedRowLocalExpressionsAndRejectsUnapprovedBehaviorWithoutExecution() throws SQLException {
+        database.verifyCheckExpressionCatalog();
+    }
+
+    @Test
+    void bootstrapRequiresExactDeclaredValidatedAndEnforcedCheckConstraints() throws SQLException {
+        for (String variant : List.of("missing", "renamed", "weakened", "unvalidated", "unenforced", "noinherit", "extra", "unsafe")) {
+            try {
+                database.identityEntryCheck(variant);
+                IllegalStateException failure = assertThrows(IllegalStateException.class,
+                        () -> runtime(database.applicationDataSource()), variant);
+                assertTrue(failure.getMessage().contains("tenant isolation verification"),
+                        variant + ": " + failure.getMessage());
+            } finally {
+                database.identityEntryCheck("valid");
+            }
+        }
+        runtime(database.applicationDataSource());
+    }
+
+    @Test
+    void checkViolationsRollBackEntireCreationBatchAndEarlierWritesEvenWhenCaught() {
+        UUID earlier = id("check-earlier-write");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "before-check@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE,
+                    Batch.copyOf(List.of(new IdentityEntryVev.New("valid", null, null), new IdentityEntryVev.New("   ", null, null)))));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE, new QueryLimit(10)))).values().isEmpty());
+        var created = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("valid", null, null)));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> tx.entities().update(IdentityEntryVev.INSTANCE,
+                new IdentityEntry(created.id(), 7, created.version(), "", null, null))));
+        assertEquals(created, vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(created.id()))).orElseThrow());
+    }
+
+    @Test
     void identityConstraintFailureRollsBackBatchAndEarlierWritesButNotSequenceAllocation() {
         var committed = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
                 new IdentityEntryVev.New("committed", "unique", null)));
@@ -2014,6 +2053,45 @@ final class VevPostgresIntegrationTest {
             assertEquals(0L, database.hostileBootstrapTripwireCount());
         } finally {
             database.removeHostileBootstrapOperator();
+        }
+    }
+
+    @Test
+    void displaySettingsAreVerifiedAtBootstrapCheckoutAndBeforeCommit() throws SQLException {
+        for (String setting : List.of("DateStyle = 'ISO, DMY'", "IntervalStyle = 'iso_8601'")) {
+            try (Connection connection = database.applicationDataSource().getConnection()) {
+                try (var statement = connection.createStatement()) {
+                    statement.execute("SET " + setting);
+                }
+                DataSource changed = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                        (proxy, method, arguments) -> nonClosing(connection));
+                assertThrows(IllegalStateException.class, () -> runtime(changed));
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var runtime = new PgVev<>(firstCleanThenRetainedConnection(database.applicationDataSource(), connection),
+                        IntegrationModelVev.POSTGRES, authority);
+                var invocations = new AtomicInteger();
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    invocations.incrementAndGet();
+                    return null;
+                }));
+                assertEquals(0, invocations.get());
+            }
+            try (Connection connection = database.applicationDataSource().getConnection()) {
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var runtime = new PgVev<>(firstCleanThenRetainedConnection(database.applicationDataSource(), connection),
+                        IntegrationModelVev.POSTGRES, authority);
+                UUID key = id("display-" + setting);
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, account(key, 7, 0, "display@example.test", "1.0000"));
+                    try (var statement = connection.createStatement()) {
+                        statement.execute("SET LOCAL " + setting);
+                    } catch (SQLException failure) {
+                        throw new AssertionError(failure);
+                    }
+                    return null;
+                }));
+                assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(key))).isEmpty());
+            }
         }
     }
 

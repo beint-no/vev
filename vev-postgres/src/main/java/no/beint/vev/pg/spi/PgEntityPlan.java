@@ -104,6 +104,15 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     }
 
     /**
+     * Returns the complete set of declared PostgreSQL check constraints.
+     *
+     * @return immutable checks, verified without evaluating their expressions
+     */
+    default List<no.beint.vev.pg.PgCheck> checkConstraints() {
+        return List.of();
+    }
+
+    /**
      * Reads one mapped value from a detached entity snapshot.
      *
      * @param entity entity snapshot of the exact generated type

@@ -288,6 +288,83 @@ final class VevProcessorTest {
     }
 
     @Test
+    void compilesNamedTableAndColumnChecksWithExactEscapingAndBinaryParity() throws IOException {
+        String expression = "\nCASE\n    WHEN (display_name = 'quote\"; -- \\" + "u000a\t🙂'::text) THEN true\n    ELSE false\nEND";
+        String annotation = "@jakarta.persistence.CheckConstraint(name = \"account_name_check\", constraint = " + javaLiteral(expression) + ")";
+        var tableSources = positiveSources();
+        tableSources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@Table(name = \"account\", schema = \"ledger\")",
+                        "@Table(name = \"account\", schema = \"ledger\", check = " + annotation + ")"));
+        Compilation table = compile(tableSources);
+        assertTrue(table.success(), table.diagnostics());
+        var columnSources = positiveSources();
+        columnSources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@Column(name = \"display_name\",", "@Column(check = " + annotation + ", name = \"display_name\","));
+        Compilation column = compile(columnSources);
+        assertTrue(column.success(), column.diagnostics());
+        assertEquals(table.generated("example/AccountVev.java"), column.generated("example/AccountVev.java"));
+        assertEquals(table.manifest("example.BillingModel"), column.manifest("example.BillingModel"));
+        assertTrue(table.generated("example/AccountVev.java").contains("new no.beint.vev.pg.PgCheck(\"account_name_check\""));
+        String model = tableSources.remove("example/BillingModel.java");
+        Compilation dependency = compile(tableSources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(table.generated("example/AccountVev.java"), binary.generated("example/AccountVev.java"));
+        assertEquals(table.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+        try (var loader = new java.net.URLClassLoader(new java.net.URL[]{table.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+            Object instance = loader.loadClass("example.AccountVev").getField("INSTANCE").get(null);
+            var plan = (no.beint.vev.pg.spi.PgEntityPlan<?, ?, ?, ?>) instance;
+            assertEquals(expression, plan.checkConstraints().getFirst().expression());
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(failure);
+        }
+    }
+
+    @Test
+    void checkOrderingIsDeterministicAndDefinitionChangesInvalidateSchemaIdentity() throws IOException {
+        var sources = positiveSources();
+        String first = "@jakarta.persistence.CheckConstraint(name = \"a_check\", constraint = \"(id > 0)\")";
+        String second = "@jakarta.persistence.CheckConstraint(name = \"b_check\", constraint = \"(version >= 0)\")";
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                "@Table(name = \"account\", schema = \"ledger\")", "@Table(name = \"account\", schema = \"ledger\", check = {" + second + ", " + first + "})"));
+        Compilation original = compile(sources);
+        assertTrue(original.success(), original.diagnostics());
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace(second + ", " + first, first + ", " + second));
+        Compilation reordered = compile(sources);
+        assertTrue(reordered.success(), reordered.diagnostics());
+        assertEquals(original.manifest("example.BillingModel"), reordered.manifest("example.BillingModel"));
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("id > 0", "id >= 0"));
+        Compilation changed = compile(sources);
+        assertTrue(changed.success(), changed.diagnostics());
+        assertNotEquals(original.generated("example/BillingModelVev.java"), changed.generated("example/BillingModelVev.java"));
+    }
+
+    @Test
+    void rejectsCheckOptionsUnsafeNamesDuplicatesAndUnboundedExpressions() throws IOException {
+        String valid = "@jakarta.persistence.CheckConstraint(name = \"account_check\", constraint = \"(id > 0)\")";
+        for (String metadata : List.of(valid.replace("account_check", "unsafe.name"), valid.replace("(id > 0)", ""),
+                valid.replace("(id > 0)", "x".repeat(4097)), valid.replace("constraint =", "options = \"NOT VALID\", constraint ="),
+                valid + ", " + valid, String.join(", ", java.util.Collections.nCopies(33, valid)))) {
+            var sources = positiveSources();
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                    "@Table(name = \"account\", schema = \"ledger\")", "@Table(name = \"account\", schema = \"ledger\", check = {" + metadata + "})"));
+            Compilation result = compile(sources);
+            assertFalse(result.success(), metadata);
+            assertFalse(Files.exists(result.classesDirectory().resolve("META-INF/vev/example.BillingModel.schema.json")));
+        }
+        var collision = referenceSources();
+        collision.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                "@Table(name = \"account\", schema = \"ledger\")", "@Table(name = \"account\", schema = \"ledger\", check = "
+                        + valid.replace("account_check", "account_audit_fk") + ")"));
+        assertFalse(compile(collision).success());
+    }
+
+    private static String javaLiteral(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t") + "\"";
+    }
+
+    @Test
     void referenceColumnOrderIsExplicitAndStableAcrossCompilationBoundaries() throws IOException {
         var sources = referenceSources();
         Compilation tenantFirst = compile(sources);
@@ -803,6 +880,32 @@ final class VevProcessorTest {
                 compilation.diagnostics());
         assertTrue(compilation.diagnostics().contains("TenantScope<example.FirstModelVev.Model"),
                 compilation.diagnostics());
+    }
+
+    @Test
+    void rejectsAggregateCheckMetadataBeforeGeneratingAnyArtifact() throws IOException {
+        var sources = new LinkedHashMap<String, String>();
+        sources.put("example/CheckText.java", "package example; public final class CheckText { public static final String VALUE = \""
+                + "x".repeat(no.beint.vev.pg.PgCheck.MAXIMUM_EXPRESSION_LENGTH) + "\"; }");
+        String checks = java.util.stream.IntStream.range(0, no.beint.vev.pg.PgCheck.MAXIMUM_PER_ENTITY)
+                .mapToObj(index -> "@jakarta.persistence.CheckConstraint(name = \"check_" + index + "\", constraint = CheckText.VALUE)")
+                .collect(java.util.stream.Collectors.joining(", "));
+        var entities = new ArrayList<String>();
+        int count = no.beint.vev.pg.PgCheck.MAXIMUM_MODEL_CHARACTERS
+                / (no.beint.vev.pg.PgCheck.MAXIMUM_PER_ENTITY * no.beint.vev.pg.PgCheck.MAXIMUM_EXPRESSION_LENGTH) + 1;
+        for (int index = 0; index < count; index++) {
+            String name = "CheckEntity" + index;
+            sources.put("example/" + name + ".java", appendOnlyEntitySource(name, "check_entity_" + index)
+                    .replace("schema = \"ledger\")", "schema = \"ledger\", check = {" + checks + "})"));
+            entities.add(name + ".class");
+        }
+        sources.put("example/CheckModel.java", "package example; @no.beint.vev.VevModel(entities = {"
+                + String.join(", ", entities) + "}) public final class CheckModel {}");
+        Compilation result = compile(sources);
+        assertFalse(result.success());
+        assertTrue(result.diagnostics().contains("retained check-expression budget"), result.diagnostics());
+        assertFalse(Files.exists(result.classesDirectory().resolve("META-INF/vev/example.CheckModel.schema.json")));
+        assertFalse(Files.exists(result.generatedDirectory().resolve("example/CheckEntity0Vev.java")));
     }
 
     @Test

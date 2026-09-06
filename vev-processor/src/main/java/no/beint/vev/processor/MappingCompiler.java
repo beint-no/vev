@@ -166,6 +166,7 @@ final class MappingCompiler {
             return;
         }
         String fingerprint = fingerprint(modelDeclaration.getQualifiedName().toString(), entities);
+        if (invalid) return;
         CompiledModel model = new CompiledModel(
                 modelDeclaration,
                 modelPackage,
@@ -187,6 +188,11 @@ final class MappingCompiler {
         for (EntityMapping entity : entities) {
             Set<String> names = new HashSet<>();
             entity.uniqueConstraints().forEach(unique -> names.add(unique.name()));
+            for (CheckMapping check : entity.checkConstraints()) {
+                if (!names.add(check.name())) {
+                    error(entity.declaration(), "Duplicate constraint name in one entity: " + check.name());
+                }
+            }
             for (PropertyMapping property : entity.properties()) {
                 if (!property.reference()) {
                     continue;
@@ -306,7 +312,6 @@ final class MappingCompiler {
             error(entity, "PostgreSQL catalogs cannot be selected per entity; @Table.catalog must be empty");
         }
         rejectNonEmptyList(entity, table, "indexes", "@Table.indexes");
-        rejectNonEmptyList(entity, table, "check", "@Table.check");
         rejectNonEmptyString(entity, table, "comment", "@Table.comment");
         rejectNonEmptyString(entity, table, "type", "@Table.type");
         rejectNonEmptyString(entity, table, "options", "@Table.options");
@@ -326,6 +331,7 @@ final class MappingCompiler {
         }
         validateIndexes(entity, properties);
         List<UniqueMapping> uniqueConstraints = compileUniqueConstraints(entity, table, properties);
+        List<CheckMapping> checkConstraints = compileCheckConstraints(entity, table);
         validateMaterializedResultBudget(entity, properties);
         if (!invalid && !sourceTypes.contains(entity.getQualifiedName().toString())) {
             try {
@@ -415,6 +421,7 @@ final class MappingCompiler {
                 tableSql,
                 List.copyOf(properties),
                 uniqueConstraints,
+                checkConstraints,
                 id,
                 tenant,
                 version,
@@ -454,7 +461,6 @@ final class MappingCompiler {
         rejectNonEmptyString(component, column, "columnDefinition", "@Column.columnDefinition");
         rejectNonEmptyString(component, column, "options", "@Column.options");
         rejectNonEmptyString(component, column, "comment", "@Column.comment");
-        rejectNonEmptyList(component, column, "check", "@Column.check");
         rejectNonDefaultInt(component, column, "secondPrecision", -1);
         boolean id = consistentAnnotation(component, annotationSources, ID) != null;
         boolean tenant = consistentAnnotation(component, annotationSources, TENANT_KEY) != null;
@@ -602,6 +608,47 @@ final class MappingCompiler {
                 referenceTarget,
                 generatedValue != null,
                 reference == null || booleanValue(reference, "tenantFirst"));
+    }
+
+    private List<CheckMapping> compileCheckConstraints(TypeElement entity, AnnotationMirror table) {
+        List<CheckMapping> result = new ArrayList<>();
+        collectChecks(entity, table, result);
+        for (RecordComponentElement component : entity.getRecordComponents()) {
+            collectChecks(component, consistentAnnotation(component, componentSources(entity, component), COLUMN), result);
+        }
+        result.sort(Comparator.comparing(CheckMapping::name));
+        return List.copyOf(result);
+    }
+
+    private void collectChecks(Element source, AnnotationMirror annotation, List<CheckMapping> result) {
+        AnnotationValue value = annotation == null ? null : annotationValue(annotation, "check");
+        if (value == null || !(value.getValue() instanceof List<?> checks)) return;
+        if (checks.size() + result.size() > 32) {
+            error(source, "An entity must not exceed 32 declared check constraints");
+            return;
+        }
+        for (Object entry : checks) {
+            if (!(entry instanceof AnnotationValue item) || !(item.getValue() instanceof AnnotationMirror check)) {
+                error(source, "Check constraints require explicit @CheckConstraint metadata");
+                continue;
+            }
+            Set<String> members = new HashSet<>();
+            for (ExecutableElement member : ElementFilter.methodsIn(check.getAnnotationType().asElement().getEnclosedElements())) {
+                members.add(member.getSimpleName().toString());
+            }
+            if (!members.equals(Set.of("name", "constraint", "options"))) {
+                error(source, "Unsupported @CheckConstraint annotation shape");
+            }
+            String name = stringValue(check, "name");
+            validateIdentifier(source, name, "check constraint");
+            rejectNonEmptyString(source, check, "options", "@CheckConstraint.options");
+            String expression = stringValue(check, "constraint");
+            if (expression.isBlank() || expression.length() > 4096 || expression.indexOf('\0') >= 0
+                    || expression.codePoints().anyMatch(codePoint -> codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+                error(source, "Check expression must be nonempty Unicode schema metadata of at most 4096 characters");
+            }
+            result.add(new CheckMapping(name, expression));
+        }
     }
 
     private List<UniqueMapping> compileUniqueConstraints(
@@ -1094,10 +1141,20 @@ final class MappingCompiler {
 
     private String fingerprint(String modelName, List<EntityMapping> entities) {
         StringBuilder canonical = new StringBuilder("vev-model-v4\n").append(modelName).append('\n');
+        int checkCharacters = 0;
         for (EntityMapping entity : entities) {
             canonical.append(entity.qualifiedName()).append('|')
                     .append(entity.tableSql()).append('|')
                     .append(entity.appendOnly()).append('\n');
+            for (CheckMapping check : entity.checkConstraints()) {
+                checkCharacters += check.expression().length();
+                if (checkCharacters > 16 * 1024 * 1024) {
+                    error(entity.declaration(), "Closed model exceeds the retained check-expression budget");
+                    return "";
+                }
+                canonical.append("check|").append(check.name()).append('|')
+                        .append(check.expression().length()).append('|').append(check.expression()).append('\n');
+            }
             if (!entity.primaryKeyShape().equals("TENANT_ID")) {
                 canonical.append("primaryKey|").append(entity.primaryKeyShape()).append('\n');
             }

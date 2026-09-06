@@ -77,7 +77,14 @@ public final class PgModel<M, T> {
         Set<String> mappedIndexes = new HashSet<>();
         Set<String> logicalNames = new HashSet<>();
         Class<T> discoveredTenantType = null;
+        int checkCharacters = 0;
         for (PgPlan<M, ?, ?, T> plan : snapshots) {
+            for (PgCheck check : plan.checkConstraints()) {
+                checkCharacters += check.expression().length();
+                if (checkCharacters > PgCheck.MAXIMUM_MODEL_CHARACTERS) {
+                    throw new IllegalArgumentException("Closed model exceeds the retained check-expression budget");
+                }
+            }
             validatePlan(plan);
             plan.installSql(PgSql.compile(plan));
             if (!identity.equals(plan.modelIdentity())) {
@@ -140,6 +147,11 @@ public final class PgModel<M, T> {
     private static void validateReferences(PgPlan<?, ?, ?, ?> source, Map<Class<?>, ? extends PgPlan<?, ?, ?, ?>> plans) {
         Set<String> names = new HashSet<>();
         source.uniqueConstraints().forEach(unique -> names.add(unique.name()));
+        for (PgCheck check : source.checkConstraints()) {
+            if (!names.add(check.name())) {
+                throw new IllegalArgumentException("Duplicate generated constraint name: " + source.logicalName());
+            }
+        }
         Set<Integer> columns = new HashSet<>();
         for (PgReference reference : source.references()) {
             if (!names.add(reference.name()) || !columns.add(reference.columnIndex())) {

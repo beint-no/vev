@@ -51,6 +51,7 @@ final class JavaSourceGenerator {
         appendIndexList(source, entity, modelMarker);
         appendReferences(source, entity);
         appendUniqueConstraints(source, entity);
+        appendCheckConstraints(source, entity);
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -131,6 +132,18 @@ final class JavaSourceGenerator {
         }
         source.append("            default -> throw new IndexOutOfBoundsException(columnIndex);\n")
                 .append("        };\n    }\n\n");
+    }
+
+    private void appendCheckConstraints(StringBuilder source, EntityMapping entity) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgCheck> __VEV_CHECKS = java.util.List.of(");
+        for (int index = 0; index < entity.checkConstraints().size(); index++) {
+            CheckMapping check = entity.checkConstraints().get(index);
+            source.append(index == 0 ? "\n" : ",\n")
+                    .append("            new no.beint.vev.pg.PgCheck(\"").append(escape(check.name()))
+                    .append("\", \"").append(escape(check.expression())).append("\")");
+        }
+        source.append(");\n\n");
+        method(source, "public java.util.List<no.beint.vev.pg.PgCheck> checkConstraints()", "return __VEV_CHECKS;");
     }
 
     private void appendUniqueConstraints(StringBuilder source, EntityMapping entity) {
@@ -293,7 +306,22 @@ final class JavaSourceGenerator {
     }
 
     private String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\\' -> result.append("\\\\");
+                case '"' -> result.append("\\\"");
+                case '\n' -> result.append("\\n");
+                case '\r' -> result.append("\\r");
+                default -> {
+                    if (character < 32 || character == 127) {
+                        result.append('\\').append(String.format(java.util.Locale.ROOT, "%03o", (int) character));
+                    } else result.append(character);
+                }
+            }
+        }
+        return result.toString();
     }
 
     private static final class SetHolder {

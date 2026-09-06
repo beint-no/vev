@@ -29,6 +29,7 @@ class PgPlan<M, E, K, T> {
     private final List<PgIndex<M, E, K, ?>> indexes;
     private final List<PgReference> references;
     private final List<PgUnique> uniqueConstraints;
+    private final List<PgCheck> checkConstraints;
     private final Class<?> creationType;
     private final no.beint.vev.VevPrimaryKey.Shape primaryKeyShape;
     private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
@@ -86,6 +87,14 @@ class PgPlan<M, E, K, T> {
             boundedUnique.add(Objects.requireNonNull(unique, "uniqueConstraint"));
         }
         this.uniqueConstraints = List.copyOf(boundedUnique);
+        List<PgCheck> boundedChecks = new ArrayList<>();
+        for (PgCheck check : Objects.requireNonNull(source.checkConstraints(), "checkConstraints")) {
+            if (boundedChecks.size() == PgCheck.MAXIMUM_PER_ENTITY) {
+                throw new IllegalArgumentException("Entity plan exceeds Vev's check-constraint bound");
+            }
+            boundedChecks.add(Objects.requireNonNull(check, "checkConstraint"));
+        }
+        this.checkConstraints = List.copyOf(boundedChecks);
         this.indexSql = new IdentityHashMap<>();
     }
 
@@ -130,6 +139,10 @@ class PgPlan<M, E, K, T> {
 
     List<PgUnique> uniqueConstraints() {
         return uniqueConstraints;
+    }
+
+    List<PgCheck> checkConstraints() {
+        return checkConstraints;
     }
 
     static PgPlan<?, ?, ?, ?> capture(PgEntityPlan<?, ?, ?, ?> source) {

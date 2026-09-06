@@ -128,6 +128,36 @@ final class PgModelBoundsTest {
 
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
             List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape) {
+        return plan(columns, unique, shape, List.of());
+    }
+
+    @Test
+    void capturesCheckMetadataAndRejectsDuplicatesAndHostileUnboundedLists() {
+        var checks = new java.util.ArrayList<>(List.of(new PgCheck("test_check", "(id > 0)")));
+        var source = plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks);
+        var model = new PgModel<>(IDENTITY, List.of(source));
+        checks.clear();
+        assertEquals(List.of(new PgCheck("test_check", "(id > 0)")), model.frozenPlans().getFirst().checkConstraints());
+        List<PgCheck> misleading = new AbstractList<>() {
+            @Override
+            public PgCheck get(int index) {
+                return new PgCheck("test_check", "true");
+            }
+
+            @Override
+            public int size() {
+                return Integer.MAX_VALUE;
+            }
+        };
+        for (List<PgCheck> invalid : List.of(misleading, List.of(new PgCheck("duplicate", "true"), new PgCheck("duplicate", "false")),
+                java.util.Collections.nCopies(33, new PgCheck("test_check", "true")))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, invalid))));
+        }
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks) {
         return new PgEntityPlan<>() {
             @Override
             public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
@@ -192,6 +222,11 @@ final class PgModelBoundsTest {
             @Override
             public List<PgUnique> uniqueConstraints() {
                 return unique;
+            }
+
+            @Override
+            public List<PgCheck> checkConstraints() {
+                return checks;
             }
 
             @Override

@@ -48,13 +48,17 @@ final class SchemaManifestGenerator {
                       "primaryKey": [%s],
                       "indexes": [%s],
                       "uniqueConstraints": [%s],
+                      "checkConstraints": [%s],
                       "references": [%s],
                       "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": %s, "setting": "vev.tenant_id"},
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": false}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
                 entity.appendOnly(), identity(entity), columns(entity.properties()), primaryKey(entity),
-                indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity), references(model, entity),
+                indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
+                entity.checkConstraints().stream().map(check -> "{\"name\": %s, \"expression\": %s}"
+                        .formatted(quote(check.name()), quote(check.expression()))).collect(Collectors.joining(", ")),
+                references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates);
     }

@@ -11,7 +11,8 @@ import java.util.UUID;
 @VevPrimaryKey(VevPrimaryKey.Shape.ID)
 @Table(name = "identity_entry", schema = "vev_it", uniqueConstraints = {
         @UniqueConstraint(name = "identity_entry_code_key", columnNames = {"tenant_id", "code"}),
-        @UniqueConstraint(name = "identity_entry_id_tenant_key", columnNames = {"id", "tenant_id"})})
+        @UniqueConstraint(name = "identity_entry_id_tenant_key", columnNames = {"id", "tenant_id"})},
+        check = @CheckConstraint(name = "identity_entry_label_check", constraint = "(length(btrim((label)::text)) > 0)"))
 public record IdentityEntry(
         @VevIndex(name = "identity_entry_tenant_id_idx")
         @Id @GeneratedValue(strategy = GenerationType.IDENTITY) @Column(name = "id", nullable = false) Long id,
