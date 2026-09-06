@@ -21,7 +21,8 @@ final class JavaSourceGenerator {
                         : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + modelMarker + ", "
                                 + entity.qualifiedName() + ", " + entity.id().boxedType() + ", "
                                 + entity.tenant().boxedType() + ", " + entity.version().boxedType() + ">")
-                .append(" {\n")
+                .append(", no.beint.vev.AssignedEntityType<").append(modelMarker).append(", ")
+                .append(entity.qualifiedName()).append(", ").append(entity.id().boxedType()).append("> {\n")
                 .append("    /** Singleton generated mapping plan for {@link ")
                 .append(entity.qualifiedName()).append("}. */\n")
                 .append("    public static final ").append(entity.simpleName()).append("Vev INSTANCE = new ")

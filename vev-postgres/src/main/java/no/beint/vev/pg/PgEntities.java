@@ -1,6 +1,7 @@
 package no.beint.vev.pg;
 
 import no.beint.vev.Batch;
+import no.beint.vev.AssignedEntityType;
 import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityKey;
 import no.beint.vev.EntityLookup;
@@ -223,7 +224,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     }
 
     @Override
-    public <E, K> E insert(EntityType<M, E, K> type, E entity) {
+    public <E, K> E insert(AssignedEntityType<M, E, K> type, E entity) {
         requireWrite();
         PgPlan<M, E, K, T> plan = plan(type);
         validateInsert(plan, entity);
@@ -240,7 +241,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     }
 
     @Override
-    public <E, K> Batch<E> insertMultiple(EntityType<M, E, K> type, Batch<E> entities) {
+    public <E, K> Batch<E> insertMultiple(AssignedEntityType<M, E, K> type, Batch<E> entities) {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgPlan<M, E, K, T> plan = plan(type);

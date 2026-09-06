@@ -516,7 +516,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     private <E, K> void insertTyped(PgEntityPlan<M, E, K, Tenant> plan, Object value) {
         E entity = requireInsertEntity(plan, value);
         insertDidNotCompleteVerified = true;
-        E inserted = entities.insert(plan, entity);
+        E inserted = entities.insert(requireAssigned(plan), entity);
         verifyInsertedSnapshot(plan, entity, inserted);
         insertDidNotCompleteVerified = false;
     }
@@ -532,7 +532,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         }
         Batch<E> input = Batch.copyOf(typedValues);
         insertDidNotCompleteVerified = true;
-        Batch<E> inserted = entities.insertMultiple(plan, input);
+        Batch<E> inserted = entities.insertMultiple(requireAssigned(plan), input);
         if (input.size() != inserted.size()) {
             throw newInsertSnapshotFailure(plan);
         }
@@ -540,6 +540,14 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
             verifyInsertedSnapshot(plan, input.get(index), inserted.get(index));
         }
         insertDidNotCompleteVerified = false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private <E, K> no.beint.vev.AssignedEntityType<M, E, K> requireAssigned(PgEntityPlan<M, E, K, Tenant> plan) {
+        if (!(plan instanceof no.beint.vev.AssignedEntityType<?, ?, ?> assigned)) {
+            throw new IllegalArgumentException("EntityAgent insertion requires a generated assigned-identifier capability");
+        }
+        return (no.beint.vev.AssignedEntityType<M, E, K>) assigned;
     }
 
     private <E, K> E requireInsertEntity(PgEntityPlan<M, E, K, Tenant> plan, Object value) {

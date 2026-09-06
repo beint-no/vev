@@ -563,6 +563,39 @@ final class VevProcessorTest {
     }
 
     @Test
+    void insertionRequiresTheAssignedIdentifierCapability() throws IOException {
+        String usage = """
+                package example;
+
+                public final class InsertUse {
+                    public static void insert(no.beint.vev.WriteEntities<BillingModelVev.Model> entities,
+                            CAPABILITY<BillingModelVev.Model, Account, Long> type, Account account) {
+                        entities.insert(type, account);
+                        entities.insertMultiple(type, no.beint.vev.Batch.copyOf(java.util.List.of(account)));
+                    }
+
+                    public static void generated(no.beint.vev.WriteEntities<BillingModelVev.Model> entities,
+                            Account account, AuditEvent audit) {
+                        insert(entities, AccountVev.INSTANCE, account);
+                        entities.insert(AuditEventVev.INSTANCE, audit);
+                    }
+                }
+                """;
+        for (String capability : List.of("AssignedEntityType", "EntityType")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.put("example/InsertUse.java", usage.replace("CAPABILITY", "no.beint.vev." + capability));
+            Compilation compilation = compile(sources);
+            if (capability.equals("AssignedEntityType")) {
+                assertTrue(compilation.success(), compilation.diagnostics());
+            } else {
+                assertFalse(compilation.success(), "Read capability unexpectedly permitted assigned insertion");
+                assertTrue(compilation.diagnostics().contains("insert"), compilation.diagnostics());
+                assertTrue(compilation.diagnostics().contains("insertMultiple"), compilation.diagnostics());
+            }
+        }
+    }
+
+    @Test
     void generatedModelMarkersRejectCrossModelEntityOperationsAtCompilation() throws IOException {
         Map<String, String> sources = new LinkedHashMap<>();
         sources.put("example/FirstModel.java", modelSource("FirstModel", "FirstEntity"));

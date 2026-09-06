@@ -20,7 +20,7 @@ public interface WriteEntities<M> extends ReadEntities<M> {
      * @param <K> primary-key type
      * @return inserted snapshot exactly matching the validated input
      */
-    <E, K> E insert(EntityType<M, E, K> type, E entity);
+    <E, K> E insert(AssignedEntityType<M, E, K> type, E entity);
 
     /**
      * Inserts one bounded batch atomically through one set-based PostgreSQL statement.
@@ -31,7 +31,7 @@ public interface WriteEntities<M> extends ReadEntities<M> {
      * @param <K> primary-key type
      * @return verified inserted snapshots in input order
      */
-    <E, K> Batch<E> insertMultiple(EntityType<M, E, K> type, Batch<E> entities);
+    <E, K> Batch<E> insertMultiple(AssignedEntityType<M, E, K> type, Batch<E> entities);
 
     /**
      * Updates one versioned entity or returns an explicit conflict or missing result.
