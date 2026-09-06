@@ -1,5 +1,6 @@
 package no.beint.vev.pg;
 
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,12 +23,18 @@ final class PgReferences {
                 }
             }
         }
-        try (PreparedStatement statement = connection.prepareStatement(ATTESTATION_SQL)) {
+        // Only SELECT-only targets may opt out of external incoming closure. Every mapped source still
+        // participates, including self references and sources in another schema. Bound text never becomes SQL.
+        boolean external = plan.externalIncomingReferences();
+        try (Array mappedSources = external ? connection.createArrayOf("text", model.frozenPlans().stream()
+                    .map(source -> source.schemaName() + '.' + source.tableName()).toArray(String[]::new)) : null;
+                PreparedStatement statement = connection.prepareStatement(external ? EXTERNAL_INCOMING_SQL : STRICT_SQL)) {
             statement.setString(1, plan.schemaName());
             statement.setString(2, plan.tableName());
             statement.setString(3, plan.schemaName());
             statement.setString(4, plan.tableName());
-            statement.setInt(5, expected.size() + 1);
+            if (external) statement.setArray(5, mappedSources);
+            statement.setInt(external ? 6 : 5, expected.size() + 1);
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     ConstraintKey key = new ConstraintKey(rows.getString(1), rows.getString(2), rows.getString(3));
@@ -157,7 +164,13 @@ final class PgReferences {
              WHERE constraint_definition.contype = 'f'
                AND ((source_namespace.nspname = ? AND source_relation.relname = ?)
                  OR (target_namespace.nspname = ? AND target_relation.relname = ?))
+               %s
              ORDER BY source_namespace.nspname, source_relation.relname, constraint_definition.conname
              LIMIT ?
             """;
+    private static final String STRICT_SQL = ATTESTATION_SQL.formatted("");
+    private static final String EXTERNAL_INCOMING_SQL = ATTESTATION_SQL.formatted("""
+            AND (source_namespace.nspname::pg_catalog.text || '.' || source_relation.relname::pg_catalog.text)
+                = ANY (?::pg_catalog.text[])
+            """);
 }

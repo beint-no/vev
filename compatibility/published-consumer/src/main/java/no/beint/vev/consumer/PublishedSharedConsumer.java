@@ -12,6 +12,9 @@ public final class PublishedSharedConsumer {
                 || PublishedReferenceVev.INSTANCE.scopeType() != UUID.class) {
             throw new AssertionError("Published shared-only metadata did not initialize with the declared scope type");
         }
+        if (!PublishedReferenceVev.INSTANCE.externalIncomingReferences()) {
+            throw new AssertionError("Published processor must retain the explicit read-only reference boundary");
+        }
         var authority = PublishedReferenceModelVev.newTenantAuthority();
         try {
             authority.scope(new UUID(0L, 1L));

@@ -15,7 +15,7 @@ import no.beint.vev.VevShared;
 
 @Entity
 @VevShared
-@VevReadOnly
+@VevReadOnly(externalIncomingReferences = true)
 @VevRows(8)
 @Table(name = "only_category", schema = "vev_it", uniqueConstraints =
         @UniqueConstraint(name = "only_category_code_key", columnNames = "code"))

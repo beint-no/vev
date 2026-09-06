@@ -38,7 +38,7 @@ final class PgPlanAbiTest {
 
     @Test
     void incompatibleVersionedBinariesAreRejectedBeforeMetadataAccess() throws ReflectiveOperationException {
-        for (int abi : List.of(1, 2, 3)) {
+        for (int abi : List.of(1, 2, 3, 4)) {
             byte[] bytes = ClassFile.of().build(ClassDesc.of("fixture.LegacyPlan"), builder -> builder
                     .withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL)
                     .withInterfaceSymbols(ClassDesc.of("no.beint.vev.pg.spi.PgEntityPlan"))
@@ -66,6 +66,21 @@ final class PgPlanAbiTest {
         assertThrows(AbstractMethodError.class, plan::scopeType);
         var failure = assertThrows(IllegalArgumentException.class, () -> capture(plan));
         assertTrue(failure.getMessage().contains("plan declares 3; recompile mappings"));
+    }
+
+    @Test
+    void oldReadOnlyBinaryFailsBeforeItsMissingClosureMethodIsInvoked() throws ReflectiveOperationException {
+        byte[] bytes = ClassFile.of().build(ClassDesc.of("fixture.LegacyPlan"), builder -> builder
+                .withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL)
+                .withInterfaceSymbols(ClassDesc.of("no.beint.vev.pg.spi.PgReadOnlyEntityPlan"))
+                .withMethodBody(INIT_NAME, MTD_void, ClassFile.ACC_PUBLIC, code -> code
+                        .aload(0).invokespecial(CD_Object, INIT_NAME, MTD_void).return_())
+                .withMethodBody("generatedPlanAbi", MethodTypeDesc.of(java.lang.constant.ConstantDescs.CD_int),
+                        ClassFile.ACC_PUBLIC, code -> code.iconst_4().ireturn()));
+        var plan = (no.beint.vev.pg.spi.PgReadOnlyEntityPlan<?, ?, ?, ?>) new FixtureLoader().define(bytes).getConstructor().newInstance();
+        assertThrows(AbstractMethodError.class, plan::externalIncomingReferences);
+        var failure = assertThrows(IllegalArgumentException.class, () -> capture(plan));
+        assertTrue(failure.getMessage().contains("plan declares 4; recompile mappings"));
     }
 
     private static <M, E, K, T> void capture(PgEntityPlan<M, E, K, T> plan) {

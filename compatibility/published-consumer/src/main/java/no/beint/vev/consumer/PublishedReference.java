@@ -8,7 +8,7 @@ import no.beint.vev.VevReadOnly;
 import no.beint.vev.VevShared;
 
 @Entity
-@VevReadOnly
+@VevReadOnly(externalIncomingReferences = true)
 @VevShared
 @Table(name = "published_reference", schema = "published_consumer")
 public record PublishedReference(

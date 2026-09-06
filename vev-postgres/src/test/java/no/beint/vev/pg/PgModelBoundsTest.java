@@ -330,7 +330,7 @@ final class PgModelBoundsTest {
 
     @Test
     void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
-        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
             var source = plan(null, null, null, null, () -> {
                 throw new AssertionError("Incompatible plans must fail before metadata access");
             }, abi == null ? null : () -> abi);
@@ -356,7 +356,7 @@ final class PgModelBoundsTest {
         for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgIdentityEntityPlan.class)) {
             var valid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
                     getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class, extra},
-                    (proxy, method, arguments) -> method.invoke(source, arguments));
+                    (proxy, method, arguments) -> method.getName().equals("externalIncomingReferences") ? false : method.invoke(source, arguments));
             var captured = new PgModel<>(IDENTITY, List.of(valid)).frozenPlans().getFirst();
             org.junit.jupiter.api.Assertions.assertTrue(captured.readOnly());
             assertEquals(extra == no.beint.vev.pg.spi.PgIdentityEntityPlan.class, captured.generatedIdentity());
@@ -420,6 +420,7 @@ final class PgModelBoundsTest {
             var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
                     getClass().getClassLoader(), kinds.toArray(Class<?>[]::new), (proxy, method, arguments) -> switch (method.getName()) {
                         case "tenantCodec", "tenantColumn", "tenantKeyOf" -> throw new AssertionError("Shared plans have no tenant metadata");
+                        case "externalIncomingReferences" -> false;
                         case "scopeType" -> variant.equals("unsupportedScope") ? Object.class : Integer.class;
                         case "primaryKeyShape" -> variant.equals("tenantPrimaryKey") ? no.beint.vev.VevPrimaryKey.Shape.TENANT_ID : no.beint.vev.VevPrimaryKey.Shape.ID;
                         case "columns" -> variant.equals("tenantColumn") ? List.of(ID, TENANT) : List.of(ID);
@@ -434,6 +435,31 @@ final class PgModelBoundsTest {
             };
             org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains(expected), failure.getMessage());
         }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void externalIncomingChoiceIsCapturedOnceOnlyAfterReadOnlyCapabilitiesAreVerified() {
+        var base = plan(List.of(ID, TENANT));
+        for (boolean external : List.of(false, true)) {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            var source = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class},
+                    (proxy, method, arguments) -> {
+                        if (method.getName().equals("externalIncomingReferences")) {
+                            if (calls.incrementAndGet() != 1) throw new AssertionError("Read-only closure choice must be captured once");
+                            return external;
+                        }
+                        return method.invoke(base, arguments);
+                    });
+            var frozen = new PgModel<>(IDENTITY, List.of(source)).frozenPlan(source);
+            for (int read = 0; read < 3; read++) assertEquals(external, frozen.externalIncomingReferences());
+            assertEquals(1, calls.get());
+            org.junit.jupiter.api.Assertions.assertNull(frozen.sql().insert());
+            org.junit.jupiter.api.Assertions.assertNull(frozen.sql().update());
+        }
+        var writable = new PgModel<>(IDENTITY, List.of(base)).frozenPlan(base);
+        org.junit.jupiter.api.Assertions.assertFalse(writable.externalIncomingReferences());
     }
 
     @Test
@@ -475,6 +501,7 @@ final class PgModelBoundsTest {
         return (PgEntityPlan<TestModel, SharedScopeSnapshot, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
                 PgModelBoundsTest.class.getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgSharedEntityPlan.class},
                 (proxy, method, arguments) -> switch (method.getName()) {
+                    case "externalIncomingReferences" -> false;
                     case "scopeType" -> scopeType.get();
                     case "javaType" -> SharedScopeSnapshot.class;
                     case "logicalName" -> "SharedScopeSnapshot";

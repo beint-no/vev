@@ -9,7 +9,7 @@ import no.beint.vev.VevIndex;
 import no.beint.vev.VevReadOnly;
 
 @Entity
-@VevReadOnly
+@VevReadOnly(externalIncomingReferences = true)
 @Table(name = "readonly_snapshot", schema = "vev_it")
 public record ReadOnlySnapshot(
         @Id @Column(name = "id", nullable = false) java.util.UUID id,

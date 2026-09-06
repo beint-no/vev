@@ -15,7 +15,7 @@ import no.beint.vev.VevShared
 @Entity
 @JvmRecord
 @VevShared
-@VevReadOnly
+@VevReadOnly(externalIncomingReferences = true)
 @VevRows(8)
 @Table(name = "only_note", schema = "vev_it")
 data class KotlinOnlyNote(

@@ -40,6 +40,7 @@ class PgPlan<M, E, K, T> {
     private PgDeletionSql deletionSql;
     private final boolean deletable;
     private final boolean readOnly;
+    private final boolean externalIncomingReferences;
     private final boolean generatedIdentity;
 
     PgPlan(PgEntityPlan<M, E, K, T> source) {
@@ -81,6 +82,8 @@ class PgPlan<M, E, K, T> {
         if (creationType != null && source instanceof no.beint.vev.AssignedEntityType<?, ?, ?>) {
             throw new IllegalArgumentException("An entity cannot expose both assigned and generated identity insertion");
         }
+        this.externalIncomingReferences = readOnly
+                && ((no.beint.vev.pg.spi.PgReadOnlyEntityPlan<?, ?, ?, ?>) source).externalIncomingReferences();
         this.scopeType = tenant == null
                 ? Objects.requireNonNull(((no.beint.vev.pg.spi.PgSharedEntityPlan<M, E, K, T>) source).scopeType(), "scopeType")
                 : tenant.codec().javaType();
@@ -168,6 +171,10 @@ class PgPlan<M, E, K, T> {
 
     boolean readOnly() {
         return readOnly;
+    }
+
+    boolean externalIncomingReferences() {
+        return externalIncomingReferences;
     }
 
     boolean deletable() {

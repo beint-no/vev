@@ -21,6 +21,7 @@ record EntityMapping(
         PropertyMapping version,
         boolean appendOnly,
         boolean readOnly,
+        boolean externalIncomingReferences,
         boolean shared,
         boolean deletable,
         String primaryKeyShape,

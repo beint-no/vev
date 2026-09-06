@@ -96,9 +96,12 @@ their exact two-column ownership contract.
 All references still require matching scalar types, typmods and collations,
 validated/enforced immediate `MATCH SIMPLE` and `NO ACTION` behavior, and all four
 built-in integrity triggers. There is no automatic relationship loading or
-cascade. Incoming and outgoing foreign keys must remain declared inside the
-closed model, including incoming references to read-only shared tables. Mapping
-a shared table alone does not waive that restriction for an incremental adoption.
+cascade. Complete closure is the default. Explicit
+[`@VevReadOnly(externalIncomingReferences = true)`](read-only-mappings.md#external-incoming-references)
+places incoming references from unmapped source tables outside this model's
+attestation contract. Outgoing, self, and within-model references remain fully
+declared and verified. The option changes no physical constraint or write grant;
+application migrations retain responsibility for external writer correctness.
 
 The fingerprint includes shared ownership. The schema manifest adds
 `shared: true`, `readOnly: true`, the global primary/index/unique/reference shapes,
@@ -109,9 +112,9 @@ table. Models containing only shared records additionally record the boxed
 that type changes the scope contract even when physical tables stay the same.
 Migrations must install the matching schema and fingerprint.
 
-The generated-plan ABI is 4. Recompile all mappings with matching processor and
-runtime versions; old ABI 3 binaries fail before the new shared scope metadata is
-read. The schema fingerprint and generated-plan ABI serve different contracts.
+The generated-plan ABI is 5. Recompile all mappings with matching processor and
+runtime versions; older binaries fail before reading new scope or reference
+boundary metadata. The schema fingerprint and generated-plan ABI serve different contracts.
 
 Synthetic verification covers Java source and compiled records, Kotlin records,
 assigned/stored identity and optional-version combinations, both wire formats,

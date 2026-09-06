@@ -34,7 +34,7 @@ Tenant isolation must be structural, not an optional query filter:
 6. The active tenant scope is immutable and pinned for the lexical transaction. A change poisons the transaction.
 7. Batch and bulk operations retain the same invariant and remain bounded. Batch insert rejects duplicate entity keys before one typed-array statement; batch update rejects duplicates before its one guarded typed-array statement and rolls back the complete lexical transaction if one row is stale, missing, or returned unexpectedly.
 8. Native SQL is excluded from the tenant-safe profile unless a separate compiler can prove equivalent constraints.
-9. An accepted secondary index is generated from `@VevIndex`, is non-unique, and is live-attested with exact `(tenant, indexed value, id)` B-tree keys, declared `(tenant, indexed value, ordering value, id)` keys with verified direction, or `(tenant, id)` identifier keys. Declared `@UniqueConstraint` backing indexes enforce immediate distinct-null uniqueness with tenant-first ordinary-value keys or declared tenant-qualified identifier pairs and exact built-in operators. Undeclared or differently shaped indexes and ordinary inheritance are rejected. Declared checks require exact definitions and approved PostgreSQL 18 expression nodes, types, collations, operators, and functions; custom types are rejected before deparsing can invoke their output functions. See [check constraints](check-constraints.md). Foreign keys require generated `@VevReference` metadata, exact tenant-composite column/type/collation correspondence, a target inside the closed model, immediate non-cascading enforcement, and all built-in integrity triggers enabled.
+9. An accepted secondary index is generated from `@VevIndex`, is non-unique, and is live-attested with exact `(tenant, indexed value, id)` B-tree keys, declared `(tenant, indexed value, ordering value, id)` keys with verified direction, or `(tenant, id)` identifier keys. Declared `@UniqueConstraint` backing indexes enforce immediate distinct-null uniqueness with tenant-first ordinary-value keys or declared tenant-qualified identifier pairs and exact built-in operators. Undeclared or differently shaped indexes and ordinary inheritance are rejected. Declared checks require exact definitions and approved PostgreSQL 18 expression nodes, types, collations, operators, and functions; custom types are rejected before deparsing can invoke their output functions. See [check constraints](check-constraints.md). Foreign keys require generated `@VevReference` metadata, exact tenant-composite column/type/collation correspondence, a target inside the closed model, immediate non-cascading enforcement, and all built-in integrity triggers enabled. The explicit read-only external incoming exception below excludes only constraints from unmapped sources.
 10. A dedicated pgjdbc pool must establish an exact `pg_catalog`/UTF-8 baseline with `DateStyle = ISO, MDY` and `IntervalStyle = postgres` before checkout. Vev fails a changed baseline or retained `pg_temp` schema instead of mutating `search_path`, then independently installs and verifies the remaining transaction context and re-attests it immediately before commit. Avoiding path changes preserves pgjdbc prepared-query caching; pooled state is still verified, never assumed clean.
 11. Logs, exceptions, and telemetry record operation categories and SQLSTATE where permitted, never SQL text, entity values, tenant values, or bound values.
 
@@ -49,8 +49,12 @@ tenant read visibility and require SELECT-only access, disabled/unforced RLS, an
 zero policies. They never infer shared access from a missing tenant key. Shared
 and tenant ownership capabilities are mutually exclusive, and shared rows cannot
 reference tenant-owned rows. Tenant-to-shared references use scalar global keys;
-tenant-to-tenant references retain their composite ownership boundary. Every FK
-remains inside the closed model. Application review must establish that all
+tenant-to-tenant references retain their composite ownership boundary. Complete FK closure is the default. An explicit
+[read-only external incoming boundary](read-only-mappings.md#external-incoming-references)
+may leave unmapped source constraints outside attestation. It is unavailable to
+writable targets: their updates/deletes could trigger unmodeled external actions.
+Outgoing, self, and within-model references always remain declared and verified.
+External schema/write correctness remains an application responsibility. Application review must establish that all
 shared columns are intended for every tenant; Vev cannot infer business secrecy
 from a schema. The same lexical scope, bounded operations, and failure rollback
 apply, including when shared reads occur after tenant writes. A model containing
@@ -68,6 +72,7 @@ A tenant-capable release needs automated PostgreSQL tests for:
 - colliding identifiers in two tenants;
 - identical shared reference visibility in both tenants while scoped rows stay isolated, rejected mixed ownership/write capabilities, dormant shared policies, unexpected shared grants, and rollback after caught shared read or FK failures;
 - ordered equality/null pagination in both directions with tied values, colliding tenant IDs, exact-token cursors, rejected malformed index directions, and rollback after a caught query or cleanup failure;
+- read-only external incoming opt-in across Java/Kotlin, both tenant/shared ownership modes, multiple schemas, custom external source types, retained physical enforcement, strict outgoing/within-model boundaries, and bootstrap array/resource failures;
 - shared-only Java/Kotlin models with explicit scope types, failed-bootstrap authority reuse, wrong-type and foreign-model/authority rejection before connection acquisition, readonly grants, and model-specific fingerprint drift;
 - missing, null, wrong-type, changed, and foreign-authority tenant context;
 - cross-tenant entity insertion and update;

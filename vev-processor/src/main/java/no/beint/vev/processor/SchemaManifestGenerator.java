@@ -60,7 +60,8 @@ final class SchemaManifestGenerator {
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": %s}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
-                entity.appendOnly(), (entity.shared() ? "\n      \"shared\": true," : "") + (entity.readOnly() ? "\n      \"readOnly\": true," : "") + identity(entity),
+                entity.appendOnly(), (entity.shared() ? "\n      \"shared\": true," : "") + (entity.readOnly() ? "\n      \"readOnly\": true," : "")
+                        + (entity.externalIncomingReferences() ? "\n      \"externalIncomingReferences\": true," : "") + identity(entity),
                 entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
                 indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
                 entity.checkConstraints().stream().map(check -> check.kind() == CheckMapping.Kind.EXACT

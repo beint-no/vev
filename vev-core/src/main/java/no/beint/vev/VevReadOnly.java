@@ -17,4 +17,14 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.CLASS)
 @Target(ElementType.TYPE)
 public @interface VevReadOnly {
+    /**
+     * Accepts incoming foreign keys whose source tables are outside the generated model.
+     *
+     * <p>These external constraints and their write-time enforcement are outside this read-only mapping's
+     * contract. Vev neither loads their rows nor changes their constraints. Outgoing references and references
+     * from any mapped source remain fully declared and verified. The default requires complete closure.</p>
+     *
+     * @return whether unmapped tables may reference this SELECT-only table
+     */
+    boolean externalIncomingReferences() default false;
 }

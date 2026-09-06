@@ -125,6 +125,81 @@ final class IntegrationDatabase {
         }
     }
 
+    void externalIncomingVariant(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("DROP SCHEMA IF EXISTS vev_it_external CASCADE");
+            statement.execute("DROP TABLE IF EXISTS vev_it.external_links CASCADE");
+            for (String target : List.of("only_category", "only_note")) {
+                statement.execute("ALTER TABLE vev_it." + target + " DROP CONSTRAINT IF EXISTS unexpected_reference");
+            }
+            statement.execute("ALTER TABLE vev_it.only_category DROP CONSTRAINT IF EXISTS only_category_parent_fk");
+            statement.execute("ALTER TABLE vev_it.only_category ADD CONSTRAINT only_category_parent_fk FOREIGN KEY(parent_id) REFERENCES vev_it.only_category(id)");
+            if (variant.equals("valid")) return;
+            statement.execute("CREATE SCHEMA vev_it_external");
+            statement.execute("CREATE TABLE vev_it.external_links (category_id integer, note_id bigint, tenant_id integer, snapshot_id uuid)");
+            // More incoming constraints than the declared-reference count proves filtering happens before LIMIT.
+            for (int index = 0; index < 12; index++) {
+                statement.execute("ALTER TABLE vev_it.external_links ADD CONSTRAINT external_category_" + index
+                        + " FOREIGN KEY(category_id) REFERENCES vev_it.only_category(id)");
+            }
+            statement.execute("ALTER TABLE vev_it.external_links ADD CONSTRAINT external_note FOREIGN KEY(note_id) REFERENCES vev_it.only_note(id)");
+            statement.execute("ALTER TABLE vev_it.external_links ADD CONSTRAINT external_snapshot FOREIGN KEY(tenant_id,snapshot_id) REFERENCES vev_it.readonly_snapshot(tenant_id,id)");
+            // An external relation may have the same unqualified name as a mapped table.
+            statement.execute("CREATE TABLE vev_it_external.only_category (id integer REFERENCES vev_it.only_category(id))");
+            statement.execute("CREATE FUNCTION vev_it_external.reference_tripwire(integer) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RAISE EXCEPTION ''external source expression must not execute''; END'");
+            statement.execute("CREATE DOMAIN vev_it_external.reference_key AS integer CHECK (vev_it_external.reference_tripwire(VALUE))");
+            statement.execute("CREATE TABLE vev_it_external.custom_source (id vev_it_external.reference_key REFERENCES vev_it.only_category(id))");
+            switch (variant) {
+                case "incoming" -> { }
+                case "externalWriteSemantics" -> {
+                    statement.execute("ALTER TABLE vev_it.external_links DROP CONSTRAINT external_category_0");
+                    statement.execute("ALTER TABLE vev_it.external_links ADD CONSTRAINT external_category_0 FOREIGN KEY(category_id) REFERENCES vev_it.only_category(id) MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED NOT VALID");
+                }
+                case "outgoing" -> {
+                    statement.execute("CREATE TABLE vev_it_external.lookup (id integer PRIMARY KEY)");
+                    statement.execute("INSERT INTO vev_it_external.lookup VALUES (1)");
+                    statement.execute("ALTER TABLE vev_it.only_category ADD CONSTRAINT unexpected_reference FOREIGN KEY(parent_id) REFERENCES vev_it_external.lookup(id)");
+                }
+                case "mappedSource" -> statement.execute("ALTER TABLE vev_it.only_note ADD CONSTRAINT unexpected_reference FOREIGN KEY(id) REFERENCES vev_it.only_category(id)");
+                case "self" -> statement.execute("ALTER TABLE vev_it.only_category ADD CONSTRAINT unexpected_reference FOREIGN KEY(parent_id) REFERENCES vev_it.only_category(id)");
+                case "missing", "cascade", "deferred", "unvalidated", "disabledTrigger" -> {
+                    statement.execute("ALTER TABLE vev_it.only_category DROP CONSTRAINT only_category_parent_fk");
+                    if (!variant.equals("missing")) {
+                        String options = switch (variant) {
+                            case "cascade" -> " ON DELETE CASCADE";
+                            case "deferred" -> " DEFERRABLE INITIALLY DEFERRED";
+                            case "unvalidated" -> " NOT VALID";
+                            default -> "";
+                        };
+                        statement.execute("ALTER TABLE vev_it.only_category ADD CONSTRAINT only_category_parent_fk FOREIGN KEY(parent_id) REFERENCES vev_it.only_category(id)" + options);
+                        if (variant.equals("disabledTrigger")) statement.execute("ALTER TABLE vev_it.only_category DISABLE TRIGGER ALL");
+                    }
+                }
+                case "strictTarget" -> statement.execute("ALTER TABLE vev_it.external_links ADD CONSTRAINT external_strict FOREIGN KEY(category_id) REFERENCES vev_it.shared_catalog(id)");
+                case "writableTarget" -> statement.execute("ALTER TABLE vev_it.external_links ADD CONSTRAINT external_writable FOREIGN KEY(tenant_id,snapshot_id) REFERENCES vev_it.account(tenant_id,id)");
+                default -> throw new IllegalArgumentException(variant);
+            }
+        }
+    }
+
+    void verifyExternalIncomingConstraintsRemainEffective() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO vev_it.external_links(category_id, note_id) VALUES (1,1)");
+            try {
+                statement.execute("INSERT INTO vev_it.external_links(category_id) VALUES (999)");
+                throw new AssertionError("The external source must retain physical foreign-key enforcement");
+            } catch (SQLException failure) {
+                if (!"23503".equals(failure.getSQLState())) throw failure;
+            }
+            try {
+                statement.execute("DELETE FROM vev_it.only_note WHERE id = 1");
+                throw new AssertionError("Existing references must still block administrative target deletion");
+            } catch (SQLException failure) {
+                if (!"23503".equals(failure.getSQLState())) throw failure;
+            }
+        }
+    }
+
     private static List<String> sharedOnlySchemaStatements() {
         return List.of(
                 "CREATE TABLE vev_it.only_category (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code varchar(32) NOT NULL, label varchar(64), position integer NOT NULL, parent_id integer, CONSTRAINT only_category_code_key UNIQUE(code), CONSTRAINT only_category_parent_fk FOREIGN KEY(parent_id) REFERENCES vev_it.only_category(id))",

@@ -9,4 +9,11 @@ package no.beint.vev.pg.spi;
  * @param <T> tenant-key type
  */
 public interface PgReadOnlyEntityPlan<M, E, K, T> extends PgEntityPlan<M, E, K, T> {
+    /**
+     * Returns whether incoming foreign keys from tables outside this model are outside schema attestation.
+     * Outgoing and within-model references always retain their exact generated contracts.
+     *
+     * @return the explicit read-only mapping choice
+     */
+    boolean externalIncomingReferences();
 }

@@ -45,9 +45,9 @@ final class VevProcessorTest {
         String registry = first.generated("example/BillingModelVev.java");
         assertEquals(accountPlan, second.generated("example/AccountVev.java"));
         assertEquals(registry, second.generated("example/BillingModelVev.java"));
-        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 4;\n    }"));
-        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 4;\n    }"));
-        assertEquals(4, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
+        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 5;\n    }"));
+        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 5;\n    }"));
+        assertEquals(5, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
@@ -1082,6 +1082,77 @@ final class VevProcessorTest {
         var sources = new LinkedHashMap<>(positiveSources());
         sources.computeIfPresent("example/Account.java", (path, text) -> text.replace("@VevIndex(name =", "@VevIndex(orderBy = \"balance\", name ="));
         return sources;
+    }
+
+    @Test
+    void externalIncomingReferencesAreExplicitFingerprintBoundReadOnlyMetadata() throws IOException, ReflectiveOperationException {
+        for (boolean shared : List.of(false, true)) {
+            var sources = shared ? sharedOnlySources("int") : new LinkedHashMap<>(positiveSources());
+            String entity = shared ? "AReference" : "Account";
+            String path = "example/" + entity + ".java";
+            if (!shared) sources.computeIfPresent(path, (name, text) -> text.replace("@Entity", "@Entity @no.beint.vev.VevReadOnly"));
+            Compilation strict = compile(sources);
+            assertTrue(strict.success(), strict.diagnostics());
+            assertFalse(strict.manifest("example.BillingModel").contains("externalIncomingReferences"));
+            var explicitFalse = new LinkedHashMap<>(sources);
+            explicitFalse.computeIfPresent(path, (name, text) -> text.replace("VevReadOnly", "VevReadOnly(externalIncomingReferences = false)"));
+            Compilation stillStrict = compile(explicitFalse);
+            assertTrue(stillStrict.success(), stillStrict.diagnostics());
+            assertEquals(strict.manifest("example.BillingModel"), stillStrict.manifest("example.BillingModel"));
+            assertEquals(strict.generated("example/" + entity + "Vev.java"), stillStrict.generated("example/" + entity + "Vev.java"));
+            sources.computeIfPresent(path, (name, text) -> text.replace("VevReadOnly", "VevReadOnly(externalIncomingReferences = true)"));
+            Compilation open = compile(sources);
+            assertTrue(open.success(), open.diagnostics());
+            assertTrue(open.manifest("example.BillingModel").contains("\"externalIncomingReferences\": true"));
+            assertNotEquals(strict.manifest("example.BillingModel"), open.manifest("example.BillingModel"));
+            assertNotEquals(strict.manifest("example.BillingModel").lines().filter(line -> line.contains("\"fingerprint\"")).findFirst().orElseThrow(),
+                    open.manifest("example.BillingModel").lines().filter(line -> line.contains("\"fingerprint\"")).findFirst().orElseThrow());
+            assertTrue(open.generated("example/" + entity + "Vev.java").contains("public boolean externalIncomingReferences() {\n        return true;"));
+            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{open.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+                var registry = loader.loadClass("example.BillingModelVev");
+                org.junit.jupiter.api.Assertions.assertNotNull(registry.getField("POSTGRES").get(null));
+                var planClass = loader.loadClass("example." + entity + "Vev");
+                var plan = (no.beint.vev.pg.spi.PgReadOnlyEntityPlan<?, ?, ?, ?>) planClass.getField("INSTANCE").get(null);
+                assertTrue(plan.externalIncomingReferences());
+                assertFalse(plan instanceof no.beint.vev.AssignedEntityType<?, ?, ?>);
+                assertFalse(plan instanceof no.beint.vev.VersionedEntityType<?, ?, ?, ?>);
+            }
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(binary.success(), binary.diagnostics());
+            assertEquals(open.generated("example/" + entity + "Vev.java"), binary.generated("example/" + entity + "Vev.java"));
+            assertEquals(open.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+        }
+    }
+
+    @Test
+    void externalIncomingReferencesCannotAcquireWriteCapabilitiesOrEscapeDeclaredTargets() throws IOException {
+        for (String operation : List.of("write.insert(AReferenceVev.INSTANCE, value)", "write.update(AReferenceVev.INSTANCE, value)",
+                "write.create(AReferenceVev.INSTANCE, value)", "new no.beint.vev.DeleteTarget<>(AReferenceVev.INSTANCE, 1L, 0L)")) {
+            var sources = sharedOnlySources("int");
+            sources.computeIfPresent("example/AReference.java", (path, text) -> text.replace("@VevReadOnly", "@VevReadOnly(externalIncomingReferences = true)"));
+            sources.put("example/Calls.java", "package example; class Calls { void run(no.beint.vev.WriteEntities<BillingModelVev.Model> write, AReference value) { " + operation + "; } }");
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), operation);
+            assertTrue(compilation.diagnostics().contains("AReferenceVev"), compilation.diagnostics());
+        }
+        for (String conflict : List.of("@AppendOnly", "@VevDelete")) {
+            var sources = sharedOnlySources("int");
+            sources.computeIfPresent("example/AReference.java", (path, text) -> text.replace("@VevReadOnly", "@VevReadOnly(externalIncomingReferences = true) " + conflict));
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), conflict);
+            assertTrue(compilation.diagnostics().contains(conflict), compilation.diagnostics());
+        }
+        var sources = sharedOnlySources("int");
+        sources.computeIfPresent("example/AReference.java", (path, text) -> text
+                .replace("@VevReadOnly", "@VevReadOnly(externalIncomingReferences = true)")
+                .replace("target = AReference.class", "target = Unmapped.class"));
+        sources.put("example/Unmapped.java", "package example; record Unmapped(Long id) {}");
+        Compilation outside = compile(sources);
+        assertFalse(outside.success());
+        assertTrue(outside.diagnostics().contains("same closed @VevModel"), outside.diagnostics());
     }
 
     @Test

@@ -374,7 +374,9 @@ final class MappingCompiler {
             error(entity, "Every Vev entity must declare exactly one @TenantKey, but found " + tenants.size());
         }
         boolean appendOnly = annotation(entity, APPEND_ONLY) != null;
-        boolean readOnly = annotation(entity, VEV_READ_ONLY) != null;
+        AnnotationMirror readOnlyMapping = annotation(entity, VEV_READ_ONLY);
+        boolean readOnly = readOnlyMapping != null;
+        boolean externalIncomingReferences = readOnly && booleanValue(readOnlyMapping, "externalIncomingReferences");
         if (shared && !readOnly) error(entity, "@VevShared requires @VevReadOnly");
         if (appendOnly && readOnly) error(entity, "@VevReadOnly and @AppendOnly are distinct capabilities and cannot be combined");
         if (appendOnly && !versions.isEmpty()) {
@@ -453,6 +455,7 @@ final class MappingCompiler {
                 version,
                 appendOnly,
                 readOnly,
+                externalIncomingReferences,
                 shared,
                 deletable,
                 primaryKeyShape,
@@ -1191,7 +1194,8 @@ final class MappingCompiler {
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
-            case VEV_DELETE, VEV_READ_ONLY, VEV_SHARED -> Set.of();
+            case VEV_DELETE, VEV_SHARED -> Set.of();
+            case VEV_READ_ONLY -> Set.of("externalIncomingReferences");
             case VEV_BINARY -> Set.of("maximumBytes", "check");
             case VEV_TEXT -> Set.of("check");
             default -> ANNOTATION_MEMBERS.get(annotationName);
@@ -1281,6 +1285,7 @@ final class MappingCompiler {
                     .append(entity.appendOnly()).append('\n');
             if (entity.deletable()) canonical.append("delete|versionedIdentity\n");
             if (entity.readOnly()) canonical.append("readOnly\n");
+            if (entity.externalIncomingReferences()) canonical.append("externalIncomingReferences\n");
             if (entity.shared()) canonical.append("shared\n");
             for (CheckMapping check : entity.checkConstraints()) {
                 checkCharacters += check.expression().length();

@@ -96,6 +96,157 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void externalIncomingReadOnlyReferencesPreservePhysicalConstraintsAndBothOwnershipModes() throws SQLException {
+        database.seedSharedOnlyRows();
+        var key = id("external-incoming-snapshot");
+        database.seedReadOnlyRows(key);
+        for (String variant : List.of("incoming", "externalWriteSemantics")) {
+            try {
+                database.externalIncomingVariant(variant);
+                for (boolean binary : List.of(false, true)) {
+                    var sharedAuthority = SharedOnlyModelVev.newTenantAuthority();
+                    var sharedRuntime = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, sharedAuthority);
+                    var tenantAuthority = IntegrationModelVev.newTenantAuthority();
+                    var tenantRuntime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, tenantAuthority);
+                    for (int tenant : List.of(7, 8)) {
+                        sharedRuntime.read(sharedAuthority.scope(tenant), tx -> {
+                            assertEquals("root", tx.entities().find(OnlyCategoryVev.INSTANCE.key(1)).orElseThrow().code());
+                            assertEquals("shared", tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1L)).orElseThrow().label());
+                            assertEquals(List.of(2, 3, 1), tx.entities().many(PgQueries.equal(OnlyCategoryVev.LABEL, "group", new QueryLimit(8))).values().stream().map(OnlyCategory::id).toList());
+                            assertEquals(4, tx.entities().many(PgQueries.scanById(OnlyCategoryVev.INSTANCE, new QueryLimit(8))).values().size());
+                            return null;
+                        });
+                        assertEquals("root", sharedRuntime.write(sharedAuthority.scope(tenant), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+                        assertEquals(tenant == 7 ? "visible" : "foreign", tenantRuntime.read(tenantAuthority.scope(tenant),
+                                tx -> tx.entities().find(ReadOnlySnapshotVev.INSTANCE.key(key))).orElseThrow().label());
+                    }
+                }
+                if (variant.equals("incoming")) database.verifyExternalIncomingConstraintsRemainEffective();
+            } finally {
+                database.externalIncomingVariant("valid");
+            }
+        }
+    }
+
+    @Test
+    void externalIncomingOptInRetainsOutgoingMappedSourceAndSelfReferenceAttestation() throws SQLException {
+        database.seedSharedOnlyRows();
+        for (String variant : List.of("outgoing", "mappedSource", "self", "missing", "cascade", "deferred", "unvalidated", "disabledTrigger")) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            try {
+                database.externalIncomingVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7), variant);
+            } finally {
+                database.externalIncomingVariant("valid");
+            }
+            var runtime = new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals("root", runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+        }
+    }
+
+    @Test
+    void externalIncomingOptInDoesNotRelaxStrictReadOnlyOrWritableTargets() throws SQLException {
+        for (String variant : List.of("strictTarget", "writableTarget")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.externalIncomingVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.externalIncomingVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+        for (String variant : List.of("write", "sequence")) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            try {
+                database.externalIncomingVariant("incoming");
+                database.sharedOnlyVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.sharedOnlyVariant("valid");
+                database.externalIncomingVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void externalIncomingCatalogFailuresCloseArraysConnectionsAndReleaseUnclaimedAuthority() {
+        for (String stage : List.of("createArray", "prepare", "bind", "query", "resultClose", "statementClose", "arrayClose", "allCleanup")) {
+            var arrays = new AtomicInteger();
+            var arrayCloses = new AtomicInteger();
+            var connectionCloses = new AtomicInteger();
+            var commits = new AtomicInteger();
+            var delegate = database.applicationDataSource();
+            var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invokeTarget(delegate, method, arguments);
+                        if (!(result instanceof Connection connection)) return result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    String name = connectionMethod.getName();
+                                    if (name.equals("commit")) commits.incrementAndGet();
+                                    if (name.equals("createArrayOf")) {
+                                        if (stage.equals("createArray")) throw new SQLException("external reference array fixture", "08006");
+                                        var array = (java.sql.Array) invokeTarget(connection, connectionMethod, connectionArguments);
+                                        arrays.incrementAndGet();
+                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.Array.class},
+                                                (arrayProxy, arrayMethod, arrayArguments) -> {
+                                                    Object arrayResult = invokeTarget(array, arrayMethod, arrayArguments);
+                                                    if (arrayMethod.getName().equals("close") || arrayMethod.getName().equals("free")) {
+                                                        arrayCloses.incrementAndGet();
+                                                        if (stage.equals("arrayClose") || stage.equals("allCleanup")) throw new SQLException("external reference array cleanup fixture", "08006");
+                                                    }
+                                                    return arrayResult;
+                                                });
+                                    }
+                                    if (name.equals("prepareStatement") && connectionArguments[0] instanceof String sql
+                                            && sql.contains("source_namespace.nspname") && sql.contains("= ANY (?::pg_catalog.text[])")) {
+                                        if (stage.equals("prepare")) throw new SQLException("external reference prepare fixture", "08006");
+                                        var statement = (java.sql.PreparedStatement) invokeTarget(connection, connectionMethod, connectionArguments);
+                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.PreparedStatement.class},
+                                                (statementProxy, statementMethod, statementArguments) -> {
+                                                    if (stage.equals("bind") && statementMethod.getName().equals("setArray")) throw new SQLException("external reference bind fixture", "08006");
+                                                    if (stage.equals("query") && statementMethod.getName().equals("executeQuery")) throw new SQLException("external reference query fixture", "08006");
+                                                    Object statementResult = invokeTarget(statement, statementMethod, statementArguments);
+                                                    if (statementMethod.getName().equals("close") && (stage.equals("statementClose") || stage.equals("allCleanup"))) throw new SQLException("external reference statement cleanup fixture", "08006");
+                                                    if (statementResult instanceof java.sql.ResultSet rows) {
+                                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.ResultSet.class},
+                                                                (rowsProxy, rowsMethod, rowsArguments) -> {
+                                                                    Object rowResult = invokeTarget(rows, rowsMethod, rowsArguments);
+                                                                    if (rowsMethod.getName().equals("close") && (stage.equals("resultClose") || stage.equals("allCleanup"))) throw new SQLException("external reference result cleanup fixture", "08006");
+                                                                    return rowResult;
+                                                                });
+                                                    }
+                                                    return statementResult;
+                                                });
+                                    }
+                                    Object connectionResult = invokeTarget(connection, connectionMethod, connectionArguments);
+                                    if (name.equals("close")) {
+                                        connectionCloses.incrementAndGet();
+                                        if (stage.equals("allCleanup")) throw new SQLException("external reference connection cleanup fixture", "08006");
+                                    }
+                                    return connectionResult;
+                                });
+                    });
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            assertThrows(RuntimeException.class, () -> new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority), stage);
+            assertThrows(IllegalStateException.class, () -> authority.scope(7), stage);
+            assertEquals(stage.equals("createArray") ? 0 : 1, arrays.get(), stage);
+            assertEquals(arrays.get(), arrayCloses.get(), stage);
+            assertEquals(1, connectionCloses.get(), stage);
+            assertEquals(0, commits.get(), stage);
+            new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
     void sharedOnlyJavaAndKotlinModelsReadWithRealTenantScopesAcrossBothWireModes() throws SQLException {
         database.seedSharedOnlyRows();
         for (boolean binary : List.of(false, true)) {
