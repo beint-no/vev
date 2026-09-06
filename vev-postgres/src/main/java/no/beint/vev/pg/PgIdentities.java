@@ -55,11 +55,11 @@ final class PgIdentities {
                     long oid = rows.getLong(1);
                     if (oid < 1 || oid > 0xffff_ffffL || !rows.getBoolean(2) || !rows.getBoolean(3)
                             || !rows.getBoolean(4) || !rows.getBoolean(5) || rows.getLong(6) != maximum
-                            || !rows.getBoolean(7) || !rows.getBoolean(8) || rows.getBoolean(9)
+                            || !rows.getBoolean(7) || rows.getBoolean(8) == plan.readOnly() || rows.getBoolean(9)
                             || rows.getBoolean(10) || rows.getBoolean(11) || !rows.getBoolean(12) || rows.next()) {
                         throw invalid(plan);
                     }
-                    sequences.put(plan, oid);
+                    if (plan.creationType() != null) sequences.put(plan, oid);
                 }
             }
         }

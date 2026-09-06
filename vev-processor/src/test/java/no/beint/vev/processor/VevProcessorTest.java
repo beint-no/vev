@@ -920,6 +920,66 @@ final class VevProcessorTest {
     }
 
     @Test
+    void readOnlyMappingsSeparateStoredIdentityAndVersionFromWriteCapabilities() throws IOException {
+        for (boolean identity : List.of(false, true)) {
+            for (boolean version : List.of(false, true)) {
+                var sources = new LinkedHashMap<>(positiveSources());
+                sources.computeIfPresent("example/Account.java", (path, source) -> {
+                    String result = source.replace("@Entity", "@Entity @no.beint.vev.VevReadOnly");
+                    if (identity) result = result.replace("@Id @Column", "@Id @jakarta.persistence.GeneratedValue(strategy = jakarta.persistence.GenerationType.IDENTITY) @Column");
+                    if (!version) result = result.replace("@Version", "");
+                    return result;
+                });
+                Compilation source = compile(sources);
+                assertTrue(source.success(), source.diagnostics());
+                String plan = source.generated("example/AccountVev.java");
+                assertTrue(plan.contains("PgReadOnlyEntityPlan<"));
+                assertEquals(identity, plan.contains("PgIdentityEntityPlan<"));
+                for (String absent : List.of("AssignedEntityType", "PgGeneratedEntityPlan", "PgVersionedEntityPlan", "DeletableEntityType", "record New(")) {
+                    assertFalse(plan.contains(absent), absent);
+                }
+                assertTrue(source.manifest("example.BillingModel").contains("\"readOnly\": true"));
+                assertTrue(source.manifest("example.BillingModel").contains("\"insert\": [], \"update\": [], \"delete\": false"));
+                if (identity) assertTrue(source.manifest("example.BillingModel").contains("\"sequencePrivileges\": []"));
+                var explicitNoWrites = new LinkedHashMap<>(sources);
+                explicitNoWrites.computeIfPresent("example/Account.java", (path, text) -> text
+                        .replace("nullable = false", "nullable = false, insertable = false, updatable = false")
+                        .replace("nullable = true", "nullable = true, insertable = false, updatable = false"));
+                Compilation noWrites = compile(explicitNoWrites);
+                assertTrue(noWrites.success(), noWrites.diagnostics());
+                assertEquals(source.manifest("example.BillingModel"), noWrites.manifest("example.BillingModel"));
+                assertEquals(plan, noWrites.generated("example/AccountVev.java"));
+                String model = sources.remove("example/BillingModel.java");
+                Compilation dependency = compile(sources, "", false);
+                assertTrue(dependency.success(), dependency.diagnostics());
+                Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+                assertTrue(binary.success(), binary.diagnostics());
+                assertEquals(plan, binary.generated("example/AccountVev.java"));
+                assertEquals(source.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+            }
+        }
+    }
+
+    @Test
+    void readOnlyDeclarationsRejectConflictingCapabilitiesAndAllWriteCallSites() throws IOException {
+        for (String conflict : List.of("@no.beint.vev.AppendOnly", "@no.beint.vev.VevDelete")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@Entity", "@Entity @no.beint.vev.VevReadOnly " + conflict));
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success());
+        }
+        for (String operation : List.of("write.insert(AccountVev.INSTANCE, value)", "write.update(AccountVev.INSTANCE, value)",
+                "write.create(AccountVev.INSTANCE, value)", "new no.beint.vev.DeleteTarget<>(AccountVev.INSTANCE, 1L, 0)")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@Entity", "@Entity @no.beint.vev.VevReadOnly"));
+            sources.put("example/ReadOnlyWrite.java", "package example; class ReadOnlyWrite { void run(no.beint.vev.WriteEntities<BillingModelVev.Model> write, Account value) { " + operation + "; } }");
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), operation);
+            assertTrue(compilation.diagnostics().contains("AccountVev"), compilation.diagnostics());
+        }
+    }
+
+    @Test
     void deletionCapabilitiesPreserveSourceAndBinaryContractsAndFingerprintPrivileges() throws IOException {
         var sources = new LinkedHashMap<>(positiveSources());
         sources.computeIfPresent("example/Account.java", (path, source) -> source

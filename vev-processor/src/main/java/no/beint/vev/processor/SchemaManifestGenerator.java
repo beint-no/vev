@@ -34,7 +34,7 @@ final class SchemaManifestGenerator {
                                 : quote(entity.tenant().columnName()) + ", " + quote(property.columnName()) + ", " + quote(entity.id().columnName())))
                 .collect(Collectors.joining(",\n")).indent(8).stripTrailing();
         String updates = entity.properties().stream()
-                .filter(property -> !entity.appendOnly() && !property.id() && !property.tenant())
+                .filter(property -> !entity.readOnly() && !entity.appendOnly() && !property.id() && !property.tenant())
                 .map(property -> quote(property.columnName())).collect(Collectors.joining(", "));
         return """
                     {
@@ -55,7 +55,8 @@ final class SchemaManifestGenerator {
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": %s}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
-                entity.appendOnly(), identity(entity), entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
+                entity.appendOnly(), (entity.readOnly() ? "\n      \"readOnly\": true," : "") + identity(entity),
+                entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
                 indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
                 entity.checkConstraints().stream().map(check -> check.kind() == CheckMapping.Kind.EXACT
                         ? "{\"name\": %s, \"expression\": %s}".formatted(quote(check.name()), quote(check.expression()))
@@ -66,6 +67,7 @@ final class SchemaManifestGenerator {
                         .collect(Collectors.joining(", ")),
                 references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
+                        .filter(property -> !entity.readOnly())
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates, entity.deletable());
     }
 
@@ -73,8 +75,8 @@ final class SchemaManifestGenerator {
         if (!entity.id().identity()) return "";
         long maximum = entity.id().boxedType().equals("java.lang.Short") ? Short.MAX_VALUE
                 : entity.id().boxedType().equals("java.lang.Integer") ? Integer.MAX_VALUE : Long.MAX_VALUE;
-        return "\n      \"identity\": {\"column\": %s, \"modes\": [\"ALWAYS\", \"BY DEFAULT\"], \"sequenceOwnership\": \"INTERNAL\", \"start\": 1, \"increment\": 1, \"minimum\": 1, \"maximum\": %d, \"cycle\": false, \"sequencePrivileges\": [\"USAGE\"]},"
-                .formatted(quote(entity.id().columnName()), maximum);
+        return "\n      \"identity\": {\"column\": %s, \"modes\": [\"ALWAYS\", \"BY DEFAULT\"], \"sequenceOwnership\": \"INTERNAL\", \"start\": 1, \"increment\": 1, \"minimum\": 1, \"maximum\": %d, \"cycle\": false, \"sequencePrivileges\": [%s]},"
+                .formatted(quote(entity.id().columnName()), maximum, entity.readOnly() ? "" : "\"USAGE\"");
     }
 
     private String primaryKey(EntityMapping entity) {

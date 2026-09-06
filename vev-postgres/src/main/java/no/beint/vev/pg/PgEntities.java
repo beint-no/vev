@@ -350,7 +350,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         Objects.requireNonNull(inputs, "inputs");
         PgPlan<M, E, K, T> plan = plan(type);
         plan.requireRowCount(inputs.size());
-        if (!plan.generatedIdentity() || !identitySequences.containsKey(plan)) {
+        if (plan.creationType() == null || !identitySequences.containsKey(plan)) {
             throw new IllegalArgumentException("Creation requires a verified generated-identity plan");
         }
         List<PgColumn> columns = plan.columns();
@@ -567,7 +567,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private <E, K, V> PgVersionPlan<M, E, K, T, V> versionedPlan(EntityType<M, E, K> type) {
         PgPlan<M, E, K, T> plan = plan(type);
         if (!(plan instanceof PgVersionPlan<?, ?, ?, ?, ?> versionedPlan)) {
-            throw new IllegalArgumentException(plan.logicalName() + " is append-only and cannot be mutated");
+            throw new IllegalArgumentException(plan.logicalName() + " has no versioned mutation capability");
         }
         return (PgVersionPlan<M, E, K, T, V>) versionedPlan;
     }
@@ -665,7 +665,16 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             Object value = switch (column.role()) {
                 case ID -> entityKey;
                 case TENANT -> entityTenant;
-                case VERSION -> versionOf((PgVersionPlan<M, ?, ?, T, ?>) plan, entity);
+                case VERSION -> {
+                    if (plan.readOnly()) {
+                        Object stored = plan.columnValue(entity, columnIndex);
+                        if (stored instanceof Number number && number.longValue() < 0) {
+                            throw new IllegalArgumentException("Stored version must be non-negative");
+                        }
+                        yield stored;
+                    }
+                    yield versionOf((PgVersionPlan<M, ?, ?, T, ?>) plan, entity);
+                }
                 case VALUE -> plan.columnValue(entity, columnIndex);
             };
             column.validateValue(value);

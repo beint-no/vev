@@ -81,6 +81,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : readOnlySchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -93,8 +98,66 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly");
         }
+    }
+
+    void seedReadOnlyRows(UUID key) throws SQLException {
+        try (Connection connection = adminConnection(); PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO vev_it.readonly_snapshot(id, tenant_id, label) VALUES (?, 7, 'visible'), (?, 8, 'foreign')")) {
+            statement.setObject(1, key);
+            statement.setObject(2, key);
+            statement.executeUpdate();
+            try (Statement seed = connection.createStatement()) {
+                seed.execute("INSERT INTO vev_it.readonly_identity(id, tenant_id, version, label) OVERRIDING SYSTEM VALUE VALUES (1,7,0,'first'), (2,7,9223372036854775807,NULL), (1,8,0,'foreign')");
+                seed.execute("INSERT INTO vev_it.kotlin_readonly(id, tenant_id, label) OVERRIDING SYSTEM VALUE VALUES (1,7,'visible'), (1,8,'foreign')");
+            }
+        }
+    }
+
+    void readOnlyVariant(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("REVOKE ALL ON vev_it.readonly_identity FROM vev_it_app");
+            statement.execute("REVOKE INSERT (id, tenant_id, version, label), UPDATE (id, tenant_id, version, label), REFERENCES (id, tenant_id, version, label) ON vev_it.readonly_identity FROM vev_it_app");
+            statement.execute("REVOKE ALL ON SEQUENCE vev_it.readonly_identity_id_seq FROM vev_it_app");
+            statement.execute("GRANT SELECT ON vev_it.readonly_identity TO vev_it_app");
+            String mutation = switch (variant) {
+                case "valid" -> null;
+                case "noSelect" -> "REVOKE SELECT ON vev_it.readonly_identity FROM vev_it_app";
+                case "insert" -> "GRANT INSERT (label) ON vev_it.readonly_identity TO vev_it_app";
+                case "update" -> "GRANT UPDATE (label) ON vev_it.readonly_identity TO vev_it_app";
+                case "delete" -> "GRANT DELETE ON vev_it.readonly_identity TO vev_it_app";
+                case "usage" -> "GRANT USAGE ON SEQUENCE vev_it.readonly_identity_id_seq TO vev_it_app";
+                case "sequenceUpdate" -> "GRANT UPDATE ON SEQUENCE vev_it.readonly_identity_id_seq TO vev_it_app";
+                case "negativeVersion" -> "UPDATE vev_it.readonly_identity SET version = -1 WHERE tenant_id = 7 AND id = 1";
+                default -> throw new IllegalArgumentException(variant);
+            };
+            if (mutation != null) statement.execute(mutation);
+        }
+    }
+
+    private static List<String> readOnlySchemaStatements() {
+        var statements = new java.util.ArrayList<String>();
+        for (String table : List.of("readonly_snapshot", "readonly_identity", "kotlin_readonly")) {
+            String id = switch (table) {
+                case "readonly_snapshot" -> "uuid";
+                case "readonly_identity" -> "smallint GENERATED ALWAYS AS IDENTITY";
+                default -> "integer GENERATED ALWAYS AS IDENTITY";
+            };
+            boolean versioned = table.equals("readonly_identity");
+            statements.add("CREATE TABLE vev_it." + table + " (id " + id + " NOT NULL, tenant_id integer NOT NULL, "
+                    + (versioned ? "version bigint NOT NULL, " : "") + "label varchar(64)" + (versioned ? "" : " NOT NULL")
+                    + ", PRIMARY KEY (tenant_id, id))");
+            statements.add("ALTER TABLE vev_it." + table + " OWNER TO " + OWNER_ROLE);
+            if (!table.equals("kotlin_readonly")) statements.add("CREATE INDEX " + table + "_label_idx ON vev_it." + table + " (tenant_id, label, id)");
+            statements.add("ALTER TABLE vev_it." + table + " ENABLE ROW LEVEL SECURITY");
+            statements.add("ALTER TABLE vev_it." + table + " FORCE ROW LEVEL SECURITY");
+            statements.add("CREATE POLICY " + table + "_tenant ON vev_it." + table
+                    + " FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer)"
+                    + " WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)");
+            statements.add("GRANT SELECT ON vev_it." + table + " TO vev_it_app");
+        }
+        return statements;
     }
 
     void deletionPrivilege(String variant) throws SQLException {

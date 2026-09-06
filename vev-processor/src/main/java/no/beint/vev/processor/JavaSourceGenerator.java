@@ -15,18 +15,7 @@ final class JavaSourceGenerator {
                 .append(" * <p>This class is generated and must not be edited.</p>\n")
                 .append(" */\n")
                 .append("public final class ").append(entity.simpleName()).append("Vev implements ")
-                .append(entity.appendOnly()
-                        ? "no.beint.vev.pg.spi.PgEntityPlan<" + modelMarker + ", " + entity.qualifiedName()
-                                + ", " + entity.id().boxedType() + ", " + entity.tenant().boxedType() + ">"
-                        : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + modelMarker + ", "
-                                + entity.qualifiedName() + ", " + entity.id().boxedType() + ", "
-                                + entity.tenant().boxedType() + ", " + entity.version().boxedType() + ">")
-                .append(entity.id().identity() ? ", no.beint.vev.pg.spi.PgGeneratedEntityPlan<" : ", no.beint.vev.AssignedEntityType<")
-                .append(modelMarker).append(", ").append(entity.qualifiedName()).append(", ").append(entity.id().boxedType())
-                .append(entity.id().identity() ? ", " + entity.tenant().boxedType() + ", " + entity.simpleName() + "Vev.New" : "")
-                .append(">")
-                .append(entity.deletable() ? ", no.beint.vev.DeletableEntityType<" + modelMarker + ", "
-                        + entity.qualifiedName() + ", " + entity.id().boxedType() + ", " + entity.version().boxedType() + ">" : "")
+                .append(planInterfaces(entity, modelMarker))
                 .append(" {\n")
                 .append("    /** Singleton generated mapping plan for {@link ")
                 .append(entity.qualifiedName()).append("}. */\n")
@@ -34,7 +23,7 @@ final class JavaSourceGenerator {
                 .append(entity.simpleName()).append("Vev();\n\n")
                 .append("    private ").append(entity.simpleName()).append("Vev() {\n")
                 .append("    }\n\n");
-        if (entity.id().identity()) {
+        if (entity.id().identity() && !entity.readOnly()) {
             appendCreationInput(source, entity);
         }
         for (int index = 0; index < entity.properties().size(); index++) {
@@ -113,11 +102,28 @@ final class JavaSourceGenerator {
                 "return entity." + entity.id().name() + "();");
         method(source, "public " + entity.tenant().boxedType() + " tenantKeyOf(" + entity.qualifiedName() + " entity)",
                 "return entity." + entity.tenant().name() + "();");
-        if (!entity.appendOnly()) {
+        if (!entity.appendOnly() && !entity.readOnly()) {
             appendVersionedMethods(source, entity);
         }
         source.append("}\n");
         return source.toString();
+    }
+
+    private static String planInterfaces(EntityMapping entity, String modelMarker) {
+        String types = modelMarker + ", " + entity.qualifiedName() + ", " + entity.id().boxedType();
+        String tenantTypes = types + ", " + entity.tenant().boxedType();
+        var interfaces = new java.util.ArrayList<String>();
+        if (entity.readOnly()) {
+            interfaces.add("no.beint.vev.pg.spi.PgReadOnlyEntityPlan<" + tenantTypes + ">");
+            if (entity.id().identity()) interfaces.add("no.beint.vev.pg.spi.PgIdentityEntityPlan<" + tenantTypes + ">");
+        } else {
+            interfaces.add(entity.appendOnly() ? "no.beint.vev.pg.spi.PgEntityPlan<" + tenantTypes + ">"
+                    : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + tenantTypes + ", " + entity.version().boxedType() + ">");
+            interfaces.add(entity.id().identity() ? "no.beint.vev.pg.spi.PgGeneratedEntityPlan<" + tenantTypes + ", " + entity.simpleName() + "Vev.New>"
+                    : "no.beint.vev.AssignedEntityType<" + types + ">");
+            if (entity.deletable()) interfaces.add("no.beint.vev.DeletableEntityType<" + types + ", " + entity.version().boxedType() + ">");
+        }
+        return String.join(", ", interfaces);
     }
 
     private void appendCreationInput(StringBuilder source, EntityMapping entity) {

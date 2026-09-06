@@ -493,7 +493,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     private <E, K, V> PgVersionedEntityPlan<M, E, K, Tenant, V> versionedPlan(Object entity) {
         PgEntityPlan<M, Object, Object, Tenant> plan = planForEntity(entity);
         if (!(plan instanceof PgVersionedEntityPlan<?, ?, ?, ?, ?> versioned)) {
-            throw new IllegalArgumentException(plan.logicalName() + " is append-only");
+            throw new IllegalArgumentException(plan.logicalName() + " has no versioned mutation capability");
         }
         return (PgVersionedEntityPlan<M, E, K, Tenant, V>) versioned;
     }
@@ -546,6 +546,9 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
 
     @SuppressWarnings("unchecked")
     private <E, K> no.beint.vev.AssignedEntityType<M, E, K> requireAssigned(PgEntityPlan<M, E, K, Tenant> plan) {
+        if (plan instanceof no.beint.vev.pg.spi.PgReadOnlyEntityPlan<?, ?, ?, ?>) {
+            throw new UnsupportedOperationException("Read-only mappings cannot be inserted");
+        }
         if (!(plan instanceof no.beint.vev.AssignedEntityType<?, ?, ?> assigned)) {
             throw new UnsupportedOperationException("EntityAgent cannot return an immutable generated-ID snapshot; use native create");
         }

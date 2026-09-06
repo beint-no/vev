@@ -973,7 +973,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             || resultSet.getBoolean(14)
                             || resultSet.getBoolean(15)
                             || resultSet.getBoolean(16)
-                            || !resultSet.getBoolean(17)
+                            || resultSet.getBoolean(17) == plan.readOnly()
                             || resultSet.getBoolean(19)
                             || resultSet.getBoolean(20)
                             || resultSet.getBoolean(21)
@@ -1041,7 +1041,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     boolean updateAllowed = versioned
                             && (column.role() == PgColumn.Role.VALUE || column.role() == PgColumn.Role.VERSION);
                     if (!column.name().equals(resultSet.getString(1))
-                            || !resultSet.getBoolean(2)
+                            || resultSet.getBoolean(2) == plan.readOnly()
                             || resultSet.getBoolean(3) != updateAllowed
                             || resultSet.getBoolean(4)
                             || resultSet.getBoolean(5)

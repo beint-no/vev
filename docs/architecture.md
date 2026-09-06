@@ -38,6 +38,10 @@ Native `insertMultiple` is one fixed set-based PostgreSQL statement: one typed a
 
 The native execution path is `TransactionExecutor` to a lexical `ReadTx` or `WriteTx`, then `ReadEntities` or `WriteEntities`. The `vev-jakarta4` module adapts its selected `EntityAgent`-shaped operations onto that smaller native contract. It neither conforms to the complete `EntityAgent` contract nor implements the complete Jakarta Persistence provider surface.
 
+## Read-only capabilities
+
+[Read-only mappings](read-only-mappings.md) describe stored rows without granting mutation. Identity-column metadata is separate from creation capability; an optional stored version does not produce an update capability. The generated plan exposes only reads, the runtime compiles no write statements, and bootstrap requires SELECT-only grants with no sequence access. Tenant scope and all existing schema restrictions remain mandatory.
+
 ## Why stateless is the default
 
 A persistence context couples identity, dirty checking, flushing, proxy initialization, cascade traversal, and transaction lifecycle. Those features are useful, but reproducing them partially is dangerous. Vev's initial contract leaves them out so that a database effect can be traced to a visible call and a generated SQL shape.

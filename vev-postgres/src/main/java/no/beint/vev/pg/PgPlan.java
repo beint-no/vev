@@ -38,6 +38,8 @@ class PgPlan<M, E, K, T> {
     private String creationSql;
     private PgDeletionSql deletionSql;
     private final boolean deletable;
+    private final boolean readOnly;
+    private final boolean generatedIdentity;
 
     PgPlan(PgEntityPlan<M, E, K, T> source) {
         this.source = Objects.requireNonNull(source, "source");
@@ -64,6 +66,15 @@ class PgPlan<M, E, K, T> {
         this.creationType = source instanceof PgGeneratedEntityPlan<?, ?, ?, ?, ?> generated
                 ? Objects.requireNonNull(generated.creationType(), "creationType") : null;
         this.deletable = source instanceof no.beint.vev.DeletableEntityType<?, ?, ?, ?>;
+        this.readOnly = source instanceof no.beint.vev.pg.spi.PgReadOnlyEntityPlan<?, ?, ?, ?>;
+        this.generatedIdentity = source instanceof no.beint.vev.pg.spi.PgIdentityEntityPlan<?, ?, ?, ?>;
+        if (readOnly && (source instanceof no.beint.vev.AssignedEntityType<?, ?, ?>
+                || source instanceof no.beint.vev.VersionedEntityType<?, ?, ?, ?> || creationType != null || deletable)) {
+            throw new IllegalArgumentException("Read-only plans cannot expose mutation capabilities");
+        }
+        if (generatedIdentity && !readOnly && creationType == null) {
+            throw new IllegalArgumentException("Writable identity metadata requires a generated creation capability");
+        }
         if (deletable && (creationType == null || !(source instanceof PgVersionedEntityPlan<?, ?, ?, ?, ?>))) {
             throw new IllegalArgumentException("Physical deletion requires a versioned generated identity plan");
         }
@@ -120,7 +131,11 @@ class PgPlan<M, E, K, T> {
     }
 
     boolean generatedIdentity() {
-        return creationType != null;
+        return generatedIdentity;
+    }
+
+    boolean readOnly() {
+        return readOnly;
     }
 
     boolean deletable() {
@@ -269,7 +284,7 @@ class PgPlan<M, E, K, T> {
             throw new IllegalStateException("PostgreSQL SQL was already compiled for " + logicalName);
         }
         sql = Objects.requireNonNull(compiledSql, "compiledSql");
-        creationSql = generatedIdentity() ? PgCreationSql.compile(this) : null;
+        creationSql = creationType != null ? PgCreationSql.compile(this) : null;
         deletionSql = deletable ? PgDeletionSql.compile(this) : null;
         for (PgIndex<M, E, K, ?> index : indexes) {
             indexSql.put(index, compiledSql.index(index));

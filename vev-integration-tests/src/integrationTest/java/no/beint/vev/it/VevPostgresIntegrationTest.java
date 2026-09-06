@@ -28,6 +28,7 @@ import no.beint.vev.fixtures.KotlinBinaryVev;
 import no.beint.vev.fixtures.KotlinTextVev;
 import no.beint.vev.fixtures.KotlinClock;
 import no.beint.vev.fixtures.KotlinClockVev;
+import no.beint.vev.fixtures.KotlinReadOnlyVev;
 import no.beint.vev.jakarta.VevEntityAgents;
 import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
@@ -91,6 +92,84 @@ final class VevPostgresIntegrationTest {
     @BeforeEach
     void truncate() throws SQLException {
         database.truncateAccounts();
+    }
+
+    @Test
+    void readOnlyMappingsPreserveStoredVersionsTenantBoundsAndEveryReadShape() throws SQLException {
+        UUID key = id("read-only");
+        database.seedReadOnlyRows(key);
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            runtime.read(authority.scope(7), tx -> {
+                assertEquals("visible", tx.entities().find(ReadOnlySnapshotVev.INSTANCE.key(key)).orElseThrow().label());
+                assertEquals("visible", tx.entities().find(KotlinReadOnlyVev.INSTANCE.key(1)).orElseThrow().label());
+                var batch = tx.entities().findMultiple(ReadOnlyIdentityVev.INSTANCE, Batch.copyOf(List.of((short) 2, (short) 99, (short) 1)));
+                assertInstanceOf(EntityLookup.Missing.class, batch.get(1));
+                var first = ((EntityLookup.Found<?, ReadOnlyIdentity, ?>) batch.get(2)).entity();
+                var second = ((EntityLookup.Found<?, ReadOnlyIdentity, ?>) batch.get(0)).entity();
+                assertEquals(0L, first.version());
+                assertEquals(Long.MAX_VALUE, second.version());
+                var page = tx.entities().many(PgQueries.scanById(ReadOnlyIdentityVev.INSTANCE, new QueryLimit(1)));
+                assertEquals(List.of(first), page.values());
+                assertTrue(page.hasMore());
+                assertEquals(List.of(second), tx.entities().many(PgQueries.scanByIdAfter(ReadOnlyIdentityVev.INSTANCE.key((short) 1), new QueryLimit(1))).values());
+                assertEquals(List.of(first), tx.entities().many(PgQueries.equal(ReadOnlyIdentityVev.LABEL, "first", new QueryLimit(1))).values());
+                assertTrue(tx.entities().many(PgQueries.equalAfter(ReadOnlyIdentityVev.LABEL, "first", ReadOnlyIdentityVev.INSTANCE.key((short) 1), new QueryLimit(1))).values().isEmpty());
+                assertEquals(List.of(second), tx.entities().many(PgQueries.isNull(ReadOnlyIdentityVev.LABEL, new QueryLimit(1))).values());
+                assertTrue(tx.entities().many(PgQueries.isNullAfter(ReadOnlyIdentityVev.LABEL, ReadOnlyIdentityVev.INSTANCE.key((short) 2), new QueryLimit(1))).values().isEmpty());
+                return null;
+            });
+            runtime.write(authority.scope(8), tx -> {
+                assertEquals("foreign", tx.entities().find(ReadOnlySnapshotVev.INSTANCE.key(key)).orElseThrow().label());
+                assertEquals("foreign", tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 1)).orElseThrow().label());
+                assertTrue(tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 2)).isEmpty());
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void jakartaFacadeReadsReadOnlyMappingsAndRejectsTheirWritesBeforeSql() throws SQLException {
+        UUID key = id("read-only-facade");
+        database.seedReadOnlyRows(key);
+        VevEntityAgents.runInTransaction(vev, TENANT_7, agent -> {
+            var stored = agent.find(ReadOnlyIdentity.class, (short) 1);
+            assertNotNull(stored);
+            assertEquals(0L, stored.version());
+            assertThrows(UnsupportedOperationException.class, () -> agent.insert(stored));
+            assertThrows(UnsupportedOperationException.class, () -> agent.insertMultiple(List.of(stored)));
+            assertThrows(IllegalArgumentException.class, () -> agent.update(stored));
+            assertEquals("visible", agent.find(ReadOnlySnapshot.class, key).label());
+        });
+        assertEquals(0L, vev.read(TENANT_7, tx -> tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 1))).orElseThrow().version());
+    }
+
+    @Test
+    void readOnlyTablesRejectEveryWritePrivilegeAndKeepIdentitySequenceAccessAbsent() throws SQLException {
+        try {
+            for (String variant : List.of("noSelect", "insert", "update", "delete", "usage", "sequenceUpdate")) {
+                database.readOnlyVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.readOnlyVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void invalidStoredReadOnlyVersionRollsBackEarlierWritesEvenWhenCaught() throws SQLException {
+        database.seedReadOnlyRows(id("read-only-version"));
+        database.readOnlyVariant("negativeVersion");
+        UUID earlier = id("read-only-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "readonly@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 1)));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
     }
 
     @Test

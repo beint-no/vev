@@ -289,6 +289,33 @@ final class PgModelBoundsTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void readOnlyMetadataCannotAcquireMutationCapabilitiesOrCompileWriteStatements() {
+        var source = plan(List.of(ID, TENANT));
+        for (Class<?> extra : List.of(no.beint.vev.AssignedEntityType.class, no.beint.vev.VersionedEntityType.class,
+                no.beint.vev.pg.spi.PgGeneratedEntityPlan.class, no.beint.vev.DeletableEntityType.class)) {
+            var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, extra},
+                    (proxy, method, arguments) -> method.getName().equals("creationType") ? Object.class : method.invoke(source, arguments));
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(invalid)));
+            assertEquals("Read-only plans cannot expose mutation capabilities", failure.getMessage());
+        }
+        for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgIdentityEntityPlan.class)) {
+            var valid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, extra},
+                    (proxy, method, arguments) -> method.invoke(source, arguments));
+            var captured = new PgModel<>(IDENTITY, List.of(valid)).frozenPlans().getFirst();
+            org.junit.jupiter.api.Assertions.assertTrue(captured.readOnly());
+            assertEquals(extra == no.beint.vev.pg.spi.PgIdentityEntityPlan.class, captured.generatedIdentity());
+            org.junit.jupiter.api.Assertions.assertNull(captured.creationType());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().insert());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().insertMultiple());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().update());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().updateMultiple());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void deletionMetadataRequiresBothGeneratedIdentityAndVersionedSpiCapabilities() {
         var source = plan(List.of(ID, TENANT));
         for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgGeneratedEntityPlan.class,

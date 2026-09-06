@@ -66,9 +66,9 @@ final class PgSql {
                 + " AND " + quoted(id.name()) + " > ?"
                 + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
 
-        String insert = "INSERT INTO " + table + " (" + quotedColumns(columns) + ") VALUES ("
+        String insert = plan.readOnly() ? null : "INSERT INTO " + table + " (" + quotedColumns(columns) + ") VALUES ("
                 + placeholders(columns.size()) + ") RETURNING " + selectedColumns;
-        String insertMultiple = insertMultiple(table, columns, id, tenant);
+        String insertMultiple = plan.readOnly() ? null : insertMultiple(table, columns, id, tenant);
         Map<PgIndex<?, ?, ?, ?>, PgIndexSql> indexes = compileIndexes(plan, table, selectedColumns, id, tenant);
 
         if (!(plan instanceof PgVersionPlan<?, ?, ?, ?, ?>)) {

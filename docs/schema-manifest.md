@@ -17,7 +17,7 @@ Format version 1 identifies itself with `format: "vev-schema"`,
 Consumers must reject unknown format versions or profiles. The resource includes:
 
 - the model's qualified name and the exact generated mapping fingerprint;
-- entity Java types, schema/table identifiers, append-only semantics, and maximum row counts;
+- entity Java types, schema/table identifiers, append-only semantics, explicit `readOnly: true` where declared, and maximum row counts;
 - ordered columns with boxed Java type, PostgreSQL type, nullability, structural
   role, string code-point or binary byte length, decimal precision, scale, and sorted enum names;
 - ordered primary-key and secondary-index columns, plus named tenant-scoped unique constraints with distinct-null and immediate enforcement semantics;
@@ -25,7 +25,7 @@ Consumers must reject unknown format versions or profiles. The resource includes
 - named exact check expressions and generated length bounds: `BINARY_MAXIMUM` with `maximumBytes`, or `TEXT_MAXIMUM` with `maximumCodePoints`, plus the column and canonical expression;
 - assigned/identity identifier strategy and the required owned-sequence contract for identity creation;
 - required enabled/forced tenant row security and its transaction-local setting;
-- the exact application insert/update column sets and whether `@VevDelete` requires table-level delete access.
+- the exact application insert/update column sets and whether `@VevDelete` requires table-level delete access; read-only mappings have no write or sequence privileges.
 
 The profile also requires the catalog restrictions in
 [the schema pipeline](aot-schema-pipeline.md#3-schema-verification), including

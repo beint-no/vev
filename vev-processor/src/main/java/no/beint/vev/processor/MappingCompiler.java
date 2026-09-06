@@ -66,6 +66,7 @@ final class MappingCompiler {
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final String VEV_ROWS = "no.beint.vev.VevRows";
     private static final String VEV_DELETE = "no.beint.vev.VevDelete";
+    private static final String VEV_READ_ONLY = "no.beint.vev.VevReadOnly";
     private static final String VEV_BINARY = "no.beint.vev.VevBinary";
     private static final String VEV_TEXT = "no.beint.vev.VevText";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
@@ -363,9 +364,11 @@ final class MappingCompiler {
             error(entity, "Every Vev entity must declare exactly one @TenantKey, but found " + tenants.size());
         }
         boolean appendOnly = annotation(entity, APPEND_ONLY) != null;
+        boolean readOnly = annotation(entity, VEV_READ_ONLY) != null;
+        if (appendOnly && readOnly) error(entity, "@VevReadOnly and @AppendOnly are distinct capabilities and cannot be combined");
         if (appendOnly && !versions.isEmpty()) {
             error(entity, "@AppendOnly entities must not declare @Version because update and delete plans do not exist");
-        } else if (!appendOnly && versions.isEmpty()) {
+        } else if (!appendOnly && !readOnly && versions.isEmpty()) {
             error(entity, "Mutable Vev entities require exactly one @Version; use @AppendOnly to opt out of mutation");
         } else if (versions.size() > 1) {
             error(entity, "Mutable Vev entities must declare exactly one @Version");
@@ -375,8 +378,8 @@ final class MappingCompiler {
         PropertyMapping tenant = tenants.size() == 1 ? tenants.getFirst() : null;
         PropertyMapping version = versions.size() == 1 ? versions.getFirst() : null;
         boolean deletable = annotation(entity, VEV_DELETE) != null;
-        if (deletable && (appendOnly || id == null || !id.identity() || version == null)) {
-            error(entity, "@VevDelete requires a versioned entity with a generated IDENTITY; assigned and append-only entities cannot be deleted");
+        if (deletable && (readOnly || appendOnly || id == null || !id.identity() || version == null)) {
+            error(entity, "@VevDelete requires a versioned entity with a generated IDENTITY; assigned, read-only, and append-only entities cannot be deleted");
         }
         AnnotationMirror primaryKey = annotation(entity, VEV_PRIMARY_KEY);
         String primaryKeyShape = primaryKey == null ? "TENANT_ID" : enumValue(primaryKey, "value");
@@ -415,7 +418,7 @@ final class MappingCompiler {
         String entityPackage = packageName(entity);
         String planQualifiedName = qualify(entityPackage, entity.getSimpleName() + "Vev");
         rejectGeneratedTypeCollision(entity, planQualifiedName);
-        if (invalid || id == null || tenant == null || (!appendOnly && version == null)
+        if (invalid || id == null || tenant == null || (!appendOnly && !readOnly && version == null)
                 || tableName.isBlank() || schemaName.isBlank()) {
             return null;
         }
@@ -437,6 +440,7 @@ final class MappingCompiler {
                 tenant,
                 version,
                 appendOnly,
+                readOnly,
                 deletable,
                 primaryKeyShape,
                 maximumRows);
@@ -465,7 +469,8 @@ final class MappingCompiler {
         if (!stringValue(column, "table").isEmpty()) {
             error(component, "Per-column secondary tables are forbidden; @Column.table must be empty");
         }
-        if (!booleanValue(column, "insertable") || !booleanValue(column, "updatable")) {
+        if ((!booleanValue(column, "insertable") || !booleanValue(column, "updatable"))
+                && annotation(entity, VEV_READ_ONLY) == null) {
             error(component, "@Column.insertable and @Column.updatable must both remain true in immutable Vev snapshots");
         }
         if (booleanValue(column, "unique")) {
@@ -902,7 +907,7 @@ final class MappingCompiler {
         for (AnnotationMirror annotation : entity.getAnnotationMirrors()) {
             String name = annotationName(annotation);
             if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY)
-                    || name.equals(VEV_ROWS) || name.equals(VEV_DELETE)) {
+                    || name.equals(VEV_ROWS) || name.equals(VEV_DELETE) || name.equals(VEV_READ_ONLY)) {
                 validateAnnotationShape(entity, annotation);
                 continue;
             }
@@ -1131,7 +1136,7 @@ final class MappingCompiler {
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
-            case VEV_DELETE -> Set.of();
+            case VEV_DELETE, VEV_READ_ONLY -> Set.of();
             case VEV_BINARY -> Set.of("maximumBytes", "check");
             case VEV_TEXT -> Set.of("check");
             default -> ANNOTATION_MEMBERS.get(annotationName);
@@ -1219,6 +1224,7 @@ final class MappingCompiler {
                     .append(entity.tableSql()).append('|')
                     .append(entity.appendOnly()).append('\n');
             if (entity.deletable()) canonical.append("delete|versionedIdentity\n");
+            if (entity.readOnly()) canonical.append("readOnly\n");
             for (CheckMapping check : entity.checkConstraints()) {
                 checkCharacters += check.expression().length();
                 if (checkCharacters > 16 * 1024 * 1024) {

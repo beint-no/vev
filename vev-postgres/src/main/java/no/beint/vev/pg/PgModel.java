@@ -275,9 +275,9 @@ public final class PgModel<M, T> {
                         "Entity version metadata requires Vev's Integer, Long, or Short codec: "
                                 + plan.logicalName());
             }
-        } else if (version != null) {
+        } else if (version != null && !(plan.readOnly() && VERSION_CODECS.contains(version.codec()))) {
             throw new IllegalArgumentException(
-                    "Append-only entity plan must not expose a version column: " + plan.logicalName());
+                    "Only mutable or read-only plans may expose an Integer, Long, or Short version column: " + plan.logicalName());
         }
         validateIndexes(plan, id, tenant);
         validateUniqueConstraints(plan);
