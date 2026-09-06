@@ -140,6 +140,28 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void persistenceUsesColumnsWithoutCallingEntityEqualityHashingOrRendering() {
+        SnapshotProbe single = vev.write(TENANT_7,
+                tx -> tx.entities().insert(SnapshotProbeVev.INSTANCE, new SnapshotProbe(1, 7, 0, "first")));
+        assertEquals("first", single.value());
+        var inserted = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(SnapshotProbeVev.INSTANCE,
+                Batch.copyOf(List.of(new SnapshotProbe(2, 7, 0, "second"), new SnapshotProbe(3, 7, 0, "third")))));
+        assertEquals(List.of(2L, 3L), inserted.values().stream().map(SnapshotProbe::id).toList());
+        var updated = vev.write(TENANT_7, tx -> tx.entities().update(SnapshotProbeVev.INSTANCE,
+                new SnapshotProbe(1, 7, 0, "changed")));
+        assertEquals("changed", ((MutationResult.Applied<?, SnapshotProbe, ?, ?>) updated).entity().value());
+        var batch = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(SnapshotProbeVev.INSTANCE,
+                Batch.copyOf(List.of(new SnapshotProbe(3, 7, 0, "third changed"), new SnapshotProbe(2, 7, 0, "second changed")))));
+        assertEquals(1L, batch.get(0).entity().version());
+        assertEquals(3L, batch.get(0).entity().id());
+        assertEquals("changed", vev.read(TENANT_7,
+                tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1L))).orElseThrow().value());
+        var page = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(SnapshotProbeVev.INSTANCE, new QueryLimit(10))));
+        assertEquals(List.of(1L, 2L, 3L), page.values().stream().map(SnapshotProbe::id).toList());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1L))).isEmpty());
+    }
+
+    @Test
     void scalarReferencesEnforceTenantCompositeKeysAndRollbackEarlierWrites() {
         UUID targetId = id("reference-parent");
         insert(account(targetId, 8, 0, "parent@example.test", "1.0000"), TENANT_8);

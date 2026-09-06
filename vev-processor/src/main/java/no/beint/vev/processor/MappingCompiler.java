@@ -273,7 +273,7 @@ final class MappingCompiler {
         rejectImplementedInterfaces(entity);
         if (sourceTypes.contains(entity.getQualifiedName().toString())) {
             rejectExplicitCanonicalConstructor(entity);
-            rejectExplicitInstanceMethods(entity);
+            rejectExplicitAccessors(entity);
             rejectInitializationSideEffects(entity);
         } else {
             try {
@@ -808,10 +808,12 @@ final class MappingCompiler {
         }
     }
 
-    private void rejectExplicitInstanceMethods(TypeElement entity) {
+    private void rejectExplicitAccessors(TypeElement entity) {
         for (ExecutableElement method : ElementFilter.methodsIn(entity.getEnclosedElements())) {
-            if (!method.getModifiers().contains(Modifier.STATIC) && hasSourcePosition(entity, method)) {
-                error(method, "Explicit instance methods are forbidden because Vev entities must retain generated record equality and pure accessors");
+            if (!method.getModifiers().contains(Modifier.STATIC) && method.getParameters().isEmpty()
+                    && entity.getRecordComponents().stream().anyMatch(component -> component.getSimpleName().equals(method.getSimpleName()))
+                    && hasSourcePosition(entity, method)) {
+                error(method, "Explicit record accessors are forbidden because hydration requires direct unmodified component values");
             }
         }
     }

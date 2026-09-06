@@ -464,20 +464,9 @@ final class VevProcessorTest {
         cases.put("runtimeStaticField", new NegativeCase(
                 recordSource(validTable(), validComponents(), "static final Object STATE = new Object();"),
                 "Static entity fields must be compile-time constants"));
-        cases.put("instanceMethod", new NegativeCase(
-                recordSource(validTable(), validComponents(), "public String label() { return displayName; }"),
-                "Explicit instance methods are forbidden"));
-        cases.put("customEquals", new NegativeCase(
-                recordSource(validTable(), validComponents(),
-                        "@Override public boolean equals(Object other) { return this == other; }"),
-                "Explicit instance methods are forbidden"));
-        cases.put("customHashCode", new NegativeCase(
-                recordSource(validTable(), validComponents(), "@Override public int hashCode() { return 0; }"),
-                "Explicit instance methods are forbidden"));
-        cases.put("customToString", new NegativeCase(
-                recordSource(validTable(), validComponents(),
-                        "@Override public String toString() { return displayName; }"),
-                "Explicit instance methods are forbidden"));
+        cases.put("customAccessor", new NegativeCase(
+                recordSource(validTable(), validComponents(), "public String displayName() { return displayName.strip(); }"),
+                "Explicit record accessors are forbidden"));
         cases.put("reservedIndexToken", new NegativeCase(
                 recordSource(validTable(), validComponents().replace(
                         "@Column(name = \"display_name\", nullable = false, length = 255) String displayName",
@@ -754,17 +743,13 @@ final class VevProcessorTest {
     }
 
     @Test
-    void compiledRecordsCannotHideConstructorAccessorEqualityOrInitializationBehavior() throws IOException {
+    void compiledRecordsCannotHideConstructorAccessorOrInitializationBehavior() throws IOException {
         for (String body : List.of(
                 "public Account { displayName = displayName.strip(); }",
                 "public Account { System.setProperty(\"vev.verifier.executed\", \"yes\"); }",
                 "public String displayName() { return displayName.toUpperCase(java.util.Locale.ROOT); }",
                 "public String displayName() { return alias; }",
                 "public int version() { return version + 1; }",
-                "public boolean equals(Object other) { return true; }",
-                "public int hashCode() { return 0; }",
-                "public String toString() { return \"custom\"; }",
-                "public int extra() { return 1; }",
                 "static { System.setProperty(\"vev.verifier.executed\", \"yes\"); }",
                 "private static final String VALUE = System.getProperty(\"java.version\");")) {
             var sources = positiveSources();
@@ -834,6 +819,28 @@ final class VevProcessorTest {
             assertFalse(consumer.success(), declaration);
             assertFalse(Files.exists(consumer.classesDirectory().resolve("META-INF/vev/example.BillingModel.schema.json")));
         }
+    }
+
+    @Test
+    void uncalledRecordHelpersDoNotAlterTheGeneratedPersistenceContract() throws IOException {
+        var sources = positiveSources();
+        Compilation original = compile(sources);
+        sources.computeIfPresent("example/Account.java", (path, source) -> source.replace(
+                "private static final String ENTITY_KIND = \"account\";", """
+                        public boolean equals(Object other) { throw new AssertionError(); }
+                        public int hashCode() { throw new AssertionError(); }
+                        public String toString() { throw new AssertionError(); }
+                        public String label() { return displayName.strip(); }
+                        """));
+        Compilation fromSource = compile(sources);
+        assertTrue(fromSource.success(), fromSource.diagnostics());
+        assertEquals(original.manifest("example.BillingModel"), fromSource.manifest("example.BillingModel"));
+        String model = sources.remove("example/BillingModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation consumer = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertTrue(consumer.success(), consumer.diagnostics());
+        assertEquals(original.generated("example/AccountVev.java"), consumer.generated("example/AccountVev.java"));
     }
 
     private static String formatDiagnostic(Diagnostic<? extends JavaFileObject> diagnostic) {

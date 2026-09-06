@@ -10,18 +10,13 @@ import java.lang.classfile.Opcode;
 import java.lang.classfile.TypeKind;
 import java.lang.classfile.attribute.RecordComponentInfo;
 import java.lang.classfile.instruction.FieldInstruction;
-import java.lang.classfile.instruction.InvokeDynamicInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
 import java.lang.classfile.instruction.LoadInstruction;
 import java.lang.classfile.instruction.ReturnInstruction;
 import java.lang.constant.ClassDesc;
-import java.lang.constant.ConstantDesc;
 import java.lang.constant.ConstantDescs;
-import java.lang.constant.DirectMethodHandleDesc;
-import java.lang.constant.MethodHandleDesc;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.reflect.AccessFlag;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -33,12 +28,6 @@ import javax.tools.StandardLocation;
 /** Build-time proof of the same direct snapshot operations accepted from Java source. */
 final class CompiledRecordVerifier {
     private static final int MAXIMUM_CLASS_BYTES = 1_048_576;
-    private static final DirectMethodHandleDesc OBJECT_METHODS_BOOTSTRAP = MethodHandleDesc.ofMethod(
-            DirectMethodHandleDesc.Kind.STATIC, ClassDesc.of("java.lang.runtime.ObjectMethods"), "bootstrap",
-            MethodTypeDesc.ofDescriptor("(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;"
-                    + "Ljava/lang/invoke/TypeDescriptor;Ljava/lang/Class;Ljava/lang/String;"
-                    + "[Ljava/lang/invoke/MethodHandle;)Ljava/lang/Object;"));
-
     private CompiledRecordVerifier() {
     }
 
@@ -85,12 +74,10 @@ final class CompiledRecordVerifier {
                     .findFirst().orElse(null);
             if (component != null && method.methodTypeSymbol().equals(MethodTypeDesc.of(component.descriptorSymbol()))) {
                 verifyAccessor(method, owner, component);
-            } else {
-                verifyObjectMethod(method, owner, components);
+                require(verified.add(name), "Compiled record declares an ambiguous snapshot accessor");
             }
-            require(verified.add(name), "Compiled record declares an ambiguous snapshot method");
         }
-        require(verified.size() == components.size() + 4 && verified.containsAll(List.of("<init>", "equals", "hashCode", "toString")),
+        require(verified.size() == components.size() + 1 && verified.contains("<init>"),
                 "Compiled record is missing canonical snapshot operations");
     }
 
@@ -161,34 +148,6 @@ final class CompiledRecordVerifier {
                 && field(code.get(1), Opcode.GETFIELD, owner, component)
                 && returns(code.getLast(), TypeKind.from(component.descriptorSymbol()).asLoadable()),
                 "Compiled record accessor must directly return its unmodified component");
-    }
-
-    private static void verifyObjectMethod(MethodModel method, ClassDesc owner, List<RecordComponentInfo> components) {
-        String name = method.methodName().stringValue();
-        MethodTypeDesc type = switch (name) {
-            case "equals" -> MethodTypeDesc.of(ConstantDescs.CD_boolean, ConstantDescs.CD_Object);
-            case "hashCode" -> MethodTypeDesc.of(ConstantDescs.CD_int);
-            case "toString" -> MethodTypeDesc.of(ConstantDescs.CD_String);
-            default -> throw new IllegalArgumentException("Compiled record has an unsupported explicit instance method: " + name);
-        };
-        List<Instruction> code = instructions(method);
-        int arguments = name.equals("equals") ? 2 : 1;
-        require(method.methodTypeSymbol().equals(type) && code.size() == arguments + 2,
-                "Compiled record equality, hashCode, and toString must use standard record semantics");
-        for (int slot = 0; slot < arguments; slot++) {
-            require(load(code.get(slot), TypeKind.REFERENCE, slot), "Compiled record object method arguments differ");
-        }
-        List<ConstantDesc> bootstrapArgs = new ArrayList<>();
-        bootstrapArgs.add(owner);
-        bootstrapArgs.add(components.stream().map(component -> component.name().stringValue())
-                .collect(java.util.stream.Collectors.joining(";")));
-        components.forEach(component -> bootstrapArgs.add(MethodHandleDesc.ofField(
-                DirectMethodHandleDesc.Kind.GETTER, owner, component.name().stringValue(), component.descriptorSymbol())));
-        require(code.get(arguments) instanceof InvokeDynamicInstruction invoke
-                && invoke.name().equalsString(name) && invoke.typeSymbol().equals(type.insertParameterTypes(0, owner))
-                && invoke.bootstrapMethod().equals(OBJECT_METHODS_BOOTSTRAP) && invoke.bootstrapArgs().equals(bootstrapArgs)
-                && returns(code.getLast(), TypeKind.from(type.returnType()).asLoadable()),
-                "Compiled record object methods require exact JDK ObjectMethods bootstrap and component handles");
     }
 
     private static boolean load(Instruction instruction, TypeKind kind, int slot) {

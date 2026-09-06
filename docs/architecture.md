@@ -22,6 +22,14 @@ The PostgreSQL runtime constructs and caches fixed statement shapes from that va
 
 Generated plans are intended to be reusable because they do not retain a connection, transaction, loaded entity, or mutable query state. The `EntityAgent`-shaped facade, query, transaction, and execution-context lifecycles follow their documented Vev contracts.
 
+Vev invokes only validated canonical construction and direct component access on
+an entity. It compares persisted state column by column using the accepted scalar
+codecs; entity `equals`, `hashCode`, `toString`, and application helper methods do
+not participate in persistence. Helpers are allowed because they run only when
+application code calls them. Constructor transformations, custom component
+accessors, executable record initialization, and lifecycle callbacks remain
+outside the accepted snapshot contract.
+
 A mapped record returned by the facade is an ordinary detached snapshot. Vev does not promise that two reads of the same row return the same Java object. Mutation of that object does not schedule a database update. Writes occur only through explicit operations backed by generated plans.
 
 With the current immutable record profile, the facade can perform assigned-value insert, including a homogeneous bounded batch. Insert is permitted only because the verified schema forbids generated/default values, triggers, and rewrite rules; Vev compares every returned database snapshot with its input and prevents commit on a mismatch. The facade cannot safely discard the replacement state or explicit outcome of update or refresh, so those operations fail before SQL. Physical delete and create-capable upsert are absent from the native API and rejected by the facade. The native typed API returns the verified snapshot from insert and an exhaustive applied/missing/conflict result from a single versioned update.

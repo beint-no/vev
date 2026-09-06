@@ -18,15 +18,14 @@ same invocation or separately compiled records on the ordinary class path. Sourc
 records retain the constructor/accessor/initialization checks. Compiled records
 are parsed at build time using the JDK Class-File API; application classes are
 never loaded by this verifier. It requires exact direct canonical assignments,
-pure field accessors, the standard JDK `ObjectMethods` bootstrap with every
-component handle in order, no interfaces, and no executable class initializer or
+pure field accessors, no interfaces, and no executable class initializer or
 nonconstant static state. Each class file is bounded to one MiB.
 
 A compiled record may come from a directory or JAR. The verifier checks the
 version-specific class selected from a multi-release JAR and matches its component
 names, types, and order to javac's resolved declaration. Named-module dependency
-records and Kotlin-generated record methods are not accepted by this first
-compiled-record verifier. The runtime still uses generated direct Java access;
+records remain unsupported. Kotlin constructor/nullability integration is still
+pending. The runtime still uses generated direct Java access;
 there is no runtime bytecode parsing or reflective hydration fallback.
 
 All annotation-profile checks also apply to compiled declarations, including
@@ -36,6 +35,15 @@ when the model source or a mapping dependency changes; a cached fingerprint does
 not exempt changed bytecode from verification. The integration fixture compiles
 its record dependency before compiling the registry and executes the resulting
 plans against PostgreSQL.
+
+The proof covers operations Vev actually invokes: class initialization, canonical
+construction, and component access. Ordinary helper methods, including equality,
+hashing, rendering, and copying, belong to application behavior and are not
+invoked or interpreted by persistence. Allowing such methods does not permit
+custom accessors, constructor transformations, extra mutable state, or lifecycle
+callbacks. Persistence compares and validates every mapped scalar directly; its
+PostgreSQL fixture verifies reads and writes even when all three entity object
+methods throw. Callers remain responsible for the behavior of helpers they call.
 
 ## 2. Deterministic generation
 

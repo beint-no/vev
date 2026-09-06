@@ -68,7 +68,7 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe");
         }
     }
 
@@ -898,6 +898,24 @@ final class IntegrationDatabase {
                 "GRANT SELECT ON TABLE vev_it.work_item TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, state, account_id) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, state, account_id) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
+                """
+                        CREATE TABLE vev_it.snapshot_probe (
+                            id bigint NOT NULL, tenant_id integer NOT NULL, version bigint NOT NULL,
+                            value varchar(64) NOT NULL, PRIMARY KEY (tenant_id, id)
+                        )
+                        """,
+                "ALTER TABLE vev_it.snapshot_probe OWNER TO " + OWNER_ROLE,
+                "ALTER TABLE vev_it.snapshot_probe ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.snapshot_probe FORCE ROW LEVEL SECURITY",
+                """
+                        CREATE POLICY snapshot_probe_tenant ON vev_it.snapshot_probe
+                            FOR ALL TO vev_it_app
+                            USING (tenant_id = current_setting('vev.tenant_id', true)::integer)
+                            WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)
+                        """,
+                "GRANT SELECT ON TABLE vev_it.snapshot_probe TO " + APPLICATION_USER,
+                "GRANT INSERT (id, tenant_id, version, value) ON TABLE vev_it.snapshot_probe TO " + APPLICATION_USER,
+                "GRANT UPDATE (version, value) ON TABLE vev_it.snapshot_probe TO " + APPLICATION_USER,
                 "GRANT SELECT ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,

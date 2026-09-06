@@ -23,9 +23,8 @@ The initial PostgreSQL codec surface is intentionally small: `boolean`/`Boolean`
 
 Records may be supplied as source or as separately compiled dependencies on the
 ordinary class path. Compiled record bytecode must pass the same pure snapshot
-contract through exact constructor, accessor, standard record-object-method, and
-initialization checks; see the [compiler pipeline](aot-schema-pipeline.md).
-Compiled Kotlin record methods and named-module dependency records remain
+contract through exact constructor, accessor, and initialization checks; see the [compiler pipeline](aot-schema-pipeline.md).
+Kotlin constructor/nullability integration and named-module dependency records remain
 unsupported. No application class is loaded during verification.
 
 A closed model has at most 128 entities and an entity has at most 64 columns. The compiler and runtime enforce both limits without trusting user-supplied collection sizes. The generated maximum row shape multiplied by the 1,001-row internal page bound must fit a 64 MiB materialized-result budget. Strings reject U+0000 and malformed UTF-16 before JDBC binding. Numeric and temporal limits, tenant equality, assigned-ID presence, initial version zero, and version overflow are checked before SQL.
