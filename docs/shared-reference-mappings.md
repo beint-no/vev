@@ -21,17 +21,35 @@ public record Category(
         @Column(name = "label", nullable = true, length = 64) String label) {}
 ```
 
-Include the record in the same `@VevModel` as tenant-owned mappings. The model
-must contain at least one tenant-owned record to establish its tenant-key type
-and transaction authority. A standalone global reader or administrative writer
-needs a separate future authority contract; inventing a tenant column or a
-sentinel tenant value is not supported.
+The model normally infers its tenant-key type from tenant-owned mappings. A model
+containing only shared records declares the real application's lexical tenant type:
+
+```java
+@VevModel(entities = Category.class, tenantType = Integer.class)
+public final class ReferenceModel {}
+```
+
+`tenantType` accepts Integer, Long, Short, String, or UUID. The integral primitive
+forms `int.class`, `long.class`, and `short.class` normalize to their boxed types;
+other primitives, arrays, arbitrary classes, and `Void.class` are rejected.
+The default `void.class` means inference and still requires a tenant-owned mapping.
+An explicit type in a mixed model must match every mapped tenant key. Redundant
+matching declarations preserve the inferred model's fingerprint and generated
+output. Empty models remain rejected.
+
+The type establishes the transaction scope contract; it does not authorize a
+principal or create row ownership. Application authorization still precedes
+minting a scope for the actual request or job's tenant. No synthetic tenant
+column or sentinel tenant is needed. Unscoped global administration and private
+authentication records require a separate future authority contract.
 
 Shared reads still require a scope minted by the verified runtime's authority.
 They retain lexical ownership, thread confinement, serializable transactions,
 deadlines, fingerprint verification, bounded results, checked scalar hydration,
 and rollback after a failed read. The generated `PgSharedEntityPlan` has no
-`tenantCodec`, `tenantColumn`, or `tenantKeyOf` methods. It cannot implement
+`tenantCodec`, `tenantColumn`, or `tenantKeyOf` methods. Its `scopeType` class
+is captured once during model construction and must match every other plan's
+lexical tenant type, including when no row stores a tenant key. It cannot implement
 `PgTenantEntityPlan` or any insertion, creation, versioned mutation, or deletion
 capability. Shared rows are readable inside both read and write transactions.
 An optional stored identity or version follows the read-only mapping contract;
@@ -52,7 +70,8 @@ ownership, defaults, generated columns, inheritance, triggers, and rewrite rules
 Its primary key is exactly `(id)`. `@VevPrimaryKey(ID)` may state that explicitly;
 other shapes are rejected. No additional tenant traversal index is required.
 
-Declared query indexes have `(value, id)` keys, or `(id)` for an identifier index.
+Declared query indexes have `(value, id)` keys, `(id)` for an identifier index,
+or the exact [ordered-query](ordered-index-queries.md) value/order/ID shape.
 Named unique constraints contain one to 32 ordinary VALUE columns with the same
 immediate `NULLS DISTINCT`, default built-in operator, collation, and retained-key
 budget requirements. Identifiers and versions cannot be added to a shared
@@ -85,7 +104,14 @@ The fingerprint includes shared ownership. The schema manifest adds
 `shared: true`, `readOnly: true`, the global primary/index/unique/reference shapes,
 `rowSecurity: {enabled: false, forced: false, policies: []}`, and empty write and
 sequence privileges. It contains no tenant column or tenant setting for that
-table. Migrations must install the matching schema and fingerprint.
+table. Models containing only shared records additionally record the boxed
+`tenantScopeType` at the manifest root and include it in the fingerprint. Changing
+that type changes the scope contract even when physical tables stay the same.
+Migrations must install the matching schema and fingerprint.
+
+The generated-plan ABI is 4. Recompile all mappings with matching processor and
+runtime versions; old ABI 3 binaries fail before the new shared scope metadata is
+read. The schema fingerprint and generated-plan ABI serve different contracts.
 
 Synthetic verification covers Java source and compiled records, Kotlin records,
 assigned/stored identity and optional-version combinations, both wire formats,
@@ -93,4 +119,9 @@ all read families in two tenants, tenant-to-shared and shared self-references,
 compile-time rejection of writes and unsafe ownership combinations, unexpected
 policies/privileges/constraints, and rollback of earlier tenant writes after a
 caught shared-read or foreign-key failure. This feature does not establish a
-performance advantage or complete application replacement readiness.
+performance advantage or complete application replacement readiness. Models
+containing only Java/Kotlin shared records also verify real tenant scopes, every
+read family, failed-bootstrap authority reuse, rejection of foreign scopes before
+connection access, SELECT-only grants, rollback after caught read failures, and
+model-specific fingerprint checks. The isolated published-artifact consumer
+compiles and initializes a shared-only UUID-scoped model from packaged libraries.

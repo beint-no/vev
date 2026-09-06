@@ -53,7 +53,13 @@ tenant-to-tenant references retain their composite ownership boundary. Every FK
 remains inside the closed model. Application review must establish that all
 shared columns are intended for every tenant; Vev cannot infer business secrecy
 from a schema. The same lexical scope, bounded operations, and failure rollback
-apply, including when shared reads occur after tenant writes.
+apply, including when shared reads occur after tenant writes. A model containing
+only shared records explicitly declares `@VevModel.tenantType`; each generated
+shared plan exposes that same boxed scope type, captured and cross-checked at
+model construction. A missing declaration, unsupported type, or mismatch with
+mapped tenant ownership fails early. Scopes still require a successfully verified,
+single-use authority; failed bootstrap does not claim it. Declaring a type never
+authorizes an unauthenticated caller or grants global administrative access.
 
 ## Required adversarial tests
 
@@ -62,6 +68,7 @@ A tenant-capable release needs automated PostgreSQL tests for:
 - colliding identifiers in two tenants;
 - identical shared reference visibility in both tenants while scoped rows stay isolated, rejected mixed ownership/write capabilities, dormant shared policies, unexpected shared grants, and rollback after caught shared read or FK failures;
 - ordered equality/null pagination in both directions with tied values, colliding tenant IDs, exact-token cursors, rejected malformed index directions, and rollback after a caught query or cleanup failure;
+- shared-only Java/Kotlin models with explicit scope types, failed-bootstrap authority reuse, wrong-type and foreign-model/authority rejection before connection acquisition, readonly grants, and model-specific fingerprint drift;
 - missing, null, wrong-type, changed, and foreign-authority tenant context;
 - cross-tenant entity insertion and update;
 - point, generated-index equality/null, range, count, existence, batch, and bulk operations, plus optimistic single/batch deletion and proof that undeclared deletion capabilities remain unavailable;

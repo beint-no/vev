@@ -330,7 +330,7 @@ final class PgModelBoundsTest {
 
     @Test
     void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
-        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
             var source = plan(null, null, null, null, () -> {
                 throw new AssertionError("Incompatible plans must fail before metadata access");
             }, abi == null ? null : () -> abi);
@@ -406,7 +406,7 @@ final class PgModelBoundsTest {
     @SuppressWarnings("unchecked")
     void sharedCapabilitiesRejectTenantRolesMutationMarkersAndMissingTransactionAuthority() {
         var source = plan(List.of(ID));
-        for (String variant : List.of("tenantMarker", "tenantColumn", "tenantPrimaryKey", "assigned", "generated", "versioned", "deleted", "onlyShared")) {
+        for (String variant : List.of("tenantMarker", "tenantColumn", "tenantPrimaryKey", "assigned", "generated", "versioned", "deleted", "unsupportedScope")) {
             var kinds = new java.util.ArrayList<Class<?>>();
             kinds.add(no.beint.vev.pg.spi.PgSharedEntityPlan.class);
             switch (variant) {
@@ -420,6 +420,7 @@ final class PgModelBoundsTest {
             var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
                     getClass().getClassLoader(), kinds.toArray(Class<?>[]::new), (proxy, method, arguments) -> switch (method.getName()) {
                         case "tenantCodec", "tenantColumn", "tenantKeyOf" -> throw new AssertionError("Shared plans have no tenant metadata");
+                        case "scopeType" -> variant.equals("unsupportedScope") ? Object.class : Integer.class;
                         case "primaryKeyShape" -> variant.equals("tenantPrimaryKey") ? no.beint.vev.VevPrimaryKey.Shape.TENANT_ID : no.beint.vev.VevPrimaryKey.Shape.ID;
                         case "columns" -> variant.equals("tenantColumn") ? List.of(ID, TENANT) : List.of(ID);
                         default -> method.invoke(source, arguments);
@@ -428,11 +429,63 @@ final class PgModelBoundsTest {
             String expected = switch (variant) {
                 case "tenantMarker", "generated" -> "mutually exclusive";
                 case "tenantColumn", "tenantPrimaryKey" -> "no tenant column and an ID-only primary key";
-                case "onlyShared" -> "at least one tenant-owned mapping";
+                case "unsupportedScope" -> "Tenant keys require an equality-stable";
                 default -> "cannot expose mutation capabilities";
             };
             org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains(expected), failure.getMessage());
         }
+    }
+
+    @Test
+    void sharedOnlyModelsCaptureTheExplicitScopeTypeOnceWithoutTenantColumnMetadata() {
+        for (Class<?> type : List.of(Integer.class, Long.class, Short.class, String.class, java.util.UUID.class)) {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            var source = sharedScopePlan(() -> {
+                if (calls.incrementAndGet() != 1) throw new AssertionError("Shared scope type must be captured once");
+                return type;
+            });
+            var model = new PgModel<>(IDENTITY, List.of(source));
+            var captured = model.frozenPlan(source);
+            assertEquals(type, model.tenantType());
+            assertEquals(type, captured.scopeType());
+            org.junit.jupiter.api.Assertions.assertFalse(captured.sql().find().contains("tenant_id"));
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().insert());
+            assertThrows(IllegalStateException.class, captured::tenantCodec);
+            assertThrows(IllegalStateException.class, captured::tenantColumn);
+            assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
+    void sharedScopeMetadataMustBeNonNullBoxedAndCompatibleWithMappedTenantOwnership() {
+        assertThrows(NullPointerException.class, () -> new PgModel<>(IDENTITY, List.of(sharedScopePlan(() -> null))));
+        for (Class<?> invalid : List.of(void.class, int.class, Object.class, Boolean.class, java.math.BigDecimal.class, Integer[].class)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(sharedScopePlan(() -> invalid))));
+        }
+        var tenant = plan(List.of(ID, TENANT));
+        var mismatch = sharedScopePlan(() -> String.class);
+        var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(tenant, mismatch)));
+        org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains("same tenant key type"), failure.getMessage());
+        assertEquals(Integer.class, new PgModel<>(IDENTITY, List.of(tenant, sharedScopePlan(() -> Integer.class))).tenantType());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static PgEntityPlan<TestModel, SharedScopeSnapshot, Integer, Integer> sharedScopePlan(java.util.function.Supplier<Class<?>> scopeType) {
+        var source = plan(List.of(ID));
+        return (PgEntityPlan<TestModel, SharedScopeSnapshot, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                PgModelBoundsTest.class.getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgSharedEntityPlan.class},
+                (proxy, method, arguments) -> switch (method.getName()) {
+                    case "scopeType" -> scopeType.get();
+                    case "javaType" -> SharedScopeSnapshot.class;
+                    case "logicalName" -> "SharedScopeSnapshot";
+                    case "tableName" -> "shared_scope_snapshot";
+                    case "primaryKeyShape" -> no.beint.vev.VevPrimaryKey.Shape.ID;
+                    case "tenantCodec", "tenantColumn", "tenantKeyOf" -> throw new AssertionError("Shared rows have no tenant metadata");
+                    default -> method.invoke(source, arguments);
+                });
+    }
+
+    private record SharedScopeSnapshot(Integer id) {
     }
 
     @Test

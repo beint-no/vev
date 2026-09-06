@@ -79,10 +79,10 @@ changes must increment the runtime and processor ABI together. ABI 2 separates
 common snapshot metadata (`PgEntityPlan`) from explicit tenant ownership
 (`PgTenantEntityPlan`). Tenant-owned mappings declare that ownership,
 including read-only mappings. Explicit `@VevShared` records instead implement
-`PgSharedEntityPlan`, have no tenant metadata, and expose no writes. A plan
+`PgSharedEntityPlan`, have no tenant column/codec/accessor, and expose no writes. A plan
 with neither ownership capability, or both, fails model construction. The tenant codec and column are
 captured once, while snapshot tenant access remains direct generated code.
-ABI 3 adds the common `PgQueryIndex` metadata parent and distinct ID-ordered versus value/ID-ordered query tokens. ABI 1 and ABI 2 mappings must be regenerated even if their schema fingerprint is unchanged.
+ABI 3 adds the common `PgQueryIndex` metadata parent and distinct ID-ordered versus value/ID-ordered query tokens. ABI 4 adds the explicit `PgSharedEntityPlan.scopeType()` class. Every plan supplies the same lexical tenant type, so a model may contain only shared records when `@VevModel.tenantType` declares its scope type. Shared scope metadata is captured once; it never fabricates row ownership. ABI 1, 2, and 3 mappings must be regenerated even if their schema fingerprint is unchanged.
 The mapping
 fingerprint describes the schema, not generator ABI or
 performance. Allocation and latency effects require the benchmark evidence

@@ -17,6 +17,7 @@ Format version 1 identifies itself with `format: "vev-schema"`,
 Consumers must reject unknown format versions or profiles. The resource includes:
 
 - the model's qualified name and the exact generated mapping fingerprint;
+- an explicit boxed `tenantScopeType` for models containing only shared records, which participates in their fingerprint without adding a tenant column;
 - entity Java types, schema/table identifiers, append-only semantics, explicit `readOnly: true` where declared, and maximum row counts;
 - ordered columns with boxed Java type, PostgreSQL type, nullability, structural
   role, string code-point or binary byte length, decimal precision, scale, and sorted enum names;

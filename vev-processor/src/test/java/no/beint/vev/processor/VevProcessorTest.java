@@ -45,9 +45,9 @@ final class VevProcessorTest {
         String registry = first.generated("example/BillingModelVev.java");
         assertEquals(accountPlan, second.generated("example/AccountVev.java"));
         assertEquals(registry, second.generated("example/BillingModelVev.java"));
-        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 3;\n    }"));
-        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 3;\n    }"));
-        assertEquals(3, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
+        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 4;\n    }"));
+        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 4;\n    }"));
+        assertEquals(4, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
@@ -1081,6 +1081,112 @@ final class VevProcessorTest {
     private static Map<String, String> orderedSources() {
         var sources = new LinkedHashMap<>(positiveSources());
         sources.computeIfPresent("example/Account.java", (path, text) -> text.replace("@VevIndex(name =", "@VevIndex(orderBy = \"balance\", name ="));
+        return sources;
+    }
+
+    @Test
+    void sharedOnlyModelsRequireExplicitStableScopeTypesAndPreserveSourceBinaryContracts() throws IOException, ReflectiveOperationException {
+        var manifests = new java.util.HashMap<String, String>();
+        for (String literal : List.of("java.lang.Integer", "int", "java.lang.Long", "long", "java.lang.Short", "short", "java.lang.String", "java.util.UUID")) {
+            String boxed = switch (literal) {
+                case "int" -> "java.lang.Integer";
+                case "long" -> "java.lang.Long";
+                case "short" -> "java.lang.Short";
+                default -> literal;
+            };
+            var sources = sharedOnlySources(literal);
+            Compilation source = compile(sources);
+            assertTrue(source.success(), source.diagnostics());
+            String plan = source.generated("example/AReferenceVev.java");
+            assertTrue(plan.contains("public Class<" + boxed + "> scopeType()"));
+            assertTrue(plan.contains("return " + boxed + ".class;"));
+            assertFalse(plan.contains("tenantCodec()"));
+            String manifest = source.manifest("example.BillingModel");
+            assertTrue(manifest.contains("\"tenantScopeType\": \"" + boxed + "\""), manifest);
+            String previous = manifests.putIfAbsent(boxed, manifest);
+            if (previous != null) assertEquals(previous, manifest);
+            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{source.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+                var registry = loader.loadClass("example.BillingModelVev");
+                var model = (no.beint.vev.pg.PgModel<?, ?>) registry.getField("POSTGRES").get(null);
+                var authority = (no.beint.vev.TenantAuthority<?, ?>) registry.getMethod("newTenantAuthority").invoke(null);
+                assertEquals(boxed, model.tenantType().getName());
+                assertEquals(model.tenantType(), authority.tenantType());
+                assertEquals(1, model.plans().size());
+            }
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(binary.success(), binary.diagnostics());
+            assertEquals(plan, binary.generated("example/AReferenceVev.java"));
+            assertEquals(manifest, binary.manifest("example.BillingModel"));
+        }
+        assertEquals(5, new java.util.HashSet<>(manifests.values()).size());
+    }
+
+    @Test
+    void explicitTenantScopeDefaultsPreserveInferredMappingContracts() throws IOException {
+        var sources = sharedSources();
+        Compilation implicit = compile(sources);
+        assertTrue(implicit.success(), implicit.diagnostics());
+        for (String literal : List.of("void", "java.util.UUID")) {
+            var explicitSources = sharedSources();
+            explicitSources.computeIfPresent("example/BillingModel.java", (path, text) -> text.replace("@VevModel(", "@VevModel(tenantType = " + literal + ".class, "));
+            Compilation explicit = compile(explicitSources);
+            assertTrue(explicit.success(), explicit.diagnostics());
+            assertEquals(implicit.manifest("example.BillingModel"), explicit.manifest("example.BillingModel"));
+            assertEquals(implicit.generated("example/BillingModelVev.java"), explicit.generated("example/BillingModelVev.java"));
+            assertEquals(implicit.generated("example/AReferenceVev.java"), explicit.generated("example/AReferenceVev.java"));
+        }
+    }
+
+    @Test
+    void explicitTenantTypesRejectUnsupportedShapesAndConflictingMappedOwnership() throws IOException {
+        for (String literal : List.of("void", "java.lang.Void", "java.lang.Object", "boolean", "byte", "char", "double", "java.math.BigDecimal", "java.lang.Integer[]")) {
+            var sources = sharedOnlySources(literal);
+            Compilation source = compile(sources);
+            assertFalse(source.success(), literal);
+            assertTrue(source.diagnostics().contains("tenantType"), source.diagnostics());
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(binary.success(), literal);
+            assertTrue(binary.diagnostics().contains("tenantType"), binary.diagnostics());
+        }
+        var conflict = sharedSources();
+        conflict.computeIfPresent("example/BillingModel.java", (path, text) -> text.replace("@VevModel(", "@VevModel(tenantType = Integer.class, "));
+        Compilation conflicting = compile(conflict);
+        assertFalse(conflicting.success());
+        assertTrue(conflicting.diagnostics().contains("same tenant key type"), conflicting.diagnostics());
+        String model = conflict.remove("example/BillingModel.java");
+        Compilation dependency = compile(conflict, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertFalse(binary.success());
+        assertTrue(binary.diagnostics().contains("same tenant key type"), binary.diagnostics());
+    }
+
+    @Test
+    void sharedOnlyScopesRemainTypedAndCannotCompileWriteCapabilities() throws IOException {
+        for (String operation : List.of("BillingModelVev.newTenantAuthority().scope(\"wrong\")",
+                "write.insert(AReferenceVev.INSTANCE, value)", "write.update(AReferenceVev.INSTANCE, value)",
+                "write.create(AReferenceVev.INSTANCE, value)", "new no.beint.vev.DeleteTarget<>(AReferenceVev.INSTANCE, 1L, 0L)")) {
+            var sources = sharedOnlySources("int");
+            sources.put("example/ScopeCalls.java", "package example; class ScopeCalls { void run(no.beint.vev.WriteEntities<BillingModelVev.Model> write, AReference value) { " + operation + "; } }");
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), operation);
+            assertTrue(compilation.diagnostics().contains(operation.contains(".scope(") ? "java.lang.Integer" : "AReferenceVev"), compilation.diagnostics());
+        }
+    }
+
+    private static Map<String, String> sharedOnlySources(String scopeType) {
+        var sources = sharedSources();
+        sources.remove("example/Account.java");
+        sources.remove("example/AuditEvent.java");
+        sources.computeIfPresent("example/BillingModel.java", (path, text) -> text
+                .replace("AuditEvent.class, Account.class, ", "")
+                .replace("@VevModel(", "@VevModel(tenantType = " + scopeType + ".class, "));
         return sources;
     }
 

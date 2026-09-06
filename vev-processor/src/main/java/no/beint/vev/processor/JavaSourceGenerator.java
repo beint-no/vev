@@ -52,14 +52,16 @@ final class JavaSourceGenerator {
         appendUniqueConstraints(source, entity);
         appendCheckConstraints(source, entity);
         // Embed this generator's contract, never a runtime version lookup in generated output.
-        method(source, "public int generatedPlanAbi()", "return 3;");
+        method(source, "public int generatedPlanAbi()", "return 4;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
         method(source, "public no.beint.vev.ModelIdentity modelIdentity()", "return " + entity.modelQualifiedName() + ".IDENTITY;");
         method(source, "public int maximumRows()", "return " + entity.maximumRows() + ";");
         method(source, "public no.beint.vev.pg.PgCodec<" + entity.id().boxedType() + "> keyCodec()", "return " + entity.id().codec() + ";");
-        if (!entity.shared()) {
+        if (entity.shared()) {
+            method(source, "public Class<" + tenantType + "> scopeType()", "return " + tenantType + ".class;");
+        } else {
             method(source, "public no.beint.vev.pg.PgCodec<" + tenantType + "> tenantCodec()",
                     "return " + entity.tenant().codec() + ";");
             method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");

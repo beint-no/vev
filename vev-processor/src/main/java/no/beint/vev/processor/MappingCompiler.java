@@ -111,7 +111,7 @@ final class MappingCompiler {
     private static final Set<String> KEY_TYPES = Set.of(
             "java.lang.Integer", "java.lang.Long", "java.lang.Short", "java.lang.String", "java.util.UUID");
     private static final Map<String, Set<String>> ANNOTATION_MEMBERS = Map.of(
-            VevProcessor.VEV_MODEL, Set.of("entities"),
+            VevProcessor.VEV_MODEL, Set.of("entities", "tenantType"),
             ENTITY, Set.of("name"),
             TABLE, Set.of("name", "catalog", "schema", "uniqueConstraints", "indexes", "check", "comment", "type", "options"),
             ID, Set.of(),
@@ -164,14 +164,14 @@ final class MappingCompiler {
             entities.add(compileEntity(entityDeclaration, modelQualifiedName));
         }
         entities.removeIf(Objects::isNull);
-        validateSingleTenantType(modelDeclaration, entities);
+        String tenantType = validateSingleTenantType(modelDeclaration, modelAnnotation, entities);
         validateUniqueTables(modelDeclaration, entities);
         validateUniqueIndexes(modelDeclaration, entities);
         validateReferences(entities);
         if (invalid) {
             return;
         }
-        String fingerprint = fingerprint(modelDeclaration.getQualifiedName().toString(), entities);
+        String fingerprint = fingerprint(modelDeclaration.getQualifiedName().toString(), entities, tenantType);
         if (invalid) return;
         CompiledModel model = new CompiledModel(
                 modelDeclaration,
@@ -179,7 +179,7 @@ final class MappingCompiler {
                 modelSimpleName,
                 modelDeclaration.getQualifiedName().toString(),
                 List.copyOf(entities),
-                fingerprint);
+                fingerprint, tenantType);
         JavaSourceGenerator generator = new JavaSourceGenerator();
         for (EntityMapping entity : entities) {
             writeSource(entity.planQualifiedName(), generator.entityPlan(entity, model.tenantType()), entity.declaration());
@@ -886,17 +886,30 @@ final class MappingCompiler {
         }
     }
 
-    private void validateSingleTenantType(TypeElement model, List<EntityMapping> entities) {
+    private String validateSingleTenantType(TypeElement model, AnnotationMirror annotation, List<EntityMapping> entities) {
         Set<String> tenantTypes = new HashSet<>();
+        AnnotationValue explicit = annotationValue(annotation, "tenantType");
+        if (explicit == null || !(explicit.getValue() instanceof TypeMirror type)) {
+            error(model, "@VevModel.tenantType must resolve to a supported tenant-key type");
+        } else if (type.getKind() != javax.lang.model.type.TypeKind.VOID) {
+            String name = type.getKind().isPrimitive()
+                    ? processingEnvironment.getTypeUtils().boxedClass((javax.lang.model.type.PrimitiveType) type).getQualifiedName().toString()
+                    : type.toString();
+            if (!KEY_TYPES.contains(name)) {
+                error(model, "@VevModel.tenantType requires Integer, Long, Short, String, or UUID (integral primitives are boxed)");
+            }
+            tenantTypes.add(name);
+        }
         for (EntityMapping entity : entities) {
             if (!entity.shared()) tenantTypes.add(entity.tenant().boxedType());
         }
         if (tenantTypes.isEmpty() && !entities.isEmpty()) {
-            error(model, "A closed @VevModel requires at least one tenant-owned mapping to establish transaction authority");
+            error(model, "A closed @VevModel requires at least one tenant-owned mapping or an explicit tenantType to establish transaction authority");
         }
         if (tenantTypes.size() > 1) {
-            error(model, "All entities in one closed @VevModel must use the same tenant key type, found " + tenantTypes);
+            error(model, "All entities in one closed @VevModel must use the same tenant key type, including any explicit tenantType; found " + tenantTypes);
         }
+        return tenantTypes.stream().sorted().findFirst().orElse(null);
     }
 
     private void validateUniqueTables(TypeElement model, List<EntityMapping> entities) {
@@ -1258,8 +1271,9 @@ final class MappingCompiler {
         }
     }
 
-    private String fingerprint(String modelName, List<EntityMapping> entities) {
+    private String fingerprint(String modelName, List<EntityMapping> entities, String tenantType) {
         StringBuilder canonical = new StringBuilder("vev-model-v4\n").append(modelName).append('\n');
+        if (entities.stream().allMatch(EntityMapping::shared)) canonical.append("tenantScopeType|").append(tenantType).append('\n');
         int checkCharacters = 0;
         for (EntityMapping entity : entities) {
             canonical.append(entity.qualifiedName()).append('|')

@@ -91,6 +91,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : sharedOnlySchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             for (String sql : dateWindowSchemaStatements()) {
                 try (Statement statement = connection.createStatement()) {
                     statement.execute(sql);
@@ -106,6 +111,9 @@ final class IntegrationDatabase {
                 statement.setString(1, modelName);
                 statement.setString(2, fingerprint);
                 statement.executeUpdate();
+                statement.setString(1, SharedOnlyModelVev.IDENTITY.name());
+                statement.setString(2, SharedOnlyModelVev.IDENTITY.fingerprint());
+                statement.executeUpdate();
             }
         }
     }
@@ -113,7 +121,46 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared, vev_it.ranked_item, vev_it.kotlin_ranked, vev_it.date_window");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared, vev_it.ranked_item, vev_it.kotlin_ranked, vev_it.date_window, vev_it.only_category, vev_it.only_note");
+        }
+    }
+
+    private static List<String> sharedOnlySchemaStatements() {
+        return List.of(
+                "CREATE TABLE vev_it.only_category (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, code varchar(32) NOT NULL, label varchar(64), position integer NOT NULL, parent_id integer, CONSTRAINT only_category_code_key UNIQUE(code), CONSTRAINT only_category_parent_fk FOREIGN KEY(parent_id) REFERENCES vev_it.only_category(id))",
+                "ALTER TABLE vev_it.only_category OWNER TO vev_it_owner",
+                "CREATE INDEX only_category_code_idx ON vev_it.only_category(code,id)",
+                "CREATE INDEX only_category_label_idx ON vev_it.only_category(label,position,id)",
+                "GRANT SELECT ON vev_it.only_category TO vev_it_app",
+                "CREATE TABLE vev_it.only_note (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, version integer NOT NULL, label varchar(64))",
+                "ALTER TABLE vev_it.only_note OWNER TO vev_it_owner",
+                "CREATE INDEX only_note_id_idx ON vev_it.only_note(id)",
+                "GRANT SELECT ON vev_it.only_note TO vev_it_app");
+    }
+
+    void seedSharedOnlyRows() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO vev_it.only_category(id,code,label,position,parent_id) OVERRIDING SYSTEM VALUE VALUES (1,'root','group',20,NULL), (2,'first','group',10,1), (3,'second','group',10,1), (4,'unset',NULL,0,1)");
+            statement.execute("INSERT INTO vev_it.only_note(id,version,label) OVERRIDING SYSTEM VALUE VALUES (1,0,'shared'), (2,2147483647,NULL)");
+        }
+    }
+
+    void sharedOnlyVariant(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("REVOKE INSERT, UPDATE, DELETE ON vev_it.only_category FROM vev_it_app");
+            statement.execute("REVOKE ALL ON SEQUENCE vev_it.only_category_id_seq FROM vev_it_app");
+            statement.execute("DROP POLICY IF EXISTS unexpected ON vev_it.only_category");
+            statement.execute("ALTER TABLE vev_it.only_category DISABLE ROW LEVEL SECURITY");
+            statement.execute("ALTER TABLE vev_it.only_category NO FORCE ROW LEVEL SECURITY");
+            switch (variant) {
+                case "valid" -> { }
+                case "write" -> statement.execute("GRANT INSERT, UPDATE, DELETE ON vev_it.only_category TO vev_it_app");
+                case "sequence" -> statement.execute("GRANT USAGE ON SEQUENCE vev_it.only_category_id_seq TO vev_it_app");
+                case "policy" -> statement.execute("CREATE POLICY unexpected ON vev_it.only_category USING (true)");
+                case "rls" -> statement.execute("ALTER TABLE vev_it.only_category ENABLE ROW LEVEL SECURITY");
+                case "negativeVersion" -> statement.execute("UPDATE vev_it.only_note SET version = -1 WHERE id = 1");
+                default -> throw new IllegalArgumentException(variant);
+            }
         }
     }
 

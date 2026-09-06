@@ -10,4 +10,9 @@ package no.beint.vev.pg.spi;
  * @param <T> ambient transaction tenant-key type; shared rows do not store this value
  */
 public interface PgSharedEntityPlan<M, E, K, T> extends PgReadOnlyEntityPlan<M, E, K, T> {
+    /**
+     * Returns the generated model's lexical tenant-key type without claiming row ownership.
+     * @return exact boxed type governed by the model's single-use tenant authority
+     */
+    Class<T> scopeType();
 }

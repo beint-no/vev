@@ -96,6 +96,141 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void sharedOnlyJavaAndKotlinModelsReadWithRealTenantScopesAcrossBothWireModes() throws SQLException {
+        database.seedSharedOnlyRows();
+        for (boolean binary : List.of(false, true)) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            var runtime = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals(Integer.class, runtime.model().tenantType());
+            for (int tenant : List.of(7, 8)) {
+                runtime.read(authority.scope(tenant), tx -> {
+                    assertEquals(tenant, tx.tenant().tenantId());
+                    var category = OnlyCategoryVev.INSTANCE;
+                    assertEquals("root", tx.entities().find(category.key(1)).orElseThrow().code());
+                    var batch = tx.entities().findMultiple(category, Batch.copyOf(List.of(1, 99, 2, 1)));
+                    assertEquals(4, batch.size());
+                    assertTrue(batch.get(1) instanceof no.beint.vev.EntityLookup.Missing<?, ?, ?>);
+                    var first = tx.entities().many(PgQueries.scanById(category, new QueryLimit(2)));
+                    assertEquals(List.of(1, 2), first.values().stream().map(OnlyCategory::id).toList());
+                    assertTrue(first.hasMore());
+                    var rest = tx.entities().many(PgQueries.scanByIdAfter(category.key(2), new QueryLimit(8)));
+                    assertEquals(List.of(3, 4), rest.values().stream().map(OnlyCategory::id).toList());
+                    assertFalse(rest.hasMore());
+                    assertEquals(2, tx.entities().many(PgQueries.equal(OnlyCategoryVev.CODE, "first", new QueryLimit(8))).values().getFirst().id());
+                    assertTrue(tx.entities().many(PgQueries.equalAfter(OnlyCategoryVev.CODE, "first", category.key(2), new QueryLimit(8))).values().isEmpty());
+                    var ordered = tx.entities().many(PgQueries.equal(OnlyCategoryVev.LABEL, "group", new QueryLimit(1)));
+                    assertEquals(2, ordered.values().getFirst().id());
+                    assertTrue(ordered.hasMore());
+                    assertEquals(List.of(3, 1), tx.entities().many(PgQueries.equalAfter(OnlyCategoryVev.LABEL, "group",
+                            OnlyCategoryVev.LABEL.cursor(10, category.key(2)), new QueryLimit(8))).values().stream().map(OnlyCategory::id).toList());
+                    assertEquals(4, tx.entities().many(PgQueries.isNull(OnlyCategoryVev.LABEL, new QueryLimit(8))).values().getFirst().id());
+                    assertTrue(tx.entities().many(PgQueries.isNullAfter(OnlyCategoryVev.LABEL,
+                            OnlyCategoryVev.LABEL.cursor(0, category.key(4)), new QueryLimit(8))).values().isEmpty());
+                    var note = no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE;
+                    assertEquals("shared", tx.entities().find(note.key(1L)).orElseThrow().label());
+                    assertEquals(Integer.MAX_VALUE, tx.entities().find(note.key(2L)).orElseThrow().version());
+                    assertEquals(1L, tx.entities().many(PgQueries.equal(no.beint.vev.fixtures.KotlinOnlyNoteVev.ID, 1L, new QueryLimit(8))).values().getFirst().id());
+                    assertEquals(2L, tx.entities().many(PgQueries.scanByIdAfter(note.key(1L), new QueryLimit(8))).values().getFirst().id());
+                    return null;
+                });
+            }
+            assertEquals("root", runtime.write(authority.scope(7),
+                    tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+        }
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void sharedOnlyModelsRejectForeignScopesAndWrongAuthorityTypesBeforeConnectionAccess() {
+        var refuseConnections = new java.util.concurrent.atomic.AtomicBoolean();
+        var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    if (refuseConnections.get()) throw new AssertionError("Invalid authority must fail before datasource access");
+                    return invokeTarget(database.applicationDataSource(), method, arguments);
+                });
+        var authority = SharedOnlyModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority);
+        var foreign = SharedOnlyModelVev.newTenantAuthority();
+        new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, foreign);
+        refuseConnections.set(true);
+        assertThrows(NullPointerException.class, () -> runtime.read(null, tx -> null));
+        assertThrows(IllegalArgumentException.class, () -> runtime.read(foreign.scope(7), tx -> null));
+        assertThrows(IllegalArgumentException.class, () -> runtime.read((TenantScope) TENANT_7, tx -> null));
+        assertThrows(IllegalStateException.class, () -> new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority));
+        var wrongType = TenantAuthority.create(SharedOnlyModelVev.Model.class, SharedOnlyModelVev.IDENTITY, String.class);
+        assertThrows(IllegalArgumentException.class, () -> new PgVev(source, SharedOnlyModelVev.POSTGRES, wrongType));
+        refuseConnections.set(false);
+        assertTrue(runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).isEmpty());
+    }
+
+    @Test
+    void sharedOnlyBootstrapRejectsUnexpectedAccessAndClaimsAuthorityOnlyAfterSuccessfulVerification() throws SQLException {
+        for (String variant : List.of("write", "sequence", "policy", "rls")) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            try {
+                database.sharedOnlyVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.sharedOnlyVariant("valid");
+            }
+            var runtime = new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertTrue(runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).isEmpty());
+        }
+    }
+
+    @Test
+    void sharedOnlyReadFailuresRollBackEvenWhenCaughtAndLeaveLaterTransactionsUsable() throws SQLException {
+        database.seedSharedOnlyRows();
+        database.sharedOnlyVariant("negativeVersion");
+        var rollbacks = new AtomicInteger();
+        var commits = new AtomicInteger();
+        var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(database.applicationDataSource(), method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, connectionMethod, connectionArguments) -> {
+                                if (connectionMethod.getName().equals("rollback")) rollbacks.incrementAndGet();
+                                if (connectionMethod.getName().equals("commit")) commits.incrementAndGet();
+                                return invokeTarget(connection, connectionMethod, connectionArguments);
+                            });
+                });
+        var authority = SharedOnlyModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority);
+        rollbacks.set(0);
+        commits.set(0);
+        assertThrows(IllegalStateException.class, () -> runtime.read(authority.scope(7), tx -> {
+            // Count failure cleanup after checkout has reset any prior connection transaction.
+            rollbacks.set(0);
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1L)));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1)));
+            return null;
+        }));
+        assertEquals(1, rollbacks.get());
+        assertEquals(0, commits.get());
+        assertEquals("root", runtime.read(authority.scope(8), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+        assertEquals(1, commits.get());
+    }
+
+    @Test
+    void sharedOnlyTransactionsRecheckTheirOwnModelFingerprint() throws SQLException {
+        var authority = SharedOnlyModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+        var calls = new AtomicInteger();
+        try {
+            database.setFingerprint(SharedOnlyModelVev.IDENTITY.name(), "wrong-shared-fingerprint");
+            assertThrows(IllegalStateException.class, () -> runtime.read(authority.scope(7), tx -> calls.incrementAndGet()));
+            assertEquals(0, calls.get());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(id("different-model")))).isEmpty());
+        } finally {
+            database.setFingerprint(SharedOnlyModelVev.IDENTITY.name(), SharedOnlyModelVev.IDENTITY.fingerprint());
+        }
+        assertTrue(runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).isEmpty());
+    }
+
+    @Test
     void orderedIndexPagesTraverseTiesByValueThenIdentifierAcrossBothWireModes() throws SQLException {
         database.seedOrderedRows();
         for (boolean binary : List.of(false, true)) {

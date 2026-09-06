@@ -32,10 +32,22 @@ val verifyGeneratedSchema = tasks.register("verifyGeneratedSchema") {
             val manifest = archive.getInputStream(entry).bufferedReader(Charsets.UTF_8).use { it.readText() }
             check(manifest.contains("\"model\": \"no.beint.vev.consumer.PublishedModel\""))
             check(manifest.contains("\"formatVersion\": 1"))
+            val shared = checkNotNull(archive.getEntry("META-INF/vev/no.beint.vev.consumer.PublishedReferenceModel.schema.json"))
+            val sharedManifest = archive.getInputStream(shared).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            check(sharedManifest.contains("\"tenantScopeType\": \"java.util.UUID\""))
+            check(sharedManifest.contains("\"shared\": true"))
         }
     }
 }
 
+val verifySharedModel = tasks.register<JavaExec>("verifySharedModel") {
+    dependsOn(tasks.classes)
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "no.beint.vev.consumer.PublishedSharedConsumer"
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(27) }
+    jvmArgs("--enable-preview")
+}
+
 tasks.check {
-    dependsOn(verifyGeneratedSchema)
+    dependsOn(verifyGeneratedSchema, verifySharedModel)
 }

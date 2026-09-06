@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  * is inside the generated-plan safety profile.</p>
  *
  * @param <M> closed-model marker type
- * @param <T> tenant-key type shared by tenant-owned mappings
+ * @param <T> lexical tenant-key type shared by every plan in the model
  */
 public final class PgModel<M, T> {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
@@ -113,10 +113,9 @@ public final class PgModel<M, T> {
                     throw new IllegalArgumentException("Duplicate generated unique-constraint backing index: " + unique.name());
                 }
             }
-            if (plan.shared()) continue;
             if (discoveredTenantType == null) {
-                discoveredTenantType = plan.tenantCodec().javaType();
-            } else if (discoveredTenantType != plan.tenantCodec().javaType()) {
+                discoveredTenantType = plan.scopeType();
+            } else if (discoveredTenantType != plan.scopeType()) {
                 throw new IllegalArgumentException("All entities in one Vev model must use the same tenant key type");
             }
         }
@@ -129,10 +128,7 @@ public final class PgModel<M, T> {
                         "Generated PostgreSQL index collides with a mapped relation: " + mappedIndex);
             }
         }
-        if (discoveredTenantType == null) {
-            throw new IllegalArgumentException("A Vev model requires at least one tenant-owned mapping to establish transaction authority");
-        }
-        this.tenantType = discoveredTenantType;
+        this.tenantType = Objects.requireNonNull(discoveredTenantType, "scopeType");
         if (!KEY_TYPES.contains(tenantType)) {
             throw new IllegalArgumentException(
                     "Tenant keys require an equality-stable Integer, Long, Short, String, or UUID codec");
@@ -426,7 +422,7 @@ public final class PgModel<M, T> {
      * @param identity generated identity shared by every entity plan
      * @param plans non-empty complete set of generated PostgreSQL plans
      * @param <M> closed-model marker type
-     * @param <T> tenant-key type shared by tenant-owned mappings
+     * @param <T> lexical tenant-key type shared by every plan in the model
      * @return validated immutable PostgreSQL model
      */
     @SafeVarargs

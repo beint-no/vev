@@ -14,14 +14,15 @@ final class SchemaManifestGenerator {
                   "format": "vev-schema",
                   "formatVersion": 1,
                   "postgresqlMajor": 18,
-                  "profile": "tenant-record-v1",
+                  "profile": "tenant-record-v1",%s
                   "model": %s,
                   "fingerprint": %s,
                   "entities": [
                 %s
                   ]
                 }
-                """.formatted(quote(model.qualifiedName()), quote(model.fingerprint()),
+                """.formatted(model.sharedOnly() ? "\n  \"tenantScopeType\": " + quote(model.tenantType()) + "," : "",
+                        quote(model.qualifiedName()), quote(model.fingerprint()),
                 model.entities().stream().map(entity -> entity(model, entity)).collect(Collectors.joining(",\n")));
     }
 

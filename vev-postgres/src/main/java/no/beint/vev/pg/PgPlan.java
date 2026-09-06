@@ -24,6 +24,7 @@ class PgPlan<M, E, K, T> {
     private final int maximumRows;
     private final PgCodec<K> keyCodec;
     private final TenantMapping<M, E, K, T> tenant;
+    private final Class<T> scopeType;
     private final String schemaName;
     private final String tableName;
     private final List<PgColumn> columns;
@@ -80,6 +81,9 @@ class PgPlan<M, E, K, T> {
         if (creationType != null && source instanceof no.beint.vev.AssignedEntityType<?, ?, ?>) {
             throw new IllegalArgumentException("An entity cannot expose both assigned and generated identity insertion");
         }
+        this.scopeType = tenant == null
+                ? Objects.requireNonNull(((no.beint.vev.pg.spi.PgSharedEntityPlan<M, E, K, T>) source).scopeType(), "scopeType")
+                : tenant.codec().javaType();
         List<PgColumn> boundedColumns = new ArrayList<>(VevModel.MAXIMUM_COLUMNS);
         for (PgColumn column : Objects.requireNonNull(source.columns(), "columns")) {
             if (boundedColumns.size() == VevModel.MAXIMUM_COLUMNS) {
@@ -147,6 +151,10 @@ class PgPlan<M, E, K, T> {
 
     boolean generatedIdentity() {
         return generatedIdentity;
+    }
+
+    Class<T> scopeType() {
+        return scopeType;
     }
 
     boolean shared() {

@@ -58,4 +58,4 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 
 Use the project to evaluate architecture and contribute narrowly scoped experiments. Do not use it to hold irreplaceable production data.
 
-- [Shared reference rows](shared-reference-mappings.md) require explicit `@VevShared` plus `@VevReadOnly`. This grants every model tenant read visibility; it is not a global administrative, authentication, or cross-tenant business API. A model still requires a tenant-owned mapping and complete declared incoming/outgoing foreign-key closure.
+- [Shared reference rows](shared-reference-mappings.md) require explicit `@VevShared` plus `@VevReadOnly`. This grants every model tenant read visibility; it is not a global administrative, authentication, or cross-tenant business API. A model infers the tenant type from tenant-owned mappings or explicitly declares `@VevModel.tenantType` when it contains only shared records. Real tenant scopes and complete declared incoming/outgoing foreign-key closure remain mandatory.
