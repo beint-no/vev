@@ -45,9 +45,9 @@ final class VevProcessorTest {
         String registry = first.generated("example/BillingModelVev.java");
         assertEquals(accountPlan, second.generated("example/AccountVev.java"));
         assertEquals(registry, second.generated("example/BillingModelVev.java"));
-        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 1;\n    }"));
-        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 1;\n    }"));
-        assertEquals(1, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
+        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 2;\n    }"));
+        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 2;\n    }"));
+        assertEquals(2, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
@@ -74,7 +74,7 @@ final class VevProcessorTest {
         assertTrue(accountPlan.contains("return \"tenant_id\";"));
         assertFalse(accountPlan.contains("VarHandle"));
         assertFalse(accountPlan.contains("reflect"));
-        assertTrue(auditPlan.contains("implements no.beint.vev.pg.spi.PgEntityPlan<example.BillingModelVev.Model, example.AuditEvent, java.util.UUID, java.util.UUID>"));
+        assertTrue(auditPlan.contains("implements no.beint.vev.pg.spi.PgTenantEntityPlan<example.BillingModelVev.Model, example.AuditEvent, java.util.UUID, java.util.UUID>"));
         assertFalse(auditPlan.contains("bindUpdate("));
         assertTrue(registry.contains("sha256:"));
         assertTrue(registry.contains("public static final class Model"));

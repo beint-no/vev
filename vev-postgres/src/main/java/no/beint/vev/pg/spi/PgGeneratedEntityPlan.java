@@ -14,7 +14,7 @@ import no.beint.vev.GeneratedEntityType;
  * @param <N> generated creation-input type
  */
 public interface PgGeneratedEntityPlan<M, E, K, T, N>
-        extends PgIdentityEntityPlan<M, E, K, T>, GeneratedEntityType<M, E, K, N> {
+        extends PgIdentityEntityPlan<M, E, K, T>, PgTenantEntityPlan<M, E, K, T>, GeneratedEntityType<M, E, K, N> {
     /**
      * Reads an application value in the plan's complete column order.
      *

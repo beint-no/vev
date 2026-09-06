@@ -52,7 +52,7 @@ final class JavaSourceGenerator {
         appendUniqueConstraints(source, entity);
         appendCheckConstraints(source, entity);
         // Embed this generator's contract, never a runtime version lookup in generated output.
-        method(source, "public int generatedPlanAbi()", "return 1;");
+        method(source, "public int generatedPlanAbi()", "return 2;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -115,9 +115,10 @@ final class JavaSourceGenerator {
         var interfaces = new java.util.ArrayList<String>();
         if (entity.readOnly()) {
             interfaces.add("no.beint.vev.pg.spi.PgReadOnlyEntityPlan<" + tenantTypes + ">");
+            interfaces.add("no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">");
             if (entity.id().identity()) interfaces.add("no.beint.vev.pg.spi.PgIdentityEntityPlan<" + tenantTypes + ">");
         } else {
-            interfaces.add(entity.appendOnly() ? "no.beint.vev.pg.spi.PgEntityPlan<" + tenantTypes + ">"
+            interfaces.add(entity.appendOnly() ? "no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">"
                     : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + tenantTypes + ", " + entity.version().boxedType() + ">");
             interfaces.add(entity.id().identity() ? "no.beint.vev.pg.spi.PgGeneratedEntityPlan<" + tenantTypes + ", " + entity.simpleName() + "Vev.New>"
                     : "no.beint.vev.AssignedEntityType<" + types + ">");

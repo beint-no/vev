@@ -31,7 +31,7 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * Generated-plan binary contract accepted by this runtime. Incompatible SPI changes increment this value.
      * This version is independent of the database schema fingerprint and the library release version.
      */
-    int ABI_VERSION = 1;
+    int ABI_VERSION = 2;
 
     /**
      * Returns the binary contract embedded by the processor that generated this plan.
@@ -51,12 +51,6 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      */
     PgCodec<K> keyCodec();
 
-    /**
-     * Returns the standard codec for tenant keys.
-     *
-     * @return tenant-key codec shared by the closed model
-     */
-    PgCodec<T> tenantCodec();
 
     /**
      * Returns the generated PostgreSQL schema identifier.
@@ -72,12 +66,6 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      */
     String tableName();
 
-    /**
-     * Returns the generated tenant-isolation column identifier.
-     *
-     * @return name of the sole {@link PgColumn.Role#TENANT} column
-     */
-    String tenantColumn();
 
     /**
      * Returns the exact physical primary-key role order.
@@ -158,11 +146,4 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      */
     K keyOf(E entity);
 
-    /**
-     * Reads the tenant key from an entity snapshot.
-     *
-     * @param entity entity snapshot of the exact generated type
-     * @return non-null tenant key
-     */
-    T tenantKeyOf(E entity);
 }

@@ -3,6 +3,7 @@ package no.beint.vev.pg;
 import no.beint.vev.ModelIdentity;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
+import no.beint.vev.pg.spi.PgTenantEntityPlan;
 import org.junit.jupiter.api.Test;
 
 import java.util.AbstractCollection;
@@ -276,7 +277,7 @@ final class PgModelBoundsTest {
 
     @Test
     void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
-        for (Integer abi : java.util.Arrays.asList(null, -1, 0, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
             var source = plan(null, null, null, null, () -> {
                 throw new AssertionError("Incompatible plans must fail before metadata access");
             }, abi == null ? null : () -> abi);
@@ -294,14 +295,14 @@ final class PgModelBoundsTest {
         for (Class<?> extra : List.of(no.beint.vev.AssignedEntityType.class, no.beint.vev.VersionedEntityType.class,
                 no.beint.vev.pg.spi.PgGeneratedEntityPlan.class, no.beint.vev.DeletableEntityType.class)) {
             var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
-                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, extra},
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class, extra},
                     (proxy, method, arguments) -> method.getName().equals("creationType") ? Object.class : method.invoke(source, arguments));
             var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(invalid)));
             assertEquals("Read-only plans cannot expose mutation capabilities", failure.getMessage());
         }
         for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgIdentityEntityPlan.class)) {
             var valid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
-                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, extra},
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class, extra},
                     (proxy, method, arguments) -> method.invoke(source, arguments));
             var captured = new PgModel<>(IDENTITY, List.of(valid)).frozenPlans().getFirst();
             org.junit.jupiter.api.Assertions.assertTrue(captured.readOnly());
@@ -321,7 +322,7 @@ final class PgModelBoundsTest {
         for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgGeneratedEntityPlan.class,
                 no.beint.vev.pg.spi.PgVersionedEntityPlan.class)) {
             var inconsistent = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
-                    getClass().getClassLoader(), new Class<?>[]{extra, no.beint.vev.DeletableEntityType.class},
+                    getClass().getClassLoader(), new Class<?>[]{extra, PgTenantEntityPlan.class, no.beint.vev.DeletableEntityType.class},
                     (proxy, method, arguments) -> {
                         if (method.getName().equals("creationType")) return Object.class;
                         if (method.getName().equals("columns")) throw new AssertionError("Invalid capabilities must fail before column capture");
@@ -330,6 +331,52 @@ final class PgModelBoundsTest {
             var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(inconsistent)));
             assertEquals("Physical deletion requires a versioned generated identity plan", failure.getMessage());
         }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void commonOrReadOnlyMetadataDoesNotImplicitlyGrantTenantOwnership() {
+        var source = plan(List.of(ID, TENANT));
+        for (Class<?> kind : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class,
+                no.beint.vev.pg.spi.PgIdentityEntityPlan.class)) {
+            var missing = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{kind}, (proxy, method, arguments) -> {
+                        if (method.getName().equals("columns")) throw new AssertionError("Ownership must be explicit before column capture");
+                        return method.invoke(source, arguments);
+                    });
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(missing)));
+            assertEquals("A PostgreSQL entity plan must explicitly declare tenant ownership", failure.getMessage());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void capturesTenantMetadataOnceAndRetainsDirectSnapshotAccess() {
+        var source = plan(List.of(ID, TENANT));
+        var codecCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var columnCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var keyCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var counted = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class}, (proxy, method, arguments) -> {
+                    if (method.getName().equals("tenantCodec") && codecCalls.incrementAndGet() != 1) {
+                        throw new AssertionError("Tenant codec must be captured once");
+                    }
+                    if (method.getName().equals("tenantColumn") && columnCalls.incrementAndGet() != 1) {
+                        throw new AssertionError("Tenant column must be captured once");
+                    }
+                    if (method.getName().equals("tenantKeyOf")) keyCalls.incrementAndGet();
+                    return method.invoke(source, arguments);
+                });
+        var model = new PgModel<>(IDENTITY, List.of(counted));
+        var captured = model.frozenPlan(counted);
+        for (int iteration = 0; iteration < 3; iteration++) {
+            assertEquals(PgCodecs.INTEGER, captured.tenantCodec());
+            assertEquals("tenant_id", captured.tenantColumn());
+            assertEquals(7, captured.tenantKeyOf(new TestEntity(11, 7)));
+        }
+        assertEquals(1, codecCalls.get());
+        assertEquals(1, columnCalls.get());
+        assertEquals(3, keyCalls.get());
     }
 
     @Test
@@ -347,10 +394,10 @@ final class PgModelBoundsTest {
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
             List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks,
             java.util.function.IntSupplier maximumRows, java.util.function.IntSupplier abi) {
-        return new PgEntityPlan<>() {
+        return new PgTenantEntityPlan<>() {
             @Override
             public int generatedPlanAbi() {
-                return abi == null ? PgEntityPlan.super.generatedPlanAbi() : abi.getAsInt();
+                return abi == null ? PgTenantEntityPlan.super.generatedPlanAbi() : abi.getAsInt();
             }
 
             @Override

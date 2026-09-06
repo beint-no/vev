@@ -13,7 +13,7 @@ import no.beint.vev.pg.PgCodec;
  * @param <V> version-token type
  */
 public interface PgVersionedEntityPlan<M, E, K, T, V>
-        extends PgEntityPlan<M, E, K, T>, VersionedEntityType<M, E, K, V> {
+        extends PgTenantEntityPlan<M, E, K, T>, VersionedEntityType<M, E, K, V> {
     /**
      * Returns the standard codec for version tokens.
      *

@@ -75,7 +75,14 @@ fail with a recompilation diagnostic before a database connection is acquired.
 Recompile application mappings with matching processor/runtime versions; this
 check provides an early failure, not compatibility with stale generated classes.
 It does not attest handwritten or transformed implementations. Incompatible SPI
-changes must increment the runtime and processor ABI together. The mapping
+changes must increment the runtime and processor ABI together. ABI 2 separates
+common snapshot metadata (`PgEntityPlan`) from explicit tenant ownership
+(`PgTenantEntityPlan`). Every currently supported mapping declares that ownership,
+including read-only mappings. Missing tenant metadata does not imply shared or
+unrestricted access; it fails model construction. The tenant codec and column are
+captured once, while snapshot tenant access remains direct generated code.
+ABI 1 mappings must be regenerated even if their schema fingerprint is unchanged.
+The mapping
 fingerprint describes the schema, not generator ABI or
 performance. Allocation and latency effects require the benchmark evidence
 specified in the [benchmark policy](benchmark-policy.md).

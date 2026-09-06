@@ -506,8 +506,13 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         return id;
     }
 
+    @SuppressWarnings("unchecked")
     private <E, K> void requireEntityTenant(PgEntityPlan<M, E, K, Tenant> plan, E entity) {
-        Object entityTenant = Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
+        if (!(plan instanceof no.beint.vev.pg.spi.PgTenantEntityPlan<?, ?, ?, ?> tenantPlan)) {
+            throw new IllegalArgumentException("Entity mutations require an explicit tenant ownership capability");
+        }
+        var typed = (no.beint.vev.pg.spi.PgTenantEntityPlan<M, E, K, Tenant>) tenantPlan;
+        Object entityTenant = Objects.requireNonNull(typed.tenantKeyOf(entity), "entity tenant key");
         if (!tenantKey.equals(entityTenant)) {
             throw new IllegalArgumentException("Entity tenant does not match the lexical EntityAgent tenant");
         }

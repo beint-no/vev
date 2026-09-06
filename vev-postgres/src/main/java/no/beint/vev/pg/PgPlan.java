@@ -5,6 +5,7 @@ import no.beint.vev.ModelIdentity;
 import no.beint.vev.VevIndex;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
+import no.beint.vev.pg.spi.PgTenantEntityPlan;
 import no.beint.vev.pg.spi.PgVersionedEntityPlan;
 import no.beint.vev.pg.spi.PgGeneratedEntityPlan;
 
@@ -22,10 +23,9 @@ class PgPlan<M, E, K, T> {
     private final ModelIdentity modelIdentity;
     private final int maximumRows;
     private final PgCodec<K> keyCodec;
-    private final PgCodec<T> tenantCodec;
+    private final TenantMapping<M, E, K, T> tenant;
     private final String schemaName;
     private final String tableName;
-    private final String tenantColumn;
     private final List<PgColumn> columns;
     private final List<PgIndex<M, E, K, ?>> indexes;
     private final List<PgReference> references;
@@ -58,10 +58,9 @@ class PgPlan<M, E, K, T> {
             throw new IllegalArgumentException("Entity row limit must be between 1 and 1000");
         }
         this.keyCodec = Objects.requireNonNull(source.keyCodec(), "keyCodec");
-        this.tenantCodec = Objects.requireNonNull(source.tenantCodec(), "tenantCodec");
+        this.tenant = captureTenant(source);
         this.schemaName = Objects.requireNonNull(source.schemaName(), "schemaName");
         this.tableName = Objects.requireNonNull(source.tableName(), "tableName");
-        this.tenantColumn = Objects.requireNonNull(source.tenantColumn(), "tenantColumn");
         this.primaryKeyShape = Objects.requireNonNull(source.primaryKeyShape(), "primaryKeyShape");
         this.creationType = source instanceof PgGeneratedEntityPlan<?, ?, ?, ?, ?> generated
                 ? Objects.requireNonNull(generated.creationType(), "creationType") : null;
@@ -126,6 +125,19 @@ class PgPlan<M, E, K, T> {
         this.indexSql = new IdentityHashMap<>();
     }
 
+    private record TenantMapping<M, E, K, T>(PgTenantEntityPlan<M, E, K, T> source, PgCodec<T> codec, String column) {
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <M, E, K, T> TenantMapping<M, E, K, T> captureTenant(PgEntityPlan<M, E, K, T> source) {
+        if (!(source instanceof PgTenantEntityPlan<?, ?, ?, ?> tenantSource)) {
+            throw new IllegalArgumentException("A PostgreSQL entity plan must explicitly declare tenant ownership");
+        }
+        var typed = (PgTenantEntityPlan<M, E, K, T>) tenantSource;
+        return new TenantMapping<>(typed, Objects.requireNonNull(typed.tenantCodec(), "tenantCodec"),
+                Objects.requireNonNull(typed.tenantColumn(), "tenantColumn"));
+    }
+
     List<PgReference> references() {
         return references;
     }
@@ -153,8 +165,8 @@ class PgPlan<M, E, K, T> {
     List<String> primaryKeyColumns() {
         String id = columns.stream().filter(column -> column.role() == PgColumn.Role.ID).findFirst().orElseThrow().name();
         return switch (primaryKeyShape) {
-            case TENANT_ID -> List.of(tenantColumn, id);
-            case ID_TENANT -> List.of(id, tenantColumn);
+            case TENANT_ID -> List.of(tenantColumn(), id);
+            case ID_TENANT -> List.of(id, tenantColumn());
             case ID -> List.of(id);
         };
     }
@@ -236,7 +248,7 @@ class PgPlan<M, E, K, T> {
     }
 
     PgCodec<T> tenantCodec() {
-        return tenantCodec;
+        return tenant.codec();
     }
 
     String schemaName() {
@@ -248,7 +260,7 @@ class PgPlan<M, E, K, T> {
     }
 
     String tenantColumn() {
-        return tenantColumn;
+        return tenant.column();
     }
 
     List<PgColumn> columns() {
@@ -272,7 +284,7 @@ class PgPlan<M, E, K, T> {
     }
 
     T tenantKeyOf(E entity) {
-        return source.tenantKeyOf(entity);
+        return tenant.source().tenantKeyOf(entity);
     }
 
     EntityKey<M, E, K> key(K value) {
