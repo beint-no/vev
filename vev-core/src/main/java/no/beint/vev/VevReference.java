@@ -15,7 +15,7 @@ import java.lang.annotation.Target;
  */
 @Documented
 @Retention(RetentionPolicy.CLASS)
-@Target(ElementType.RECORD_COMPONENT)
+@Target({ElementType.FIELD, ElementType.METHOD, ElementType.RECORD_COMPONENT})
 public @interface VevReference {
     /**
      * Returns the exact foreign-key constraint name installed by the migration.

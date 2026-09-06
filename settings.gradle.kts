@@ -20,6 +20,7 @@ include(
     "vev-processor",
     "vev-jakarta4",
     "vev-integration-tests",
+    "vev-kotlin-test-model",
     "vev-benchmark-vev",
     "vev-benchmark-hibernate"
 )

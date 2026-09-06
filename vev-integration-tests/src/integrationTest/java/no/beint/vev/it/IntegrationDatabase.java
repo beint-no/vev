@@ -68,7 +68,7 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry");
         }
     }
 
@@ -916,6 +916,25 @@ final class IntegrationDatabase {
                 "GRANT SELECT ON TABLE vev_it.snapshot_probe TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, value) ON TABLE vev_it.snapshot_probe TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, value) ON TABLE vev_it.snapshot_probe TO " + APPLICATION_USER,
+                """
+                        CREATE TABLE vev_it.kotlin_entry (
+                            id bigint NOT NULL, tenant_id integer NOT NULL, version bigint NOT NULL,
+                            label varchar(128) NOT NULL, alias varchar(64), PRIMARY KEY (tenant_id, id)
+                        )
+                        """,
+                "ALTER TABLE vev_it.kotlin_entry OWNER TO " + OWNER_ROLE,
+                "CREATE INDEX kotlin_entry_label_idx ON vev_it.kotlin_entry USING btree (tenant_id, label, id)",
+                "ALTER TABLE vev_it.kotlin_entry ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.kotlin_entry FORCE ROW LEVEL SECURITY",
+                """
+                        CREATE POLICY kotlin_entry_tenant ON vev_it.kotlin_entry
+                            FOR ALL TO vev_it_app
+                            USING (tenant_id = current_setting('vev.tenant_id', true)::integer)
+                            WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)
+                        """,
+                "GRANT SELECT ON TABLE vev_it.kotlin_entry TO " + APPLICATION_USER,
+                "GRANT INSERT (id, tenant_id, version, label, alias) ON TABLE vev_it.kotlin_entry TO " + APPLICATION_USER,
+                "GRANT UPDATE (version, label, alias) ON TABLE vev_it.kotlin_entry TO " + APPLICATION_USER,
                 "GRANT SELECT ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,

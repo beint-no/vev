@@ -22,6 +22,7 @@ dependencies {
     add(records.implementationConfigurationName, project(":vev-core"))
     add(records.implementationConfigurationName, "jakarta.persistence:jakarta.persistence-api:4.0.0-M6")
     implementation(project(":vev-core"))
+    implementation(project(":vev-kotlin-test-model"))
     implementation(project(":vev-postgres"))
     implementation(project(":vev-jakarta4"))
     implementation("jakarta.persistence:jakarta.persistence-api:4.0.0-M6")

@@ -467,6 +467,14 @@ final class VevProcessorTest {
         cases.put("customAccessor", new NegativeCase(
                 recordSource(validTable(), validComponents(), "public String displayName() { return displayName.strip(); }"),
                 "Explicit record accessors are forbidden"));
+        cases.put("unrelatedIndex", new NegativeCase(
+                recordSource(validTable(), validComponents(),
+                        "@VevIndex(name = \"unrelated_idx\") public String helper() { return displayName; }"),
+                "Persistence mapping @VevIndex is forbidden on members unrelated to a record component"));
+        cases.put("unrelatedReference", new NegativeCase(
+                recordSource(validTable(), validComponents(),
+                        "@no.beint.vev.VevReference(name = \"unrelated_fk\", target = Broken.class) public Long helper() { return id; }"),
+                "Persistence mapping @VevReference is forbidden on members unrelated to a record component"));
         cases.put("reservedIndexToken", new NegativeCase(
                 recordSource(validTable(), validComponents().replace(
                         "@Column(name = \"display_name\", nullable = false, length = 255) String displayName",
@@ -711,7 +719,8 @@ final class VevProcessorTest {
             Iterable<? extends JavaFileObject> units = fileManager.getJavaFileObjectsFromPaths(sourcePaths);
             List<String> options = new ArrayList<>(List.of(
                     "--release", "27",
-                    "-classpath", System.getProperty("java.class.path") + java.io.File.pathSeparator + extraClassPath,
+                    "-classpath", extraClassPath.isEmpty() ? System.getProperty("java.class.path")
+                            : extraClassPath + java.io.File.pathSeparator + System.getProperty("java.class.path"),
                     process ? "-proc:full" : "-proc:none",
                     "-Xlint:all,-processing",
                     "-Werror",
@@ -841,6 +850,47 @@ final class VevProcessorTest {
         Compilation consumer = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
         assertTrue(consumer.success(), consumer.diagnostics());
         assertEquals(original.generated("example/AccountVev.java"), consumer.generated("example/AccountVev.java"));
+    }
+
+    @Test
+    void compilesKotlinJvmRecordsAndRejectsNullabilityAndConstructorMismatches() throws IOException {
+        Compilation valid = compile(Map.of("example/KotlinModel.java",
+                modelSource("KotlinModel", "no.beint.vev.fixtures.KotlinEntry")));
+        assertTrue(valid.success(), valid.diagnostics());
+        assertTrue(valid.manifest("example.KotlinModel").contains("\"javaType\": \"no.beint.vev.fixtures.KotlinEntry\""));
+        assertTrue(valid.generated("no/beint/vev/fixtures/KotlinEntryVev.java").contains("-> entity.label();"));
+        for (String entity : List.of("KotlinNullableMismatch", "KotlinRequiredMismatch", "KotlinConstructor")) {
+            Compilation invalid = compile(Map.of("example/KotlinModel.java",
+                    modelSource("KotlinModel", "no.beint.vev.fixtures." + entity)));
+            assertFalse(invalid.success(), entity);
+            assertTrue(invalid.diagnostics().contains(entity.equals("KotlinConstructor")
+                    ? "canonical constructor must only assign" : "Kotlin record nullability must exactly match"), invalid.diagnostics());
+            assertFalse(Files.exists(invalid.classesDirectory().resolve("META-INF/vev/example.KotlinModel.schema.json")));
+        }
+    }
+
+    @Test
+    void kotlinNullChecksRequireVerifiedCalleeInitializationAndNonNullControlFlow() throws IOException {
+        String safe = "if (value == null) throwParameterIsNullNPE(name);";
+        for (String body : List.of(
+                "public static void checkNotNullParameter(Object value, String name) { " + safe + " }",
+                "static { System.setProperty(\"vev.fake.intrinsics.executed\", \"yes\"); } public static void checkNotNullParameter(Object value, String name) { " + safe + " }",
+                "public static void checkNotNullParameter(Object value, String name) { if (value != null) throwParameterIsNullNPE(name); }",
+                "public static void checkNotNullParameter(Object value, String name) { System.setProperty(\"vev.fake.intrinsics.executed\", \"yes\"); }",
+                "public static synchronized void checkNotNullParameter(Object value, String name) { " + safe + " }")) {
+            String source = "package kotlin.jvm.internal; public final class Intrinsics { " + body
+                    + " private static void throwParameterIsNullNPE(String name) { throw new NullPointerException(name); } }";
+            Compilation dependency = compile(Map.of("kotlin/jvm/internal/Intrinsics.java", source), "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation consumer = compile(Map.of("example/KotlinModel.java",
+                    modelSource("KotlinModel", "no.beint.vev.fixtures.KotlinEntry")), dependency.classesDirectory().toString(), true);
+            boolean expected = body.equals("public static void checkNotNullParameter(Object value, String name) { " + safe + " }");
+            assertEquals(expected, consumer.success(), consumer.diagnostics());
+            if (!expected) {
+                assertTrue(consumer.diagnostics().contains("could not verify compiled record"), consumer.diagnostics());
+            }
+            assertEquals(null, System.getProperty("vev.fake.intrinsics.executed"));
+        }
     }
 
     private static String formatDiagnostic(Diagnostic<? extends JavaFileObject> diagnostic) {

@@ -24,8 +24,9 @@ nonconstant static state. Each class file is bounded to one MiB.
 A compiled record may come from a directory or JAR. The verifier checks the
 version-specific class selected from a multi-release JAR and matches its component
 names, types, and order to javac's resolved declaration. Named-module dependency
-records remain unsupported. Kotlin constructor/nullability integration is still
-pending. The runtime still uses generated direct Java access;
+records remain unsupported. [Kotlin record mappings](kotlin-records.md) retain
+normal parameter null checks, with exact column/nullability validation and a
+verified non-null path through the selected Kotlin null-check implementation. The runtime still uses generated direct Java access;
 there is no runtime bytecode parsing or reflective hydration fallback.
 
 All annotation-profile checks also apply to compiled declarations, including

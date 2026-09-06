@@ -15,7 +15,7 @@ import java.lang.annotation.Target;
  */
 @Documented
 @Retention(RetentionPolicy.CLASS)
-@Target(ElementType.RECORD_COMPONENT)
+@Target({ElementType.FIELD, ElementType.METHOD, ElementType.RECORD_COMPONENT})
 public @interface VevIndex {
     /** Maximum generated query indexes accepted for one entity. */
     int MAXIMUM_INDEXES_PER_ENTITY = 16;

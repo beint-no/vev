@@ -16,6 +16,8 @@ import no.beint.vev.Rows;
 import no.beint.vev.TenantAuthority;
 import no.beint.vev.TenantScope;
 import no.beint.vev.WriteEntities;
+import no.beint.vev.fixtures.KotlinEntry;
+import no.beint.vev.fixtures.KotlinEntryVev;
 import no.beint.vev.jakarta.VevEntityAgents;
 import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
@@ -159,6 +161,25 @@ final class VevPostgresIntegrationTest {
         var page = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(SnapshotProbeVev.INSTANCE, new QueryLimit(10))));
         assertEquals(List.of(1L, 2L, 3L), page.values().stream().map(SnapshotProbe::id).toList());
         assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1L))).isEmpty());
+    }
+
+    @Test
+    void kotlinRecordDependencySupportsNullsBatchWritesTypedQueriesAndTenantIsolation() {
+        var first = new KotlinEntry(10, 7, 0, "entry", null);
+        var second = new KotlinEntry(20, 7, 0, "entry", "named");
+        var inserted = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(KotlinEntryVev.INSTANCE,
+                Batch.copyOf(List.of(second, first))));
+        assertEquals(List.of(second, first), inserted.values());
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(KotlinEntryVev.INSTANCE.key(10L))).orElseThrow());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(KotlinEntryVev.INSTANCE.key(10L))).isEmpty());
+        var changed = second.copy(20, 7, 0, "changed", null);
+        var updated = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(KotlinEntryVev.INSTANCE, Batch.one(changed)));
+        assertEquals(changed.copy(20, 7, 1, "changed", null), updated.get(0).entity());
+        var rows = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(KotlinEntryVev.LABEL, "changed", new QueryLimit(10))));
+        assertEquals(List.of(updated.get(0).entity()), rows.values());
+        assertThrows(NullPointerException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().insert(KotlinEntryVev.INSTANCE, new KotlinEntry(30, 7, 0, null, null))));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(KotlinEntryVev.INSTANCE.key(30L))).isEmpty());
     }
 
     @Test

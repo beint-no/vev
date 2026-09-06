@@ -121,6 +121,7 @@ final class MappingCompiler {
     private final Set<String> claimedEntities;
     private final Set<String> sourceTypes;
     private final Trees trees;
+    private final CompiledRecordVerifier compiledRecords;
     private boolean invalid;
 
     MappingCompiler(
@@ -132,6 +133,7 @@ final class MappingCompiler {
         this.claimedEntities = claimedEntities;
         this.sourceTypes = sourceTypes;
         this.trees = compilerTrees(processingEnvironment);
+        this.compiledRecords = new CompiledRecordVerifier(processingEnvironment);
     }
 
     void compile(TypeElement modelDeclaration) {
@@ -275,12 +277,6 @@ final class MappingCompiler {
             rejectExplicitCanonicalConstructor(entity);
             rejectExplicitAccessors(entity);
             rejectInitializationSideEffects(entity);
-        } else {
-            try {
-                CompiledRecordVerifier.verify(processingEnvironment, entity);
-            } catch (IOException | RuntimeException failure) {
-                error(entity, "Vev could not verify compiled record snapshot operations: " + failure.getMessage());
-            }
         }
         if (annotation(entity, ENTITY) == null) {
             error(entity, "Entity in @VevModel must declare @jakarta.persistence.Entity");
@@ -326,6 +322,14 @@ final class MappingCompiler {
         validateIndexes(entity, properties);
         List<UniqueMapping> uniqueConstraints = compileUniqueConstraints(entity, table, properties);
         validateMaterializedResultBudget(entity, properties);
+        if (!invalid && !sourceTypes.contains(entity.getQualifiedName().toString())) {
+            try {
+                compiledRecords.verify(entity, properties.stream().filter(property -> !property.nullable())
+                        .map(PropertyMapping::name).collect(java.util.stream.Collectors.toUnmodifiableSet()));
+            } catch (IOException | RuntimeException failure) {
+                error(entity, "Vev could not verify compiled record snapshot operations: " + failure.getMessage());
+            }
+        }
 
         List<PropertyMapping> ids = properties.stream().filter(PropertyMapping::id).toList();
         List<PropertyMapping> tenants = properties.stream().filter(PropertyMapping::tenant).toList();
@@ -414,6 +418,13 @@ final class MappingCompiler {
         validateIdentifier(component, columnName, "column");
         if (!hasExplicitValue(column, "nullable")) {
             error(component, "Every mapped component must explicitly declare @Column(nullable = true) or @Column(nullable = false)");
+        }
+        if (annotation(entity, "kotlin.Metadata") != null && !component.asType().getKind().isPrimitive()) {
+            boolean kotlinNotNull = annotation(annotationSources, "org.jetbrains.annotations.NotNull") != null;
+            boolean kotlinNullable = annotation(annotationSources, "org.jetbrains.annotations.Nullable") != null;
+            if (kotlinNotNull == kotlinNullable || booleanValue(column, "nullable") != kotlinNullable) {
+                error(component, "Kotlin record nullability must exactly match explicit @Column.nullable metadata");
+            }
         }
         if (!stringValue(column, "table").isEmpty()) {
             error(component, "Per-column secondary tables are forbidden; @Column.table must be empty");
