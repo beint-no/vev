@@ -79,7 +79,7 @@ public final class CheckCatalogProbe {
         // Current system expressions and scalar subqueries are outside the row-local node profile.
         assertThrows(IllegalStateException.class, () -> PgCheckTree.inspect(install(connection, "CURRENT_DATE > '2024-01-01'::date")));
         // Verify catalog IDs cannot bypass the allowlist just by supplying a builtin function's name in another schema.
-        var unsafe = new PgCheckTree.Dependencies(Set.of(0xffff_ffffL), java.util.Map.of(), Set.of(), Set.of(), Set.of(), java.util.Map.of());
+        var unsafe = new PgCheckTree.Dependencies(Set.of(0xffff_ffffL), java.util.Map.of(), Set.of(), Set.of(), Set.of(), java.util.Map.of(), java.util.Map.of());
         assertThrows(IllegalStateException.class, () -> catalog.verify(unsafe));
     }
 

@@ -19,6 +19,7 @@ final class PgCheckCatalog {
     private final Connection connection;
     private final Set<Long> types = new HashSet<>();
     private final java.util.Map<Long, String> functions = new java.util.HashMap<>();
+    private final Set<Long> defaultOnlyFunctions = new HashSet<>();
     private final java.util.Map<Long, String> typeNames = new java.util.HashMap<>();
     private final Set<Long> collations = new HashSet<>();
     private final java.util.Map<Long, Long> operators = new java.util.HashMap<>();
@@ -28,9 +29,24 @@ final class PgCheckCatalog {
     }
 
     void verify(PgCheckTree.Dependencies dependencies) throws SQLException {
+        verify(dependencies, false);
+    }
+
+    void verifyDefault(PgCheckTree.Dependencies dependencies) throws SQLException {
+        verify(dependencies, true);
+    }
+
+    private void verify(PgCheckTree.Dependencies dependencies, boolean defaultExpression) throws SQLException {
         for (long type : dependencies.types()) verifyType(type);
         for (long collation : dependencies.collations()) verifyCollation(collation);
-        for (long function : dependencies.functions()) verifyFunction(function);
+        for (long function : dependencies.functions()) {
+            verifyFunction(function, defaultExpression);
+            if (defaultOnlyFunctions.contains(function)
+                    && (!Set.of(1184L).equals(dependencies.functionResults().get(function))
+                        || !Set.of().equals(dependencies.functionInputs().get(function)))) {
+                throw unsupported("transaction-clock signature", function);
+            }
+        }
         for (var inputs : dependencies.functionInputs().entrySet()) {
             String name = functions.get(inputs.getKey());
             if ("concat".equals(name) || "concat_ws".equals(name)) {
@@ -73,13 +89,22 @@ final class PgCheckCatalog {
         types.add(oid);
     }
 
-    private void verifyFunction(long oid) throws SQLException {
-        if (functions.containsKey(oid)) return;
+    private void verifyFunction(long oid, boolean defaultExpression) throws SQLException {
+        if (functions.containsKey(oid)) {
+            if (!defaultExpression && defaultOnlyFunctions.contains(oid)) throw unsupported("clock in check", oid);
+            return;
+        }
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT function.proname, function.provolatile,
                        function.oid < 16384 AND namespace.nspname = 'pg_catalog'
                        AND language.lanname IN ('internal', 'c') AND function.prokind = 'f'
-                       AND NOT function.prosecdef AND NOT function.proretset AND function.proconfig IS NULL
+                       AND NOT function.prosecdef AND NOT function.proretset AND function.proconfig IS NULL,
+                       function.proname IN ('now', 'transaction_timestamp')
+                       AND function.prosrc = 'now' AND language.lanname = 'internal'
+                       AND function.provolatile = 's' AND function.pronargs = 0
+                       AND function.prorettype = 1184 AND function.provariadic = 0
+                       AND function.proisstrict AND function.proargtypes = ''::pg_catalog.oidvector
+                       AND function.proallargtypes IS NULL AND function.proargmodes IS NULL
                   FROM pg_catalog.pg_proc function
                   JOIN pg_catalog.pg_namespace namespace ON namespace.oid = function.pronamespace
                   JOIN pg_catalog.pg_language language ON language.oid = function.prolang
@@ -87,10 +112,12 @@ final class PgCheckCatalog {
                 """)) {
             statement.setLong(1, oid);
             try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !row.getBoolean(3) || !FUNCTIONS.contains(row.getString(1))
-                        || !(row.getString(2).equals("i")
-                            || row.getString(2).equals("s") && STABLE_FUNCTIONS.contains(row.getString(1)))
-                        ) throw unsupported("function", oid);
+                if (!row.next() || !row.getBoolean(3)) throw unsupported("function", oid);
+                boolean clock = row.getBoolean(4);
+                boolean ordinary = FUNCTIONS.contains(row.getString(1)) && (row.getString(2).equals("i")
+                        || row.getString(2).equals("s") && STABLE_FUNCTIONS.contains(row.getString(1)));
+                if (!ordinary && !(defaultExpression && clock)) throw unsupported("function", oid);
+                if (clock) defaultOnlyFunctions.add(oid);
                 functions.put(oid, row.getString(1));
                 if (row.next()) throw unsupported("function", oid);
             }

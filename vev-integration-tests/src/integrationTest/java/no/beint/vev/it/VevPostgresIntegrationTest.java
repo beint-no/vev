@@ -96,6 +96,103 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void transactionClockDefaultsPreserveExternalValuesAndExplicitJavaKotlinWrites() throws SQLException {
+        var reference = database.seedClockDefaults();
+        assertEquals(reference.moment(), reference.nowValue());
+        assertEquals(reference.moment(), reference.transactionValue());
+        assertEquals(reference.moment().atOffset(java.time.ZoneOffset.UTC).toLocalDate(), reference.day());
+        assertEquals(reference.moment().atOffset(java.time.ZoneOffset.UTC).toLocalTime(), reference.clock());
+        assertEquals(reference.moment().atOffset(java.time.ZoneOffset.UTC).toLocalDateTime(), reference.stamp());
+        assertEquals(0, reference.roundedMoment().getNano() % 1_000_000);
+        // Full TIME precision avoids a nondeterministic rounded 24:00 sentinel near midnight.
+        assertEquals(reference.clock(), reference.roundedClock());
+        assertEquals(0, reference.roundedStamp().getNano());
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var row = runtime.read(scope, tx -> tx.entities().find(ClockDefaultEntryVev.INSTANCE.key(1001))).orElseThrow();
+                assertEquals(new ClockDefaultEntry(1001, tenant, 0, reference.day(), reference.moment(), reference.roundedMoment(),
+                        reference.clock(), reference.roundedClock(), reference.stamp(), reference.roundedStamp(), reference.nowValue(), reference.transactionValue()), row);
+                var kotlinType = no.beint.vev.fixtures.KotlinClockDefaultVev.INSTANCE;
+                assertEquals(new no.beint.vev.fixtures.KotlinClockDefault(1001L, tenant, 0L, reference.day(), reference.moment()),
+                        runtime.read(scope, tx -> tx.entities().find(kotlinType.key(1001L))).orElseThrow());
+                var fixed = fixedClockInput();
+                var empty = new ClockDefaultEntryVev.New(null, null, null, null, null, null, null, null, null);
+                var created = runtime.write(scope, tx -> tx.entities().create(ClockDefaultEntryVev.INSTANCE, fixed));
+                assertEquals(clockSnapshot(created, fixed), created);
+                assertEquals(0, created.version());
+                assertTrue(runtime.read(authority.scope(tenant == 7 ? 8 : 7), tx -> tx.entities().find(ClockDefaultEntryVev.INSTANCE.key(created.id()))).isEmpty());
+                var batch = runtime.write(scope, tx -> tx.entities().createMultiple(ClockDefaultEntryVev.INSTANCE, Batch.copyOf(List.of(empty, fixed))));
+                assertEquals(clockSnapshot(batch.get(0), empty), batch.get(0));
+                assertEquals(clockSnapshot(batch.get(1), fixed), batch.get(1));
+                var changed = runtime.write(scope, tx -> tx.entities().updateMultiple(ClockDefaultEntryVev.INSTANCE,
+                        Batch.copyOf(List.of(clockSnapshot(batch.get(0), fixed), clockSnapshot(batch.get(1), empty)))));
+                assertEquals(1, changed.get(0).entity().version());
+                assertEquals(clockSnapshot(changed.get(0).entity(), fixed), changed.get(0).entity());
+                assertEquals(clockSnapshot(changed.get(1).entity(), empty), changed.get(1).entity());
+                var kotlin = runtime.write(scope, tx -> tx.entities().createMultiple(kotlinType, Batch.copyOf(List.of(
+                        new no.beint.vev.fixtures.KotlinClockDefaultVev.New(null, null),
+                        new no.beint.vev.fixtures.KotlinClockDefaultVev.New(fixed.day(), fixed.moment())))));
+                assertNull(kotlin.get(0).day());
+                assertNull(kotlin.get(0).moment());
+                assertEquals(fixed.day(), kotlin.get(1).day());
+                assertEquals(fixed.moment(), kotlin.get(1).moment());
+                var replacement = new no.beint.vev.fixtures.KotlinClockDefault(kotlin.get(1).id(), tenant, 0L, null, null);
+                var updated = (MutationResult.Applied<?, no.beint.vev.fixtures.KotlinClockDefault, ?, ?>) runtime.write(scope,
+                        tx -> tx.entities().update(kotlinType, replacement));
+                assertEquals(1L, updated.entity().version());
+                assertNull(updated.entity().day());
+                assertNull(updated.entity().moment());
+            }
+        }
+    }
+
+    @Test
+    void transactionClockDefaultsRejectSchemaDriftAndLeaveFailedAuthoritiesReusable() throws SQLException {
+        for (String variant : List.of("missing", "differentSpelling", "differentPrecision", "volatile", "statementClock", "identity", "userFunction")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.clockDefaultVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.clockDefaultVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void transactionClockApprovalNeverLeaksIntoChecksOrBypassesSignatureAndDependencyValidation() throws SQLException {
+        database.verifyClockDefaultContracts(false);
+        for (String variant : List.of("volatile", "statementClock", "identity", "userFunction")) {
+            try {
+                database.clockDefaultVariant(variant);
+                database.verifyClockDefaultContracts(true);
+            } finally {
+                database.clockDefaultVariant("valid");
+            }
+        }
+        database.verifyClockDefaultContracts(false);
+    }
+
+    private static ClockDefaultEntryVev.New fixedClockInput() {
+        var instant = Instant.parse("2005-02-03T12:34:56.123456Z");
+        var local = instant.atOffset(java.time.ZoneOffset.UTC).toLocalDateTime();
+        // Precision in a DEFAULT expression must never round explicitly supplied values.
+        return new ClockDefaultEntryVev.New(local.toLocalDate(), instant, instant, local.toLocalTime(), local.toLocalTime(),
+                local, local, instant, instant);
+    }
+
+    private static ClockDefaultEntry clockSnapshot(ClockDefaultEntry stored, ClockDefaultEntryVev.New values) {
+        return new ClockDefaultEntry(stored.id(), stored.tenantId(), stored.version(), values.day(), values.moment(), values.roundedMoment(),
+                values.clock(), values.roundedClock(), values.stamp(), values.roundedStamp(), values.nowValue(), values.transactionValue());
+    }
+
+    @Test
     void historicalMissingValuesSurviveChangedDefaultsAndPhysicalRewrites() throws SQLException {
         try {
             database.seedMissingValues("valid");

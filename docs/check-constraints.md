@@ -104,3 +104,5 @@ application-schema compatibility follows from this feature.
 References: [PostgreSQL constraint catalog](https://www.postgresql.org/docs/18/catalog-pg-constraint.html),
 [function catalog](https://www.postgresql.org/docs/18/catalog-pg-proc.html), and
 [PostgreSQL 18.6 expression-node definitions](https://github.com/postgres/postgres/blob/REL_18_6/src/include/nodes/primnodes.h).
+
+Transaction-start clocks accepted for [column defaults](column-defaults.md#transaction-clock-defaults) remain rejected in CHECK constraints. Approval caches preserve this boundary: a clock default on an earlier mapping cannot authorize a time-dependent check on another mapping.

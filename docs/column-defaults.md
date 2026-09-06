@@ -60,8 +60,9 @@ result type to match the verified column type, and rejects column-variable
 references. It uses the same finite PostgreSQL 18 node/type/operator/function/
 collation profile as [check constraints](check-constraints.md). This includes
 ordinary scalar constants, approved casts and arithmetic; it does not approve
-arbitrary functions, volatile defaults, current-system expression nodes, custom
-types, or input/output coercions merely because they appear in a default.
+arbitrary functions, volatile defaults, identity/session expression nodes, custom
+types, or input/output coercions merely because they appear in a default. The
+transaction-clock defaults below have an additional, separate approval contract.
 
 All dependency types are approved before deparsing can invoke a constant type's
 output function. Vev never evaluates a default to test it. Only after dependency
@@ -72,9 +73,44 @@ leave the tenant authority unclaimed, permitting a corrected bootstrap retry.
 
 Existing type, column-bound, collation, privilege, RLS, and generated-column
 checks remain. Default acceptance does not prove the correctness of another
-writer or that every evaluation meets the application's domain rules. Retain business constraints and review external writes. PostgreSQL
+writer or that every evaluation meets the application's domain rules. Retain
+business constraints and review external writes. PostgreSQL
 [`pg_attrdef`](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html) stores the
 expression metadata used for this comparison.
+
+## Transaction-clock defaults
+
+VALUE columns may declare PostgreSQL `CURRENT_DATE`, `CURRENT_TIMESTAMP`,
+`LOCALTIME`, `LOCALTIMESTAMP`, `now()`, or `transaction_timestamp()` defaults.
+The three SQL time/timestamp forms also accept their native explicit precision
+from zero through six. These return transaction-start values when another writer
+omits a column; see PostgreSQL's
+[current date/time contract](https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT).
+The declaration still uses exact stored text: `CURRENT_TIMESTAMP`,
+`CURRENT_TIMESTAMP(3)`, and `now()` are different schema expectations.
+
+Bootstrap validates each native SQL clock node's operation, PostgreSQL result
+type, and precision. Named clocks additionally require their exact built-in
+internal, stable, zero-argument timestamp signature, with matching stored call
+inputs and result types. All surrounding expression dependencies must satisfy
+the existing approved profile. Vev never evaluates the expression while
+verifying it. Arbitrary clock wrappers, `clock_timestamp()`,
+`statement_timestamp()`, offset `CURRENT_TIME`, and user/role/session/catalog
+expressions remain unsupported.
+
+Clock approval applies only to defaults. CHECK constraints cannot use these
+clocks, including after the same bootstrap catalog cache has approved one for a
+default. Their truth changes with time, so they do not establish a persistent
+row invariant. The verifier preserves this distinction for nested expressions,
+cached functions, malformed signatures, and corrected retries.
+
+Vev writes still bind every timestamp and nullable value explicitly. Precision
+in a default expression never rounds a supplied value or narrows the column's
+verified storage precision. Applications remain responsible for creation/update
+timestamps; this feature does not add automatic lifecycle callbacks or database
+clock queries to mutations. Normal temporal bounds and finite-value checks
+remain in force. No generated-plan ABI, request SQL, or dependency change is
+required.
 
 ## Historical values from column additions
 

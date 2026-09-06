@@ -39,6 +39,41 @@ final class PgCheckTreeTest {
     }
 
     @Test
+    void transactionClockNodesArePreciselyTypedAndAvailableOnlyToDefaults() {
+        for (int operation : List.of(0, 3, 4, 5, 6, 7, 8)) {
+            long type = switch (operation) { case 0 -> 1082; case 3, 4 -> 1184; case 5, 6 -> 1083; default -> 1114; };
+            boolean explicitPrecision = operation == 4 || operation == 6 || operation == 8;
+            for (int precision : explicitPrecision ? List.of(0, 1, 2, 3, 4, 5, 6) : List.of(-1)) {
+                String tree = clock(operation, type, precision);
+                var actual = PgCheckTree.inspectDefaultExpression(tree);
+                assertEquals(type, actual.resultType());
+                assertEquals(Set.of(type), actual.dependencies().types());
+                assertEquals(Set.of(), actual.dependencies().functions());
+                assertThrows(IllegalStateException.class, () -> PgCheckTree.inspect(tree));
+                assertThrows(IllegalStateException.class, () -> PgCheckTree.inspectExpression(tree));
+                String nested = "{NULLTEST :arg " + tree + " :nulltesttype 0 :argisrow false :location -1}";
+                assertEquals(16L, PgCheckTree.inspectDefaultExpression(nested).resultType());
+                assertThrows(IllegalStateException.class, () -> PgCheckTree.inspect(nested));
+                assertThrows(IllegalStateException.class, () -> PgCheckTree.inspectDefaultExpression(clock(operation, 23, precision)));
+            }
+            for (int invalid : explicitPrecision ? List.of(-2, -1, 7, Integer.MAX_VALUE) : List.of(-2, 0, 6)) {
+                assertThrows(IllegalStateException.class, () -> PgCheckTree.inspectDefaultExpression(clock(operation, type, invalid)));
+            }
+        }
+        for (int rejected : List.of(-1, 1, 2, 9, 10, 11, 12, 13, 14, 15, Integer.MAX_VALUE)) {
+            assertThrows(IllegalStateException.class, () -> PgCheckTree.inspectDefaultExpression(clock(rejected, 1184, -1)));
+        }
+        for (String tree : List.of(clock(3,1184,-1).replace(":type 1184", ":type 1184 :type 1184"),
+                clock(3,1184,-1).replace(":typmod -1", ""), clock(3,1184,-1).replace(":location -1", ":unknown -1"))) {
+            assertThrows(IllegalStateException.class, () -> PgCheckTree.inspectDefaultExpression(tree));
+        }
+    }
+
+    private static String clock(int operation, long type, int precision) {
+        return "{SQLVALUEFUNCTION :op " + operation + " :type " + type + " :typmod " + precision + " :location -1}";
+    }
+
+    @Test
     void rejectsUnknownNodesFieldsDuplicateFieldsAndTruncatedOrTrailingInput() {
         for (String tree : List.of("", "<>", "(" + VARIABLE + ")", VARIABLE + " extra", VARIABLE.substring(0, VARIABLE.length() - 1),
                 VARIABLE.replace("VAR", "PARAM"), VARIABLE.replace(":location -1", ":newfield 0"),

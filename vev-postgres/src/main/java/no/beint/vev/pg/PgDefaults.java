@@ -38,12 +38,12 @@ final class PgDefaults {
                 while (row.next()) {
                     PgColumn column = expected.remove(row.getString(2));
                     if (column == null) throw invalid(plan);
-                    var inspection = PgCheckTree.inspectExpression(row.getString(4));
+                    var inspection = PgCheckTree.inspectDefaultExpression(row.getString(4));
                     if (!inspection.dependencies().variables().isEmpty() || inspection.resultType() != row.getLong(3)) {
                         throw invalid(plan);
                     }
                     // Deparsing a Const invokes its type's output function: attest dependencies first.
-                    catalog.verify(inspection.dependencies());
+                    catalog.verifyDefault(inspection.dependencies());
                     verifyDefinition(connection, row.getLong(1), column, plan);
                 }
             }
