@@ -202,7 +202,7 @@ public class HibernateEntityAgentBenchmark {
                 .applySetting("hibernate.hbm2ddl.auto", "none")
                 .applySetting("hibernate.connection.provider_disables_autocommit", "true")
                 .applySetting("hibernate.connection.handling_mode", "IMMEDIATE_ACQUISITION_AND_HOLD")
-                .applySetting("hibernate.jdbc.fetch_size", Integer.toString(BenchmarkDataset.FETCH_SIZE))
+                .applySetting("hibernate.jdbc.fetch_size", "0")
                 .applySetting("hibernate.jdbc.batch_size", "0")
                 .applySetting("hibernate.cache.use_second_level_cache", "false")
                 .applySetting("hibernate.cache.use_query_cache", "false")
