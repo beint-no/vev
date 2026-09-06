@@ -139,7 +139,43 @@ final class IntegrationDatabase {
     void setAccountUnlogged(boolean enabled) throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
+            if (enabled) {
+                statement.execute("ALTER TABLE vev_it.work_item SET UNLOGGED");
+            }
             statement.execute("ALTER TABLE vev_it.account SET " + (enabled ? "UNLOGGED" : "LOGGED"));
+            if (!enabled) {
+                statement.execute("ALTER TABLE vev_it.work_item SET LOGGED");
+            }
+        }
+    }
+
+    void setWorkItemReference(String variant) throws SQLException {
+        String definition = switch (variant) {
+            case "valid", "missing", "disabledTrigger" ->
+                    "FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id)";
+            case "wrongColumn" -> "FOREIGN KEY (tenant_id, id) REFERENCES vev_it.account (tenant_id, id)";
+            case "reversedColumns" -> "FOREIGN KEY (account_id, tenant_id) REFERENCES vev_it.account (id, tenant_id)";
+            case "cascadeDelete" ->
+                    "FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id) ON DELETE CASCADE";
+            case "cascadeUpdate" ->
+                    "FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id) ON UPDATE CASCADE";
+            case "deferrable" ->
+                    "FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id) DEFERRABLE";
+            case "unvalidated" ->
+                    "FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id) NOT VALID";
+            case "fullMatch" ->
+                    "FOREIGN KEY (tenant_id, account_id) REFERENCES vev_it.account (tenant_id, id) MATCH FULL";
+            default -> throw new IllegalArgumentException("Unknown synthetic foreign-key variant");
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.work_item ENABLE TRIGGER ALL");
+            statement.execute("ALTER TABLE vev_it.work_item DROP CONSTRAINT IF EXISTS work_item_account_fk");
+            if (!variant.equals("missing")) {
+                statement.execute("ALTER TABLE vev_it.work_item ADD CONSTRAINT work_item_account_fk " + definition);
+            }
+            if (variant.equals("disabledTrigger")) {
+                statement.execute("ALTER TABLE vev_it.work_item DISABLE TRIGGER ALL");
+            }
         }
     }
 
@@ -818,7 +854,10 @@ final class IntegrationDatabase {
                             tenant_id integer NOT NULL,
                             version bigint NOT NULL,
                             state varchar(16),
-                            PRIMARY KEY (tenant_id, id)
+                            account_id uuid,
+                            PRIMARY KEY (tenant_id, id),
+                            CONSTRAINT work_item_account_fk FOREIGN KEY (tenant_id, account_id)
+                                REFERENCES vev_it.account (tenant_id, id)
                         )
                         """,
                 "ALTER TABLE vev_it.work_item OWNER TO " + OWNER_ROLE,
@@ -832,8 +871,8 @@ final class IntegrationDatabase {
                             WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)
                         """,
                 "GRANT SELECT ON TABLE vev_it.work_item TO " + APPLICATION_USER,
-                "GRANT INSERT (id, tenant_id, version, state) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
-                "GRANT UPDATE (version, state) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
+                "GRANT INSERT (id, tenant_id, version, state, account_id) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
+                "GRANT UPDATE (version, state, account_id) ON TABLE vev_it.work_item TO " + APPLICATION_USER,
                 "GRANT SELECT ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT INSERT (id, tenant_id, version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,
                 "GRANT UPDATE (version, email, balance) ON TABLE vev_it.account TO " + APPLICATION_USER,

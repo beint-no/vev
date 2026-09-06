@@ -43,6 +43,7 @@ final class JavaSourceGenerator {
         }
         appendIndexTokens(source, entity, modelMarker);
         appendIndexList(source, entity, modelMarker);
+        appendReferences(source, entity);
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -94,6 +95,20 @@ final class JavaSourceGenerator {
         }
         source.append("}\n");
         return source.toString();
+    }
+
+    private void appendReferences(StringBuilder source, EntityMapping entity) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgReference> REFERENCES = java.util.List.of(");
+        List<PropertyMapping> references = entity.properties().stream().filter(PropertyMapping::reference).toList();
+        for (int index = 0; index < references.size(); index++) {
+            PropertyMapping property = references.get(index);
+            source.append(index == 0 ? "\n" : ",\n")
+                    .append("            new no.beint.vev.pg.PgReference(\"").append(escape(property.referenceName()))
+                    .append("\", ").append(entity.properties().indexOf(property)).append(", ")
+                    .append(property.referenceTarget()).append(".class)");
+        }
+        source.append(");\n\n");
+        method(source, "public java.util.List<no.beint.vev.pg.PgReference> references()", "return REFERENCES;");
     }
 
     private void appendIndexTokens(StringBuilder source, EntityMapping entity, String modelMarker) {

@@ -25,7 +25,34 @@ A closed model has at most 128 entities and an entity has at most 64 columns. Th
 
 The current experiment treats ID non-reuse within a tenant as an application/schema invariant but cannot attest it. Vev therefore exposes neither physical delete nor create-capable upsert, and its verified application role must have no `DELETE` privilege. This removes the library's previous delete/reinsert ABA path, but privileged out-of-band changes can still violate the invariant.
 
-The initial live-schema profile is equally closed. Every mapped relation must be a permanent, logged, nonpartitioned, non-inherited built-in heap table with no rewrite rules or enabled user triggers. It has the exact immediate built-in B-tree `(tenant, id)` primary key plus exactly the generated `@VevIndex` set. Each secondary index must be non-unique, immediate, built-in B-tree, have keys exactly `(tenant, indexed value, id)` with default ascending/null ordering and expected collations/operator classes, and have no predicate, expression, included column, constraint ownership, custom option, or custom tablespace. Check constraints, unique indexes, and every foreign key touching a mapped table remain rejected until those structures are represented in generated metadata and their tenant and execution semantics can be attested.
+The initial live-schema profile is equally closed. Every mapped relation must be a permanent, logged, nonpartitioned, non-inherited built-in heap table with no rewrite rules or enabled user triggers. It has the exact immediate built-in B-tree `(tenant, id)` primary key plus exactly the generated `@VevIndex` set. Each secondary index must be non-unique, immediate, built-in B-tree, have keys exactly `(tenant, indexed value, id)` with default ascending/null ordering and expected collations/operator classes, and have no predicate, expression, included column, constraint ownership, custom option, or custom tablespace. Check constraints and unique indexes remain rejected. `@VevReference` declares a scalar reference within the same closed model: its Java type and bounds must exactly match the target identifier. The runtime verifies the exact composite `(tenant, reference)` to `(target tenant, target id)` foreign key, including built-in equality operators and four enabled integrity triggers. Only immediate, validated, enforced MATCH SIMPLE and NO ACTION semantics are accepted. Undeclared incoming or outgoing references remain rejected.
+
+## Explicit scalar references
+
+A reference stays an identifier in the immutable snapshot. For example, a nullable
+reference to an `Account` with a `UUID` identifier is:
+
+```java
+@VevReference(name = "work_item_account_fk", target = Account.class)
+@Column(name = "account_id", nullable = true) UUID accountId
+```
+
+Both records must belong to the same `@VevModel`. The reviewed migration must
+install the exact reference shown in the generated schema manifest, for example:
+
+```sql
+CONSTRAINT work_item_account_fk
+    FOREIGN KEY (tenant_id, account_id)
+    REFERENCES ledger.account (tenant_id, id)
+    MATCH SIMPLE ON UPDATE NO ACTION ON DELETE NO ACTION NOT DEFERRABLE
+```
+
+A null scalar leaves the reference absent. A non-null scalar must identify a row
+in the active tenant, including when another tenant has the same identifier.
+Referential-integrity failures roll back the complete lexical transaction.
+Self-references use the same contract. Vev performs no implicit fetch, cascade, or
+insert reordering; callers insert referenced rows before their dependants, or use
+one atomic batch for a self-referencing set.
 
 ## Deliberately rejected mappings
 
@@ -42,7 +69,8 @@ The initial live-schema profile is equally closed. Every mapped relation must be
 | Lazy basic fields | Rejected | Vev does not generate entity proxies |
 | Provider formulas, generated timestamps, custom types | Rejected | Provider-specific behavior cannot be approximated safely |
 | Physical delete and create-capable upsert | Absent | Removing a row can make an assigned ID reusable and reintroduce version-zero ABA; lifecycle retirement is a versioned update |
-| Check constraints, unique indexes, and foreign keys | Rejected | The current generator and startup verifier do not yet model their complete tenant and domain semantics |
+| Check constraints and unique indexes | Rejected | The generator and verifier do not yet model their complete domain semantics |
+| Foreign keys | Only explicit scalar `@VevReference` within the closed model | Exact tenant-composite keys, matching types and bounds, no cascade/deferral, and verified built-in enforcement |
 | Native SQL in entity/repository metadata | Rejected in the safe profile | Arbitrary SQL cannot be proven to preserve mapping and tenant invariants |
 
 ## Query and repository profile

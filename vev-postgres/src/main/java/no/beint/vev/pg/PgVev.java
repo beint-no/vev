@@ -1254,38 +1254,11 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     private void verifyStructuralConstraints(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
         verifySecondaryIndexes(connection, plan);
 
-        String foreignKeySql = """
-                SELECT pg_catalog.count(*)
-                  FROM pg_catalog.pg_constraint constraint_definition
-                  JOIN pg_catalog.pg_class source_relation
-                    ON source_relation.oid = constraint_definition.conrelid
-                  JOIN pg_catalog.pg_namespace source_namespace
-                    ON source_namespace.oid = source_relation.relnamespace
-                  JOIN pg_catalog.pg_class target_relation
-                    ON target_relation.oid = constraint_definition.confrelid
-                  JOIN pg_catalog.pg_namespace target_namespace
-                    ON target_namespace.oid = target_relation.relnamespace
-                 WHERE constraint_definition.contype = 'f'
-                   AND ((source_namespace.nspname = ? AND source_relation.relname = ?)
-                     OR (target_namespace.nspname = ? AND target_relation.relname = ?))
-                """;
-        try (PreparedStatement statement = connection.prepareStatement(foreignKeySql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            statement.setString(3, plan.schemaName());
-            statement.setString(4, plan.tableName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next() || resultSet.getInt(1) != 0 || resultSet.next()) {
-                    throw new IllegalStateException(
-                            "Foreign keys touching mapped tables are outside Vev's closed schema profile: "
-                                    + plan.schemaName() + '.' + plan.tableName());
-                }
-            }
-        }
+        PgReferences.verify(connection, model, plan);
 
         String executableConstraintSql = """
                 SELECT pg_catalog.count(*) FILTER (
-                           WHERE constraint_definition.contype NOT IN ('p', 'n')),
+                           WHERE constraint_definition.contype NOT IN ('p', 'n', 'f')),
                        pg_catalog.count(*) FILTER (
                            WHERE constraint_definition.contype = 'n'),
                        pg_catalog.count(*) FILTER (

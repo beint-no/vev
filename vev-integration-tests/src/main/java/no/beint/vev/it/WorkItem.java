@@ -9,6 +9,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import no.beint.vev.TenantKey;
 import no.beint.vev.VevIndex;
+import no.beint.vev.VevReference;
 
 import java.util.UUID;
 
@@ -20,5 +21,7 @@ public record WorkItem(
         @Version @Column(name = "version", nullable = false) Long version,
         @Enumerated(EnumType.STRING)
         @VevIndex(name = "work_item_state_vev_idx")
-        @Column(name = "state", nullable = true, length = 16) WorkState state) {
+        @Column(name = "state", nullable = true, length = 16) WorkState state,
+        @VevReference(name = "work_item_account_fk", target = Account.class)
+        @Column(name = "account_id", nullable = true) UUID accountId) {
 }

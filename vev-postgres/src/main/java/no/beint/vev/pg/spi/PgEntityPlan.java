@@ -4,6 +4,7 @@ import no.beint.vev.EntityType;
 import no.beint.vev.pg.PgCodec;
 import no.beint.vev.pg.PgColumn;
 import no.beint.vev.pg.PgIndex;
+import no.beint.vev.pg.PgReference;
 
 import java.util.List;
 
@@ -73,6 +74,15 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * @return stable immutable index-token list
      */
     List<PgIndex<M, E, K, ?>> indexes();
+
+    /**
+     * Returns the complete generated outgoing foreign-key requirements.
+     *
+     * @return immutable scalar references within this model; empty for a model without references
+     */
+    default List<PgReference> references() {
+        return List.of();
+    }
 
     /**
      * Reads one mapped value from a detached entity snapshot.

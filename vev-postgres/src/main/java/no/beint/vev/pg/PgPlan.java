@@ -26,6 +26,7 @@ class PgPlan<M, E, K, T> {
     private final String tenantColumn;
     private final List<PgColumn> columns;
     private final List<PgIndex<M, E, K, ?>> indexes;
+    private final List<PgReference> references;
     private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
 
@@ -58,7 +59,19 @@ class PgPlan<M, E, K, T> {
             boundedIndexes.add(Objects.requireNonNull(index, "index"));
         }
         this.indexes = List.copyOf(boundedIndexes);
+        List<PgReference> boundedReferences = new ArrayList<>();
+        for (PgReference reference : Objects.requireNonNull(source.references(), "references")) {
+            if (boundedReferences.size() == VevModel.MAXIMUM_COLUMNS) {
+                throw new IllegalArgumentException("Entity plan exceeds the generated reference bound");
+            }
+            boundedReferences.add(Objects.requireNonNull(reference, "reference"));
+        }
+        this.references = List.copyOf(boundedReferences);
         this.indexSql = new IdentityHashMap<>();
+    }
+
+    List<PgReference> references() {
+        return references;
     }
 
     static PgPlan<?, ?, ?, ?> capture(PgEntityPlan<?, ?, ?, ?> source) {

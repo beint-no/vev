@@ -22,10 +22,10 @@ final class SchemaManifestGenerator {
                   ]
                 }
                 """.formatted(quote(model.qualifiedName()), quote(model.fingerprint()),
-                model.entities().stream().map(this::entity).collect(Collectors.joining(",\n")));
+                model.entities().stream().map(entity -> entity(model, entity)).collect(Collectors.joining(",\n")));
     }
 
-    private String entity(EntityMapping entity) {
+    private String entity(CompiledModel model, EntityMapping entity) {
         String indexes = entity.properties().stream().filter(PropertyMapping::indexed)
                 .map(property -> """
                             {"name": %s, "method": "btree", "unique": false, "columns": [%s, %s, %s]}"""
@@ -46,14 +46,26 @@ final class SchemaManifestGenerator {
                       ],
                       "primaryKey": [%s, %s],
                       "indexes": [%s],
+                      "references": [%s],
                       "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": %s, "setting": "vev.tenant_id"},
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": false}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
                 entity.appendOnly(), columns(entity.properties()), quote(entity.tenant().columnName()),
-                quote(entity.id().columnName()), indexes.isEmpty() ? "" : "\n" + indexes + "\n      ",
+                quote(entity.id().columnName()), indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates);
+    }
+
+    private String references(CompiledModel model, EntityMapping source) {
+        return source.properties().stream().filter(PropertyMapping::reference).map(property -> {
+            EntityMapping target = model.entities().stream()
+                    .filter(candidate -> candidate.qualifiedName().equals(property.referenceTarget())).findFirst().orElseThrow();
+            return """
+                    {"name": %s, "columns": [%s, %s], "targetSchema": %s, "targetTable": %s, "targetColumns": [%s, %s], "match": "SIMPLE", "onUpdate": "NO ACTION", "onDelete": "NO ACTION", "deferrable": false}"""
+                    .formatted(quote(property.referenceName()), quote(source.tenant().columnName()), quote(property.columnName()),
+                            quote(target.schemaName()), quote(target.tableName()), quote(target.tenant().columnName()), quote(target.id().columnName()));
+        }).collect(Collectors.joining(", "));
     }
 
     private String columns(List<PropertyMapping> properties) {

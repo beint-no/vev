@@ -60,9 +60,10 @@ final class MappingCompiler {
     private static final String TENANT_KEY = "no.beint.vev.TenantKey";
     private static final String APPEND_ONLY = "no.beint.vev.AppendOnly";
     private static final String VEV_INDEX = "no.beint.vev.VevIndex";
+    private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
-    private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES");
+    private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES");
     private static final Set<String> ASSOCIATIONS = Set.of(
             "jakarta.persistence.OneToOne",
             "jakarta.persistence.OneToMany",
@@ -155,6 +156,7 @@ final class MappingCompiler {
         validateSingleTenantType(modelDeclaration, entities);
         validateUniqueTables(modelDeclaration, entities);
         validateUniqueIndexes(modelDeclaration, entities);
+        validateReferences(entities);
         if (invalid) {
             return;
         }
@@ -172,6 +174,29 @@ final class MappingCompiler {
         }
         writeSource(modelQualifiedName, generator.modelRegistry(model), modelDeclaration);
         writeManifest(model);
+    }
+
+    private void validateReferences(List<EntityMapping> entities) {
+        Map<String, EntityMapping> byType = new HashMap<>();
+        entities.forEach(entity -> byType.put(entity.qualifiedName(), entity));
+        for (EntityMapping entity : entities) {
+            Set<String> names = new HashSet<>();
+            for (PropertyMapping property : entity.properties()) {
+                if (!property.reference()) {
+                    continue;
+                }
+                if (!names.add(property.referenceName())) {
+                    error(property.declaration(), "Duplicate foreign-key name in one entity: " + property.referenceName());
+                }
+                EntityMapping target = byType.get(property.referenceTarget());
+                if (target == null) {
+                    error(property.declaration(), "@VevReference target must belong to the same closed @VevModel");
+                } else if (!property.boxedType().equals(target.id().boxedType())
+                        || property.maximumLength() != target.id().maximumLength()) {
+                    error(property.declaration(), "@VevReference must use the target's exact scalar identifier type and bounds");
+                }
+            }
+        }
     }
 
     private void writeManifest(CompiledModel model) {
@@ -408,6 +433,22 @@ final class MappingCompiler {
         if (roles > 1) {
             error(component, "@Id, @TenantKey, and @Version must identify distinct record components");
         }
+        AnnotationMirror reference = consistentAnnotation(component, annotationSources, VEV_REFERENCE);
+        String referenceName = reference == null ? "" : stringValue(reference, "name");
+        String referenceTarget = "";
+        if (reference != null) {
+            validateIdentifier(component, referenceName, "foreign-key");
+            if (roles > 0) {
+                error(component, "@VevReference may only map an ordinary VALUE component");
+            }
+            AnnotationValue target = annotationValue(reference, "target");
+            if (target != null && target.getValue() instanceof TypeMirror targetType
+                    && processingEnvironment.getTypeUtils().asElement(targetType) instanceof TypeElement targetElement) {
+                referenceTarget = targetElement.getQualifiedName().toString();
+            } else {
+                error(component, "@VevReference target must resolve to a declared entity type");
+            }
+        }
         String indexName = index == null ? "" : stringValue(index, "name");
         String indexFieldName = "";
         if (index != null) {
@@ -513,7 +554,9 @@ final class MappingCompiler {
                 version,
                 indexName,
                 indexFieldName,
-                enumConstants);
+                enumConstants,
+                referenceName,
+                referenceTarget);
     }
 
     private void validateIndexes(TypeElement entity, List<PropertyMapping> properties) {
@@ -649,7 +692,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE)) {
                     if (!componentElements.contains(member)) {
                         error(member, "Persistence mapping @" + simpleName(name)
                                 + " is forbidden on members unrelated to a record component");
@@ -671,7 +714,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE)) {
                     validateAnnotationShape(component, annotation);
                     continue;
                 }
@@ -854,7 +897,11 @@ final class MappingCompiler {
 
     private void validateAnnotationShape(Element use, AnnotationMirror annotation) {
         String annotationName = annotationName(annotation);
-        Set<String> expected = annotationName.equals(ENUMERATED) ? Set.of("value") : ANNOTATION_MEMBERS.get(annotationName);
+        Set<String> expected = switch (annotationName) {
+            case ENUMERATED -> Set.of("value");
+            case VEV_REFERENCE -> Set.of("name", "target");
+            default -> ANNOTATION_MEMBERS.get(annotationName);
+        };
         if (expected == null) {
             return;
         }
@@ -950,6 +997,10 @@ final class MappingCompiler {
                         .append(property.indexName()).append('\n');
                 if (!property.enumConstants().isEmpty()) {
                     canonical.append("enumNames|").append(String.join("|", property.enumConstants())).append('\n');
+                }
+                if (property.reference()) {
+                    canonical.append("reference|").append(property.referenceName()).append('|')
+                            .append(property.referenceTarget()).append('\n');
                 }
             }
         }

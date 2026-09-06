@@ -199,6 +199,56 @@ final class VevProcessorTest {
     }
 
     @Test
+    void compilesReferencesWithinTheClosedModelAndEmitsCompositeForeignKeys() throws IOException {
+        Compilation compilation = compile(referenceSources());
+        assertTrue(compilation.success(), compilation.diagnostics());
+        assertTrue(compilation.generated("example/AccountVev.java").contains(
+                "new no.beint.vev.pg.PgReference(\"account_audit_fk\", 5, example.AuditEvent.class)"));
+        String manifest = compilation.manifest("example.BillingModel");
+        assertTrue(manifest.contains("\"columns\": [\"tenant_id\", \"alias\"], \"targetSchema\": \"ledger\","
+                + " \"targetTable\": \"audit_event\", \"targetColumns\": [\"tenant_id\", \"id\"]"));
+        var renamed = referenceSources();
+        renamed.computeIfPresent("example/Account.java", (path, source) -> source.replace("account_audit_fk", "account_event_fk"));
+        Compilation changed = compile(renamed);
+        assertTrue(changed.success(), changed.diagnostics());
+        assertNotEquals(compilation.generated("example/BillingModelVev.java"), changed.generated("example/BillingModelVev.java"));
+        var selfReference = referenceSources();
+        selfReference.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("target = AuditEvent.class", "target = Account.class").replace("UUID alias", "Long alias"));
+        Compilation self = compile(selfReference);
+        assertTrue(self.success(), self.diagnostics());
+    }
+
+    @Test
+    void rejectsForeignReferenceTargetsTypesRolesAndNames() throws IOException {
+        for (var replacement : Map.of(
+                "foreign target", List.of("target = AuditEvent.class", "target = java.lang.String.class"),
+                "wrong key type", List.of("UUID alias", "Long alias"),
+                "unsafe name", List.of("account_audit_fk", "account.audit.fk"),
+                "structural column", List.of("@Column(name = \"alias\", nullable = true)",
+                        "@Id @Column(name = \"alias\", nullable = true)")).entrySet()) {
+            var sources = referenceSources();
+            sources.computeIfPresent("example/Account.java", (path, source) -> source
+                    .replace(replacement.getValue().get(0), replacement.getValue().get(1)));
+            Compilation compilation = compile(sources);
+            assertFalse(compilation.success(), replacement.getKey());
+            assertFalse(Files.exists(compilation.classesDirectory()
+                    .resolve("META-INF/vev/example.BillingModel.schema.json")));
+        }
+    }
+
+    private static Map<String, String> referenceSources() {
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@VevIndex(name = \"account_alias_idx\")",
+                        "@no.beint.vev.VevReference(name = \"account_audit_fk\", target = AuditEvent.class)\n"
+                                + "@VevIndex(name = \"account_alias_idx\")")
+                .replace("@Column(name = \"alias\", nullable = true, length = 64) String alias",
+                        "@Column(name = \"alias\", nullable = true) UUID alias"));
+        return sources;
+    }
+
+    @Test
     void rejectsEveryImplicitOrUnsafeMappingAtCompilation() throws IOException {
         Map<String, NegativeCase> cases = new LinkedHashMap<>();
         cases.put("implicitTable", new NegativeCase(

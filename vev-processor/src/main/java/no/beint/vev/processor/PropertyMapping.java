@@ -20,12 +20,18 @@ record PropertyMapping(
         boolean version,
         String indexName,
         String indexFieldName,
-        List<String> enumConstants) {
+        List<String> enumConstants,
+        String referenceName,
+        String referenceTarget) {
     String quotedColumn() {
         return '"' + columnName + '"';
     }
 
     boolean indexed() {
         return !indexName.isEmpty();
+    }
+
+    boolean reference() {
+        return !referenceName.isEmpty();
     }
 }

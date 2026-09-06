@@ -108,6 +108,9 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException("All entities in one Vev model must use the same tenant key type");
             }
         }
+        for (PgPlan<M, ?, ?, T> plan : snapshots) {
+            validateReferences(plan, byJavaType);
+        }
         for (String mappedIndex : mappedIndexes) {
             if (mappedTables.contains(mappedIndex)) {
                 throw new IllegalArgumentException(
@@ -127,6 +130,30 @@ public final class PgModel<M, T> {
             sources.add(plan.source());
         }
         this.orderedSources = List.copyOf(sources);
+    }
+
+    private static void validateReferences(PgPlan<?, ?, ?, ?> source, Map<Class<?>, ? extends PgPlan<?, ?, ?, ?>> plans) {
+        Set<String> names = new HashSet<>();
+        Set<Integer> columns = new HashSet<>();
+        for (PgReference reference : source.references()) {
+            if (!names.add(reference.name()) || !columns.add(reference.columnIndex())) {
+                throw new IllegalArgumentException("Duplicate generated reference name or column: " + source.logicalName());
+            }
+            PgPlan<?, ?, ?, ?> target = plans.get(reference.targetType());
+            if (target == null) {
+                throw new IllegalArgumentException("Reference target must belong to the same closed model");
+            }
+            if (reference.columnIndex() >= source.columns().size()) {
+                throw new IllegalArgumentException("Reference column is outside the generated entity shape");
+            }
+            PgColumn column = source.columns().get(reference.columnIndex());
+            PgColumn targetId = target.columns().stream().filter(value -> value.role() == PgColumn.Role.ID)
+                    .findFirst().orElseThrow();
+            if (column.role() != PgColumn.Role.VALUE || column.codec() != targetId.codec()
+                    || column.maximumLength() != targetId.maximumLength()) {
+                throw new IllegalArgumentException("Reference must use the target's exact scalar identifier mapping");
+            }
+        }
     }
 
     @SuppressWarnings("unchecked")

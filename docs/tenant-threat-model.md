@@ -17,7 +17,7 @@ Availability attacks, a compromised application process, a malicious JDBC driver
 - application code fabricates a tenant value or scope, crosses generated models, or reuses one authority across database runtimes;
 - a task inherits a connection or tenant context across a concurrent boundary;
 - arbitrary native SQL bypasses generated predicates;
-- an undeclared, unique, malformed, partial, or expression index, exclusion constraint, or foreign key adds unmodeled cross-tenant semantics;
+- an undeclared, unique, malformed, partial, or expression index, exclusion constraint, or undeclared/malformed foreign key adds unmodeled cross-tenant semantics;
 - connection pooling leaks session state such as `search_path`, role, or row-security variables;
 - diagnostics expose tenant data or bound values.
 
@@ -33,7 +33,7 @@ Tenant isolation must be structural, not an optional query filter:
 6. The active tenant scope is immutable and pinned for the lexical transaction. A change poisons the transaction.
 7. Batch and bulk operations retain the same invariant and remain bounded. Batch insert rejects duplicate entity keys before one typed-array statement; batch update rejects duplicates before its one guarded typed-array statement and rolls back the complete lexical transaction if one row is stale, missing, or returned unexpectedly.
 8. Native SQL is excluded from the tenant-safe profile unless a separate compiler can prove equivalent constraints.
-9. An accepted secondary index is generated from `@VevIndex`, is non-unique, and is live-attested with exact `(tenant, indexed value, id)` B-tree keys. Undeclared or differently shaped indexes, ordinary inheritance, check/unique constraints, and foreign keys touching mapped tables are rejected.
+9. An accepted secondary index is generated from `@VevIndex`, is non-unique, and is live-attested with exact `(tenant, indexed value, id)` B-tree keys. Undeclared or differently shaped indexes, ordinary inheritance, and check/unique constraints are rejected. Foreign keys require generated `@VevReference` metadata, exact tenant-composite column/type/collation correspondence, a target inside the closed model, immediate non-cascading enforcement, and all built-in integrity triggers enabled.
 10. A dedicated pgjdbc pool must establish an exact `pg_catalog`/UTF-8 baseline before checkout. Vev fails a changed baseline or retained `pg_temp` schema instead of mutating `search_path`, then independently installs and verifies the remaining transaction context and re-attests it immediately before commit. Avoiding path changes preserves pgjdbc prepared-query caching; pooled state is still verified, never assumed clean.
 11. Logs, exceptions, and telemetry record operation categories and SQLSTATE where permitted, never SQL text, entity values, tenant values, or bound values.
 
@@ -51,7 +51,7 @@ A tenant-capable release needs automated PostgreSQL tests for:
 - transaction suspension/resumption and nested boundaries;
 - virtual-thread and structured-concurrency context propagation;
 - pool reuse after every supported failure path;
-- generated and attested composite tenant foreign-key enforcement before any foreign key is accepted.
+- cross-tenant reference writes, missing/reordered/wrong reference columns, disabled integrity triggers, deferred/unvalidated constraints, and cascade/MATCH FULL mutations of declared tenant-composite foreign keys.
 
 Tests must use synthetic tenants and synthetic records. Production-derived tenant identifiers or database dumps must never be committed to this repository.
 

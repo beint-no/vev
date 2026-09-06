@@ -27,7 +27,7 @@
 - deepen and adversarially test the implemented structural tenant-isolation boundary;
 - broaden version-token conformance while preserving mandatory optimistic locking for mutable entities;
 - use the generated canonical schema manifest in a build task that compares reviewed migrations with generated expectations; retain live startup attestation for database facts a compiler cannot prove;
-- generate and attest explicit check/unique constraints and tenant-composite foreign keys before permitting them, rather than weakening the database to fit Vev;
+- extend generated check/unique constraints and the implemented immediate tenant-composite scalar references without weakening database integrity;
 - design and attest an incarnation token or append-only identifier registry before reconsidering physical delete or create-capable upsert;
 - verify virtual-thread and structured-concurrency ownership;
 - test pool state reset, cancellation, timeout, and failure recovery;
