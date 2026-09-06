@@ -61,6 +61,8 @@ final class JavaSourceGenerator {
         method(source, "public String schemaName()", "return \"" + escape(entity.schemaName()) + "\";");
         method(source, "public String tableName()", "return \"" + escape(entity.tableName()) + "\";");
         method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");
+        method(source, "public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape()",
+                "return no.beint.vev.VevPrimaryKey.Shape." + entity.primaryKeyShape() + ";");
         method(source, "public java.util.List<no.beint.vev.pg.PgColumn> columns()", "return COLUMNS;");
         method(source, "public java.util.List<no.beint.vev.pg.PgIndex<" + modelMarker + ", "
                         + entity.qualifiedName() + ", " + entity.id().boxedType() + ", ?>> indexes()",

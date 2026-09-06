@@ -86,6 +86,49 @@ final class IntegrationDatabase {
         }
     }
 
+    void identityEntryPrimaryKey(String variant) throws SQLException {
+        String key = switch (variant) {
+            case "valid" -> "PRIMARY KEY (id)";
+            case "tenantFirst" -> "PRIMARY KEY (tenant_id, id)";
+            case "idTenant" -> "PRIMARY KEY (id, tenant_id)";
+            case "included" -> "PRIMARY KEY (id) INCLUDE (version)";
+            case "deferred" -> "PRIMARY KEY (id) DEFERRABLE";
+            default -> throw new IllegalArgumentException(variant);
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT identity_entry_pkey");
+            statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT identity_entry_pkey " + key);
+        }
+    }
+
+    void identityEntryTraversalIndex(String variant) throws SQLException {
+        String definition = switch (variant) {
+            case "valid", "missing", "unique" -> "(tenant_id, id)";
+            case "reversed" -> "(id, tenant_id)";
+            case "duplicate" -> "(tenant_id, id, id)";
+            case "partial" -> "(tenant_id, id) WHERE id > 0";
+            default -> throw new IllegalArgumentException(variant);
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("DROP INDEX IF EXISTS vev_it.identity_entry_tenant_id_idx");
+            if (!variant.equals("missing")) {
+                statement.execute("CREATE " + (variant.equals("unique") ? "UNIQUE " : "")
+                        + "INDEX identity_entry_tenant_id_idx ON vev_it.identity_entry " + definition);
+            }
+        }
+    }
+
+    void identityEntryAlternateKeyTenantFirst(boolean tenantFirst) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.identity_event DROP CONSTRAINT identity_event_entry_fk");
+            statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT identity_entry_id_tenant_key");
+            statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT identity_entry_id_tenant_key UNIQUE "
+                    + (tenantFirst ? "(tenant_id, id)" : "(id, tenant_id)"));
+            statement.execute("ALTER TABLE vev_it.identity_event ADD CONSTRAINT identity_event_entry_fk "
+                    + "FOREIGN KEY (entry_id, tenant_id) REFERENCES vev_it.identity_entry (id, tenant_id)");
+        }
+    }
+
     void identityReferenceTenantFirst(boolean tenantFirst) throws SQLException {
         try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
             statement.execute("ALTER TABLE vev_it.identity_entry DROP CONSTRAINT identity_entry_account_fk");
@@ -195,6 +238,7 @@ final class IntegrationDatabase {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
             if (enabled) {
+                statement.execute("ALTER TABLE vev_it.identity_event SET UNLOGGED");
                 statement.execute("ALTER TABLE vev_it.work_item SET UNLOGGED");
                 statement.execute("ALTER TABLE vev_it.identity_entry SET UNLOGGED");
             }
@@ -202,6 +246,7 @@ final class IntegrationDatabase {
             if (!enabled) {
                 statement.execute("ALTER TABLE vev_it.work_item SET LOGGED");
                 statement.execute("ALTER TABLE vev_it.identity_entry SET LOGGED");
+                statement.execute("ALTER TABLE vev_it.identity_event SET LOGGED");
             }
         }
     }
@@ -888,20 +933,26 @@ final class IntegrationDatabase {
             String values = switch (table) {
                 case "identity_entry" -> ", version smallint NOT NULL, label varchar(64) NOT NULL, code varchar(64), account_id uuid"
                         + ", CONSTRAINT identity_entry_code_key UNIQUE (tenant_id, code)"
+                        + ", CONSTRAINT identity_entry_id_tenant_key UNIQUE (id, tenant_id)"
                         + ", CONSTRAINT identity_entry_account_fk FOREIGN KEY (account_id, tenant_id) REFERENCES vev_it.account(id, tenant_id)";
                 case "identity_counter" -> ", version integer NOT NULL";
                 case "kotlin_identity" -> ", version bigint NOT NULL, label varchar(64) NOT NULL, note varchar(64)";
-                default -> ", message varchar(64)";
+                default -> ", message varchar(64), entry_id bigint"
+                        + ", CONSTRAINT identity_event_entry_fk FOREIGN KEY (entry_id, tenant_id) REFERENCES vev_it.identity_entry(id, tenant_id)";
             };
             String mutable = switch (table) {
                 case "identity_entry" -> "version, label, code, account_id";
                 case "identity_counter" -> "version";
                 case "kotlin_identity" -> "version, label, note";
-                default -> "message";
+                default -> "message, entry_id";
             };
             statements.add("CREATE TABLE vev_it." + table + "(id " + idType
-                    + " GENERATED ALWAYS AS IDENTITY, tenant_id integer NOT NULL" + values + ", PRIMARY KEY (tenant_id, id))");
+                    + " GENERATED ALWAYS AS IDENTITY, tenant_id integer NOT NULL" + values + ", PRIMARY KEY ("
+                    + (table.equals("kotlin_identity") ? "tenant_id, id" : table.equals("identity_counter") ? "id, tenant_id" : "id") + "))");
             statements.add("ALTER TABLE vev_it." + table + " OWNER TO " + OWNER_ROLE);
+            if (!table.equals("kotlin_identity")) {
+                statements.add("CREATE INDEX " + table + "_tenant_id_idx ON vev_it." + table + " (tenant_id, id)");
+            }
             statements.add("ALTER TABLE vev_it." + table + " ENABLE ROW LEVEL SECURITY");
             statements.add("ALTER TABLE vev_it." + table + " FORCE ROW LEVEL SECURITY");
             statements.add("CREATE POLICY " + table + "_tenant ON vev_it." + table
@@ -994,10 +1045,11 @@ final class IntegrationDatabase {
                 """
                         CREATE TABLE vev_it.snapshot_probe (
                             id bigint NOT NULL, tenant_id integer NOT NULL, version bigint NOT NULL,
-                            value varchar(64) NOT NULL, PRIMARY KEY (tenant_id, id)
+                            value varchar(64) NOT NULL, PRIMARY KEY (id)
                         )
                         """,
                 "ALTER TABLE vev_it.snapshot_probe OWNER TO " + OWNER_ROLE,
+                "CREATE INDEX snapshot_probe_tenant_id_idx ON vev_it.snapshot_probe (tenant_id, id)",
                 "ALTER TABLE vev_it.snapshot_probe ENABLE ROW LEVEL SECURITY",
                 "ALTER TABLE vev_it.snapshot_probe FORCE ROW LEVEL SECURITY",
                 """

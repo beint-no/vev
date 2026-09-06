@@ -28,9 +28,10 @@ final class SchemaManifestGenerator {
     private String entity(CompiledModel model, EntityMapping entity) {
         String indexes = entity.properties().stream().filter(PropertyMapping::indexed)
                 .map(property -> """
-                            {"name": %s, "method": "btree", "unique": false, "columns": [%s, %s, %s]}"""
-                        .formatted(quote(property.indexName()), quote(entity.tenant().columnName()),
-                                quote(property.columnName()), quote(entity.id().columnName())))
+                            {"name": %s, "method": "btree", "unique": false, "columns": [%s]}"""
+                        .formatted(quote(property.indexName()), property.id()
+                                ? quote(entity.tenant().columnName()) + ", " + quote(entity.id().columnName())
+                                : quote(entity.tenant().columnName()) + ", " + quote(property.columnName()) + ", " + quote(entity.id().columnName())))
                 .collect(Collectors.joining(",\n")).indent(8).stripTrailing();
         String updates = entity.properties().stream()
                 .filter(property -> !entity.appendOnly() && !property.id() && !property.tenant())
@@ -44,7 +45,7 @@ final class SchemaManifestGenerator {
                       "columns": [
                 %s
                       ],
-                      "primaryKey": [%s, %s],
+                      "primaryKey": [%s],
                       "indexes": [%s],
                       "uniqueConstraints": [%s],
                       "references": [%s],
@@ -52,8 +53,8 @@ final class SchemaManifestGenerator {
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": false}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
-                entity.appendOnly(), identity(entity), columns(entity.properties()), quote(entity.tenant().columnName()),
-                quote(entity.id().columnName()), indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity), references(model, entity),
+                entity.appendOnly(), identity(entity), columns(entity.properties()), primaryKey(entity),
+                indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity), references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates);
     }
@@ -64,6 +65,15 @@ final class SchemaManifestGenerator {
                 : entity.id().boxedType().equals("java.lang.Integer") ? Integer.MAX_VALUE : Long.MAX_VALUE;
         return "\n      \"identity\": {\"column\": %s, \"modes\": [\"ALWAYS\", \"BY DEFAULT\"], \"sequenceOwnership\": \"INTERNAL\", \"start\": 1, \"increment\": 1, \"minimum\": 1, \"maximum\": %d, \"cycle\": false, \"sequencePrivileges\": [\"USAGE\"]},"
                 .formatted(quote(entity.id().columnName()), maximum);
+    }
+
+    private String primaryKey(EntityMapping entity) {
+        return switch (entity.primaryKeyShape()) {
+            case "TENANT_ID" -> quote(entity.tenant().columnName()) + ", " + quote(entity.id().columnName());
+            case "ID_TENANT" -> quote(entity.id().columnName()) + ", " + quote(entity.tenant().columnName());
+            case "ID" -> quote(entity.id().columnName());
+            default -> throw new IllegalArgumentException("Unsupported primary-key shape");
+        };
     }
 
     private String uniqueConstraints(EntityMapping entity) {

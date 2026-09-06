@@ -27,7 +27,7 @@ public @interface VevReference {
     /**
      * Returns the referenced entity in the same closed model.
      *
-     * @return entity whose tenant-qualified primary key is referenced
+     * @return entity whose tenant-qualified identifier is referenced
      */
     Class<?> target();
 

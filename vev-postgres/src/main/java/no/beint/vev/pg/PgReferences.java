@@ -125,10 +125,15 @@ final class PgReferences {
                         JOIN pg_catalog.pg_proc function ON function.oid = trigger.tgfoid
                         JOIN pg_catalog.pg_namespace function_namespace ON function_namespace.oid = function.pronamespace
                        WHERE trigger.tgconstraint = constraint_definition.oid),
-                   EXISTS (SELECT 1 FROM pg_catalog.pg_index primary_index
-                            WHERE primary_index.indrelid = target_relation.oid
-                              AND primary_index.indexrelid = constraint_definition.conindid
-                              AND primary_index.indisprimary)
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_index target_index
+                            WHERE target_index.indrelid = target_relation.oid
+                              AND target_index.indexrelid = constraint_definition.conindid
+                              AND target_index.indisunique
+                              AND (target_index.indisprimary OR EXISTS (
+                                  SELECT 1 FROM pg_catalog.pg_constraint unique_constraint
+                                   WHERE unique_constraint.conrelid = target_relation.oid
+                                     AND unique_constraint.conindid = target_index.indexrelid
+                                     AND unique_constraint.contype = 'u')))
               FROM pg_catalog.pg_constraint constraint_definition
               JOIN pg_catalog.pg_class source_relation ON source_relation.oid = constraint_definition.conrelid
               JOIN pg_catalog.pg_namespace source_namespace ON source_namespace.oid = source_relation.relnamespace

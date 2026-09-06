@@ -220,6 +220,74 @@ final class VevProcessorTest {
     }
 
     @Test
+    void compilesExactPrimaryKeyShapesWithTenantLeadingIdentifierIndexes() throws IOException {
+        Compilation original = compile(positiveSources());
+        for (String shape : List.of("TENANT_ID", "ID_TENANT", "ID")) {
+            var sources = new LinkedHashMap<>(positiveSources());
+            sources.computeIfPresent("example/Account.java", (path, source) -> source
+                    .replace("@Entity\n", "@Entity\n@no.beint.vev.VevPrimaryKey(no.beint.vev.VevPrimaryKey.Shape." + shape + ")\n")
+                    .replace("@Id @Column", "@no.beint.vev.VevIndex(name = \"account_tenant_id_idx\") @Id @Column"));
+            Compilation result = compile(sources);
+            assertTrue(result.success(), result.diagnostics());
+            String primary = switch (shape) {
+                case "TENANT_ID" -> "\"tenant_id\", \"id\"";
+                case "ID_TENANT" -> "\"id\", \"tenant_id\"";
+                default -> "\"id\"";
+            };
+            assertTrue(result.manifest("example.BillingModel").contains("\"primaryKey\": [" + primary + "]"));
+            assertTrue(result.manifest("example.BillingModel").contains("\"name\": \"account_tenant_id_idx\","
+                    + " \"method\": \"btree\", \"unique\": false, \"columns\": [\"tenant_id\", \"id\"]"));
+            assertNotEquals(original.manifest("example.BillingModel"), result.manifest("example.BillingModel"));
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(binary.success(), binary.diagnostics());
+            assertEquals(result.generated("example/AccountVev.java"), binary.generated("example/AccountVev.java"));
+            assertEquals(result.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+        }
+        var explicitDefault = positiveSources();
+        explicitDefault.computeIfPresent("example/Account.java", (path, source) -> source
+                .replace("@Entity\n", "@Entity\n@no.beint.vev.VevPrimaryKey(no.beint.vev.VevPrimaryKey.Shape.TENANT_ID)\n"));
+        Compilation defaults = compile(explicitDefault);
+        assertTrue(defaults.success(), defaults.diagnostics());
+        assertEquals(original.generated("example/AccountVev.java"), defaults.generated("example/AccountVev.java"));
+        assertEquals(original.manifest("example.BillingModel"), defaults.manifest("example.BillingModel"));
+    }
+
+    @Test
+    void idFirstPrimaryKeysRequireAnIndexedTenantTraversalPath() throws IOException {
+        for (String unique : List.of("", "\"id\", \"tenant_id\"", "\"tenant_id\", \"id\"")) {
+            var sources = unique.isEmpty() ? positiveSources() : uniqueSources(
+                    "@jakarta.persistence.UniqueConstraint(name = \"account_tenant_id_key\", columnNames = {" + unique + "})");
+            sources.computeIfPresent("example/Account.java", (path, source) -> source
+                    .replace("@Entity\n", "@Entity\n@no.beint.vev.VevPrimaryKey(no.beint.vev.VevPrimaryKey.Shape.ID)\n"));
+            Compilation result = compile(sources);
+            assertEquals(unique.startsWith("\"tenant_id\""), result.success(), result.diagnostics());
+            if (!result.success()) assertTrue(result.diagnostics().contains("for bounded scans"), result.diagnostics());
+        }
+    }
+
+    @Test
+    void referencesToGlobalIdentifiersRequireAnExactTenantQualifiedUniqueTarget() throws IOException {
+        var sources = referenceSources();
+        sources.computeIfPresent("example/AuditEvent.java", (path, source) -> source
+                .replace("@Entity\n", "@Entity\n@no.beint.vev.VevPrimaryKey(no.beint.vev.VevPrimaryKey.Shape.ID)\n")
+                .replace("@Id @Column", "@no.beint.vev.VevIndex(name = \"audit_tenant_id_idx\") @Id @Column"));
+        Compilation missing = compile(sources);
+        assertFalse(missing.success());
+        assertTrue(missing.diagnostics().contains("requires a tenant-qualified @UniqueConstraint"), missing.diagnostics());
+        for (String columns : List.of("\"id\", \"tenant_id\"", "\"tenant_id\", \"id\"")) {
+            var valid = new LinkedHashMap<>(sources);
+            valid.computeIfPresent("example/AuditEvent.java", (path, source) -> source
+                    .replace("schema = \"ledger\")", "schema = \"ledger\", uniqueConstraints = "
+                            + "@jakarta.persistence.UniqueConstraint(name = \"audit_tenant_key\", columnNames = {" + columns + "}))"));
+            Compilation result = compile(valid);
+            assertTrue(result.success(), result.diagnostics());
+        }
+    }
+
+    @Test
     void referenceColumnOrderIsExplicitAndStableAcrossCompilationBoundaries() throws IOException {
         var sources = referenceSources();
         Compilation tenantFirst = compile(sources);
@@ -291,7 +359,6 @@ final class VevProcessorTest {
                 valid.replace("\"tenant_id\", \"alias\"", "\"alias\", \"tenant_id\""),
                 valid.replace("\"alias\"", "\"unknown\""),
                 valid.replace("\"alias\"", "\"version\""),
-                valid.replace("\"alias\"", "\"id\""),
                 valid.replace("\"alias\"", "\"alias\", \"alias\""),
                 valid.replace("})", "}, options = \"DEFERRABLE\")"),
                 valid.replace("account_alias_key", "account_display_name_idx"),
@@ -411,11 +478,11 @@ final class VevProcessorTest {
                         "@Column(name = \"tenant_id\", nullable = false)",
                         "@Column(name = \"tenant_id\", nullable = true)"), ""),
                 "Tenant columns must declare @Column(nullable = false)"));
-        cases.put("indexOnIdentifier", new NegativeCase(
+        cases.put("indexOnTenant", new NegativeCase(
                 recordSource(validTable(), validComponents().replace(
-                        "@Id @Column(name = \"id\", nullable = false)",
-                        "@VevIndex(name = \"broken_id_idx\") @Id @Column(name = \"id\", nullable = false)"), ""),
-                "@VevIndex may only map an ordinary VALUE component"));
+                        "@TenantKey @Column(name = \"tenant_id\", nullable = false)",
+                        "@VevIndex(name = \"broken_tenant_idx\") @TenantKey @Column(name = \"tenant_id\", nullable = false)"), ""),
+                "@VevIndex may map an ID or VALUE component"));
         cases.put("invalidIndexName", new NegativeCase(
                 recordSource(validTable(), validComponents().replace(
                         "@Column(name = \"display_name\", nullable = false, length = 255)",

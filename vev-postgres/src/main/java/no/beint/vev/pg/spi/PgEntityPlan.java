@@ -63,6 +63,15 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     String tenantColumn();
 
     /**
+     * Returns the exact physical primary-key role order.
+     *
+     * @return declared primary-key shape; tenant first when not explicitly overridden
+     */
+    default no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
+        return no.beint.vev.VevPrimaryKey.Shape.TENANT_ID;
+    }
+
+    /**
      * Returns column metadata in entity-constructor and result-set order.
      *
      * @return stable, non-empty ordered column list

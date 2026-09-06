@@ -6,10 +6,14 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import no.beint.vev.TenantKey;
+import no.beint.vev.VevIndex;
+import no.beint.vev.VevPrimaryKey;
 
 @Entity
+@VevPrimaryKey(VevPrimaryKey.Shape.ID)
 @Table(name = "snapshot_probe", schema = "vev_it")
 public record SnapshotProbe(
+        @VevIndex(name = "snapshot_probe_tenant_id_idx")
         @Id @Column(name = "id", nullable = false) long id,
         @TenantKey @Column(name = "tenant_id", nullable = false) int tenantId,
         @Version @Column(name = "version", nullable = false) long version,

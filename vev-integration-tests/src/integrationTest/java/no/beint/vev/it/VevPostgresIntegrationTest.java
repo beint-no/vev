@@ -166,6 +166,71 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void explicitlyGlobalAssignedIdentifiersRemainTenantFiltered() {
+        vev.write(TENANT_7, tx -> tx.entities().insert(SnapshotProbeVev.INSTANCE, new SnapshotProbe(42, 7, 0, "tenant seven")));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_8, tx -> tx.entities().insert(
+                SnapshotProbeVev.INSTANCE, new SnapshotProbe(42, 8, 0, "collision"))));
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(42L))).isEmpty());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().many(PgQueries.equal(SnapshotProbeVev.ID, 42L,
+                new QueryLimit(2)))).values().isEmpty());
+        var own = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(SnapshotProbeVev.ID, 42L,
+                new QueryLimit(2))));
+        assertEquals(1, own.values().size());
+        assertEquals("tenant seven", own.values().getFirst().value());
+    }
+
+    @Test
+    void bootstrapAttestsGlobalPrimaryKeysTheirTraversalIndexesAndAlternateReferenceKeys() throws SQLException {
+        for (String variant : List.of("tenantFirst", "idTenant", "included", "deferred")) {
+            try {
+                database.identityEntryPrimaryKey(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.identityEntryPrimaryKey("valid");
+            }
+        }
+        for (String variant : List.of("missing", "reversed", "duplicate", "partial", "unique")) {
+            try {
+                database.identityEntryTraversalIndex(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.identityEntryTraversalIndex("valid");
+            }
+        }
+        try {
+            database.identityEntryAlternateKeyTenantFirst(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.identityEntryAlternateKeyTenantFirst(false);
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void globalIdentityPrimaryKeysRetainTenantScopedReferencesAndIndexedPagination() {
+        var entries = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE,
+                Batch.copyOf(List.of(new IdentityEntryVev.New("first", null, null),
+                        new IdentityEntryVev.New("second", null, null), new IdentityEntryVev.New("third", null, null)))));
+        var child = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEventVev.INSTANCE,
+                new IdentityEventVev.New("child", entries.get(0).id())));
+        assertEquals(entries.get(0).id(), child.entryId());
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_8, tx -> tx.entities().create(IdentityEventVev.INSTANCE,
+                new IdentityEventVev.New("foreign child", entries.get(0).id()))));
+        var firstPage = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE, new QueryLimit(2))));
+        assertEquals(entries.values().subList(0, 2), firstPage.values());
+        assertTrue(firstPage.hasMore());
+        var nextPage = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanByIdAfter(
+                IdentityEntryVev.INSTANCE.key(entries.get(1).id()), new QueryLimit(2))));
+        assertEquals(List.of(entries.get(2)), nextPage.values());
+        assertFalse(nextPage.hasMore());
+        assertEquals(List.of(entries.get(0)), vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(
+                IdentityEntryVev.ID, entries.get(0).id(), new QueryLimit(2)))).values());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().many(PgQueries.equal(
+                IdentityEntryVev.ID, entries.get(0).id(), new QueryLimit(2)))).values().isEmpty());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(IdentityEventVev.INSTANCE.key(child.id()))).isEmpty());
+    }
+
+    @Test
     void bootstrapRequiresTheDeclaredIdentifierFirstReferenceOrder() throws SQLException {
         try {
             database.identityReferenceTenantFirst(true);
@@ -317,7 +382,7 @@ final class VevPostgresIntegrationTest {
             assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
                 tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "earlier@example.test", "1.0000"));
                 assertThrows(IllegalStateException.class, () -> tx.entities().createMultiple(IdentityEventVev.INSTANCE,
-                        Batch.copyOf(List.of(new IdentityEventVev.New("last"), new IdentityEventVev.New("exhausted")))));
+                        Batch.copyOf(List.of(new IdentityEventVev.New("last", null), new IdentityEventVev.New("exhausted", null)))));
                 assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
                 return null;
             }));
@@ -391,7 +456,7 @@ final class VevPostgresIntegrationTest {
         assertTrue(counters.get(0).id() > 0 && counters.get(1).id() > counters.get(0).id());
         assertEquals(0, counters.get(0).version());
         var events = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityEventVev.INSTANCE,
-                Batch.copyOf(List.of(new IdentityEventVev.New(null), new IdentityEventVev.New("event")))));
+                Batch.copyOf(List.of(new IdentityEventVev.New(null, null), new IdentityEventVev.New("event", null)))));
         assertEquals(2, events.size());
         assertNull(events.get(0).message());
         assertEquals("event", events.get(1).message());

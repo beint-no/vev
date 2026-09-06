@@ -1147,6 +1147,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyPrimaryKey(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
+        List<String> expected = plan.primaryKeyColumns();
         String indexShapeSql = """
                 SELECT pg_catalog.count(*),
                        COALESCE(pg_catalog.bool_and(
@@ -1157,8 +1158,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                            AND mapped_index.indislive
                            AND mapped_index.indexprs IS NULL
                            AND mapped_index.indpred IS NULL
-                           AND mapped_index.indnkeyatts = 2
-                           AND mapped_index.indnatts = 2
+                           AND mapped_index.indnkeyatts = ?
+                           AND mapped_index.indnatts = ?
                            AND primary_constraint.oid IS NOT NULL
                            AND NOT primary_constraint.condeferrable
                            AND primary_constraint.convalidated
@@ -1177,8 +1178,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                    AND mapped_index.indisprimary
                 """;
         try (PreparedStatement statement = connection.prepareStatement(indexShapeSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
+            statement.setInt(1, expected.size());
+            statement.setInt(2, expected.size());
+            statement.setString(3, plan.schemaName());
+            statement.setString(4, plan.tableName());
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()
                         || resultSet.getInt(1) != 1
@@ -1203,6 +1206,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                    AND relation.relname = ?
                    AND index.indisprimary
                  ORDER BY key.position
+                 LIMIT 3
                 """;
         List<String> actual = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -1214,13 +1218,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 }
             }
         }
-        String idColumn = plan.columns().stream()
-                .filter(column -> column.role() == PgColumn.Role.ID)
-                .map(PgColumn::name)
-                .findFirst()
-                .orElseThrow();
-        if (!actual.equals(List.of(plan.tenantColumn(), idColumn))) {
-            throw new IllegalStateException("Mapped table primary key must be exactly (tenant, id): "
+        if (!actual.equals(expected)) {
+            throw new IllegalStateException("Mapped table primary key must match its declared column order: "
                     + plan.schemaName() + '.' + plan.tableName());
         }
 

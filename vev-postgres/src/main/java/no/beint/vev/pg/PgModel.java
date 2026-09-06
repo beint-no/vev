@@ -149,6 +149,10 @@ public final class PgModel<M, T> {
             if (target == null) {
                 throw new IllegalArgumentException("Reference target must belong to the same closed model");
             }
+            if (target.primaryKeyShape() == no.beint.vev.VevPrimaryKey.Shape.ID
+                    && target.uniqueConstraints().stream().noneMatch(target::tenantIdentityUnique)) {
+                throw new IllegalArgumentException("An ID-only reference target requires a tenant-qualified unique constraint");
+            }
             if (reference.columnIndex() >= source.columns().size()) {
                 throw new IllegalArgumentException("Reference column is outside the generated entity shape");
             }
@@ -255,19 +259,26 @@ public final class PgModel<M, T> {
         }
         validateIndexes(plan, id, tenant);
         validateUniqueConstraints(plan);
+        if (plan.primaryKeyShape() != no.beint.vev.VevPrimaryKey.Shape.TENANT_ID
+                && plan.indexes().stream().noneMatch(index -> plan.columns().get(index.columnIndex()).role() == PgColumn.Role.ID)
+                && plan.uniqueConstraints().stream().noneMatch(unique -> plan.tenantIdentityUnique(unique)
+                        && plan.columns().get(unique.columnIndexes().getFirst()).role() == PgColumn.Role.TENANT)) {
+            throw new IllegalArgumentException("An ID-first primary key requires a declared tenant-leading identifier index for bounded scans");
+        }
     }
 
     private static void validateUniqueConstraints(PgPlan<?, ?, ?, ?> plan) {
         for (PgUnique unique : plan.uniqueConstraints()) {
             long maximumBytes = 0;
+            boolean tenantIdentity = plan.tenantIdentityUnique(unique);
             for (int index = 0; index < unique.columnIndexes().size(); index++) {
                 int position = unique.columnIndexes().get(index);
                 if (position >= plan.columns().size()) {
                     throw new IllegalArgumentException("Unique constraint refers to an unmapped column");
                 }
                 PgColumn column = plan.columns().get(position);
-                if (index == 0 ? column.role() != PgColumn.Role.TENANT : column.role() != PgColumn.Role.VALUE) {
-                    throw new IllegalArgumentException("Unique constraints require the tenant column first and only values afterward");
+                if (!tenantIdentity && (index == 0 ? column.role() != PgColumn.Role.TENANT : column.role() != PgColumn.Role.VALUE)) {
+                    throw new IllegalArgumentException("Unique constraints require tenant-first VALUE columns or exactly the ID and tenant columns");
                 }
                 maximumBytes = Math.addExact(maximumBytes, maximumIndexKeyBytes(column));
             }
@@ -296,9 +307,9 @@ public final class PgModel<M, T> {
                         "Generated index has an invalid or duplicate component position: " + index.indexName());
             }
             PgColumn value = plan.columns().get(columnIndex);
-            if (value.role() != PgColumn.Role.VALUE) {
+            if (value.role() != PgColumn.Role.VALUE && value.role() != PgColumn.Role.ID) {
                 throw new IllegalArgumentException(
-                        "Generated indexes may target only ordinary value columns: " + index.indexName());
+                        "Generated indexes may target only ID or VALUE columns: " + index.indexName());
             }
             if (index.valueType() != value.codec().javaType()) {
                 throw new IllegalArgumentException(
@@ -317,7 +328,7 @@ public final class PgModel<M, T> {
             }
             long maximumKeyBytes = Math.addExact(
                     Math.addExact(maximumIndexKeyBytes(id), maximumIndexKeyBytes(tenant)),
-                    maximumIndexKeyBytes(value));
+                    value.role() == PgColumn.Role.ID ? 0 : maximumIndexKeyBytes(value));
             if (maximumKeyBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
                 throw new IllegalArgumentException(
                         "Generated index can exceed Vev's conservative B-tree key budget: " + index.indexName());

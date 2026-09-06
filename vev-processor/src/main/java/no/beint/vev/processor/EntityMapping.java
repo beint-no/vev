@@ -18,5 +18,6 @@ record EntityMapping(
         PropertyMapping id,
         PropertyMapping tenant,
         PropertyMapping version,
-        boolean appendOnly) {
+        boolean appendOnly,
+        String primaryKeyShape) {
 }

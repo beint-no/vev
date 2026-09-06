@@ -69,7 +69,9 @@ final class PgIndexes {
                 .findFirst().orElseThrow().name();
         for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
             expected.add(new ExpectedIndex(index.indexName(), false,
-                    List.of(plan.tenantColumn(), plan.columns().get(index.columnIndex()).name(), idColumn)));
+                    plan.columns().get(index.columnIndex()).role() == PgColumn.Role.ID
+                            ? List.of(plan.tenantColumn(), idColumn)
+                            : List.of(plan.tenantColumn(), plan.columns().get(index.columnIndex()).name(), idColumn)));
         }
         for (PgUnique unique : plan.uniqueConstraints()) {
             expected.add(new ExpectedIndex(unique.name(), true,

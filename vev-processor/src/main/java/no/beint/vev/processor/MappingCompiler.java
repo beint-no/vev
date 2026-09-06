@@ -63,6 +63,7 @@ final class MappingCompiler {
     private static final String APPEND_ONLY = "no.beint.vev.AppendOnly";
     private static final String VEV_INDEX = "no.beint.vev.VevIndex";
     private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
+    private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
     private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES", "UNIQUE_CONSTRAINTS");
@@ -199,6 +200,10 @@ final class MappingCompiler {
                 } else if (!property.boxedType().equals(target.id().boxedType())
                         || property.maximumLength() != target.id().maximumLength()) {
                     error(property.declaration(), "@VevReference must use the target's exact scalar identifier type and bounds");
+                }
+                if (target != null && target.primaryKeyShape().equals("ID")
+                        && target.uniqueConstraints().stream().noneMatch(unique -> tenantIdentityUnique(unique.columns()))) {
+                    error(property.declaration(), "@VevReference target with an ID-only primary key requires a tenant-qualified @UniqueConstraint");
                 }
             }
         }
@@ -356,6 +361,16 @@ final class MappingCompiler {
         PropertyMapping id = ids.size() == 1 ? ids.getFirst() : null;
         PropertyMapping tenant = tenants.size() == 1 ? tenants.getFirst() : null;
         PropertyMapping version = versions.size() == 1 ? versions.getFirst() : null;
+        AnnotationMirror primaryKey = annotation(entity, VEV_PRIMARY_KEY);
+        String primaryKeyShape = primaryKey == null ? "TENANT_ID" : enumValue(primaryKey, "value");
+        if (!Set.of("TENANT_ID", "ID_TENANT", "ID").contains(primaryKeyShape)) {
+            error(entity, "@VevPrimaryKey must select TENANT_ID, ID_TENANT, or ID");
+        }
+        if (id != null && !primaryKeyShape.equals("TENANT_ID") && !id.indexed()
+                && uniqueConstraints.stream().noneMatch(unique -> tenantIdentityUnique(unique.columns())
+                        && unique.columns().getFirst().tenant())) {
+            error(entity, "An ID-first primary key requires @VevIndex on @Id or a tenant-first (tenant, ID) @UniqueConstraint for bounded scans");
+        }
         if (id != null && id.nullable()) {
             error(id.declaration(), "Identifier columns must declare @Column(nullable = false)");
         }
@@ -403,7 +418,8 @@ final class MappingCompiler {
                 id,
                 tenant,
                 version,
-                appendOnly);
+                appendOnly,
+                primaryKeyShape);
     }
 
     private PropertyMapping compileProperty(TypeElement entity, RecordComponentElement component) {
@@ -480,8 +496,8 @@ final class MappingCompiler {
         String indexFieldName = "";
         if (index != null) {
             validateIdentifier(component, indexName, "index");
-            if (roles > 0) {
-                error(component, "@VevIndex may only map an ordinary VALUE component, not @Id, @TenantKey, or @Version");
+            if (tenant || version) {
+                error(component, "@VevIndex may map an ID or VALUE component, not @TenantKey or @Version");
             }
             String componentName = component.getSimpleName().toString();
             if (!INDEXED_COMPONENT.matcher(componentName).matches()) {
@@ -624,10 +640,15 @@ final class MappingCompiler {
                     error(entity, "@UniqueConstraint columns must be distinct explicitly mapped column names: " + columnName);
                     continue;
                 }
-                if (columns.isEmpty() ? !column.tenant() : column.tenant() || column.id() || column.version()) {
-                    error(entity, "@UniqueConstraint requires the tenant column first and only ordinary values afterward");
-                }
                 columns.add(column);
+            }
+            if (!tenantIdentityUnique(columns)) {
+                for (int index = 0; index < columns.size(); index++) {
+                    PropertyMapping column = columns.get(index);
+                    if (index == 0 ? !column.tenant() : column.tenant() || column.id() || column.version()) {
+                        error(entity, "@UniqueConstraint requires tenant-first VALUE columns or exactly the ID and tenant columns");
+                    }
+                }
             }
             if (columns.stream().mapToInt(this::maximumIndexBytes).sum() > MAXIMUM_INDEX_KEY_BYTES) {
                 error(entity, "Unique constraint " + name + " can exceed Vev's " + MAXIMUM_INDEX_KEY_BYTES + "-byte B-tree key budget");
@@ -636,6 +657,11 @@ final class MappingCompiler {
         }
         result.sort(Comparator.comparing(UniqueMapping::name));
         return List.copyOf(result);
+    }
+
+    private static boolean tenantIdentityUnique(List<PropertyMapping> columns) {
+        return columns.size() == 2 && (columns.get(0).tenant() && columns.get(1).id()
+                || columns.get(0).id() && columns.get(1).tenant());
     }
 
     private void validateIndexes(TypeElement entity, List<PropertyMapping> properties) {
@@ -664,7 +690,7 @@ final class MappingCompiler {
             if (!property.indexed()) {
                 continue;
             }
-            int maximumBytes = Math.addExact(identityBytes, maximumIndexBytes(property));
+            int maximumBytes = Math.addExact(identityBytes, property.id() ? 0 : maximumIndexBytes(property));
             if (maximumBytes > MAXIMUM_INDEX_KEY_BYTES) {
                 error(property.declaration(), "PostgreSQL index " + property.indexName()
                         + " can exceed Vev's " + MAXIMUM_INDEX_KEY_BYTES
@@ -760,7 +786,7 @@ final class MappingCompiler {
     private void scanTypeAnnotations(TypeElement entity) {
         for (AnnotationMirror annotation : entity.getAnnotationMirrors()) {
             String name = annotationName(annotation);
-            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY)) {
+            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY)) {
                 validateAnnotationShape(entity, annotation);
                 continue;
             }
@@ -988,6 +1014,7 @@ final class MappingCompiler {
             case ENUMERATED -> Set.of("value");
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
+            case VEV_PRIMARY_KEY -> Set.of("value");
             default -> ANNOTATION_MEMBERS.get(annotationName);
         };
         if (expected == null) {
@@ -1071,6 +1098,9 @@ final class MappingCompiler {
             canonical.append(entity.qualifiedName()).append('|')
                     .append(entity.tableSql()).append('|')
                     .append(entity.appendOnly()).append('\n');
+            if (!entity.primaryKeyShape().equals("TENANT_ID")) {
+                canonical.append("primaryKey|").append(entity.primaryKeyShape()).append('\n');
+            }
             for (PropertyMapping property : entity.properties()) {
                 canonical.append(property.name()).append('|')
                         .append(property.boxedType()).append('|')

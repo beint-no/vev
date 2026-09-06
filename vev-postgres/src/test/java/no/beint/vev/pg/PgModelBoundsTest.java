@@ -92,7 +92,7 @@ final class PgModelBoundsTest {
         assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad",
                 java.util.stream.IntStream.range(0, 33).boxed().toList()));
         var code = new PgColumn("code", PgCodecs.STRING, true, PgColumn.Role.VALUE, 64, 0, 0);
-        for (List<Integer> invalid : List.of(List.of(0, 2), List.of(2, 1), List.of(1, 0), List.of(1, 3))) {
+        for (List<Integer> invalid : List.of(List.of(0, 2), List.of(2, 1), List.of(1, 0, 2), List.of(1, 3))) {
             assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
                     List.of(plan(List.of(ID, TENANT, code), List.of(new PgUnique("bad", invalid))))));
         }
@@ -109,7 +109,31 @@ final class PgModelBoundsTest {
     }
 
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(List<PgColumn> columns, List<PgUnique> unique) {
+        return plan(columns, unique, no.beint.vev.VevPrimaryKey.Shape.TENANT_ID);
+    }
+
+    @Test
+    void physicalPrimaryKeysRequireTenantTraversalAndCaptureTheirExactOrder() {
+        for (var shape : List.of(no.beint.vev.VevPrimaryKey.Shape.ID, no.beint.vev.VevPrimaryKey.Shape.ID_TENANT)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(), shape))));
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(new PgUnique("id_tenant", List.of(0, 1))), shape))));
+            var model = new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(new PgUnique("tenant_id_key", List.of(1, 0))), shape)));
+            assertEquals(shape == no.beint.vev.VevPrimaryKey.Shape.ID ? List.of("id") : List.of("id", "tenant_id"),
+                    model.frozenPlans().getFirst().primaryKeyColumns());
+        }
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape) {
         return new PgEntityPlan<>() {
+            @Override
+            public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
+                return shape;
+            }
+
             @Override
             public Class<TestEntity> javaType() {
                 return TestEntity.class;

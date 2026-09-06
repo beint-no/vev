@@ -30,6 +30,7 @@ class PgPlan<M, E, K, T> {
     private final List<PgReference> references;
     private final List<PgUnique> uniqueConstraints;
     private final Class<?> creationType;
+    private final no.beint.vev.VevPrimaryKey.Shape primaryKeyShape;
     private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
     private String creationSql;
@@ -45,6 +46,7 @@ class PgPlan<M, E, K, T> {
         this.schemaName = Objects.requireNonNull(source.schemaName(), "schemaName");
         this.tableName = Objects.requireNonNull(source.tableName(), "tableName");
         this.tenantColumn = Objects.requireNonNull(source.tenantColumn(), "tenantColumn");
+        this.primaryKeyShape = Objects.requireNonNull(source.primaryKeyShape(), "primaryKeyShape");
         this.creationType = source instanceof PgGeneratedEntityPlan<?, ?, ?, ?, ?> generated
                 ? Objects.requireNonNull(generated.creationType(), "creationType") : null;
         if (creationType != null && source instanceof no.beint.vev.AssignedEntityType<?, ?, ?>) {
@@ -93,6 +95,28 @@ class PgPlan<M, E, K, T> {
 
     boolean generatedIdentity() {
         return creationType != null;
+    }
+
+    no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
+        return primaryKeyShape;
+    }
+
+    List<String> primaryKeyColumns() {
+        String id = columns.stream().filter(column -> column.role() == PgColumn.Role.ID).findFirst().orElseThrow().name();
+        return switch (primaryKeyShape) {
+            case TENANT_ID -> List.of(tenantColumn, id);
+            case ID_TENANT -> List.of(id, tenantColumn);
+            case ID -> List.of(id);
+        };
+    }
+
+    boolean tenantIdentityUnique(PgUnique unique) {
+        if (unique.columnIndexes().size() != 2) return false;
+        if (unique.columnIndexes().get(0) >= columns.size() || unique.columnIndexes().get(1) >= columns.size()) return false;
+        PgColumn first = columns.get(unique.columnIndexes().get(0));
+        PgColumn second = columns.get(unique.columnIndexes().get(1));
+        return first.role() == PgColumn.Role.ID && second.role() == PgColumn.Role.TENANT
+                || first.role() == PgColumn.Role.TENANT && second.role() == PgColumn.Role.ID;
     }
 
     Class<?> creationType() {
