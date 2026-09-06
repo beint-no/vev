@@ -11,6 +11,7 @@
       "schema": "ledger",
       "table": "account",
       "appendOnly": false,
+      "maximumRows": 1000,
       "columns": [
         {"name": "id", "javaType": "java.lang.Long", "databaseType": "bigint", "nullable": false, "role": "ID", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
         {"name": "tenant_id", "javaType": "java.util.UUID", "databaseType": "uuid", "nullable": false, "role": "TENANT", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
@@ -35,6 +36,7 @@
       "schema": "ledger",
       "table": "audit_event",
       "appendOnly": true,
+      "maximumRows": 1000,
       "columns": [
         {"name": "id", "javaType": "java.util.UUID", "databaseType": "uuid", "nullable": false, "role": "ID", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
         {"name": "tenant_id", "javaType": "java.util.UUID", "databaseType": "uuid", "nullable": false, "role": "TENANT", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},

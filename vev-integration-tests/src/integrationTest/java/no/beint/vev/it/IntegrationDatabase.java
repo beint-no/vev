@@ -61,6 +61,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : largeTextSchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -73,7 +78,7 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text");
         }
     }
 
@@ -956,6 +961,19 @@ final class IntegrationDatabase {
                 }
             }
         }
+    }
+
+    private static List<String> largeTextSchemaStatements() {
+        return List.of(
+                "CREATE TABLE vev_it.large_text (id integer NOT NULL, tenant_id integer NOT NULL, version integer NOT NULL, category varchar(8), body varchar(65535) NOT NULL, PRIMARY KEY (tenant_id, id))",
+                "ALTER TABLE vev_it.large_text OWNER TO " + OWNER_ROLE,
+                "ALTER TABLE vev_it.large_text ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.large_text FORCE ROW LEVEL SECURITY",
+                "CREATE INDEX large_text_category_idx ON vev_it.large_text (tenant_id, category, id)",
+                "CREATE POLICY large_text_tenant ON vev_it.large_text FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer) WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)",
+                "GRANT SELECT ON vev_it.large_text TO " + APPLICATION_USER,
+                "GRANT INSERT (id, tenant_id, version, category, body) ON vev_it.large_text TO " + APPLICATION_USER,
+                "GRANT UPDATE (version, category, body) ON vev_it.large_text TO " + APPLICATION_USER);
     }
 
     private static List<String> identitySchemaStatements() {

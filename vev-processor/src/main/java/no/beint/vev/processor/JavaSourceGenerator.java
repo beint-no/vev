@@ -56,6 +56,7 @@ final class JavaSourceGenerator {
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
         method(source, "public no.beint.vev.ModelIdentity modelIdentity()", "return " + entity.modelQualifiedName() + ".IDENTITY;");
+        method(source, "public int maximumRows()", "return " + entity.maximumRows() + ";");
         method(source, "public no.beint.vev.pg.PgCodec<" + entity.id().boxedType() + "> keyCodec()", "return " + entity.id().codec() + ";");
         method(source, "public no.beint.vev.pg.PgCodec<" + entity.tenant().boxedType() + "> tenantCodec()",
                 "return " + entity.tenant().codec() + ";");

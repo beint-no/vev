@@ -13,6 +13,7 @@ import no.beint.vev.TenantKey
 @Entity
 @Table(name = "kotlin_identity", schema = "vev_it")
 @JvmRecord
+@no.beint.vev.VevRows(8)
 data class KotlinIdentity(
     @field:Id @field:GeneratedValue(strategy = GenerationType.IDENTITY)
     @field:Column(name = "id", nullable = false) val id: Long,

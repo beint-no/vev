@@ -64,6 +64,7 @@ final class MappingCompiler {
     private static final String VEV_INDEX = "no.beint.vev.VevIndex";
     private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
+    private static final String VEV_ROWS = "no.beint.vev.VevRows";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
     private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES", "UNIQUE_CONSTRAINTS");
@@ -332,7 +333,10 @@ final class MappingCompiler {
         validateIndexes(entity, properties);
         List<UniqueMapping> uniqueConstraints = compileUniqueConstraints(entity, table, properties);
         List<CheckMapping> checkConstraints = compileCheckConstraints(entity, table);
-        validateMaterializedResultBudget(entity, properties);
+        AnnotationMirror rowLimit = annotation(entity, VEV_ROWS);
+        int maximumRows = rowLimit == null ? 1000 : intValue(rowLimit, "value");
+        if (maximumRows < 1 || maximumRows > 1000) error(entity, "@VevRows must be between 1 and 1000");
+        validateMaterializedResultBudget(entity, properties, maximumRows);
         if (!invalid && !sourceTypes.contains(entity.getQualifiedName().toString())) {
             try {
                 compiledRecords.verify(entity, properties.stream().filter(property -> !property.nullable())
@@ -426,7 +430,8 @@ final class MappingCompiler {
                 tenant,
                 version,
                 appendOnly,
-                primaryKeyShape);
+                primaryKeyShape,
+                maximumRows);
     }
 
     private PropertyMapping compileProperty(TypeElement entity, RecordComponentElement component) {
@@ -756,7 +761,7 @@ final class MappingCompiler {
         return 64;
     }
 
-    private void validateMaterializedResultBudget(TypeElement entity, List<PropertyMapping> properties) {
+    private void validateMaterializedResultBudget(TypeElement entity, List<PropertyMapping> properties, int maximumRows) {
         long maximumRowBytes = Math.addExact(128L, Math.multiplyExact(16L, properties.size()));
         for (PropertyMapping property : properties) {
             long maximumColumnBytes;
@@ -769,8 +774,8 @@ final class MappingCompiler {
             }
             maximumRowBytes = Math.addExact(maximumRowBytes, maximumColumnBytes);
         }
-        if (Math.multiplyExact(maximumRowBytes, 1_001L) > MAXIMUM_MATERIALIZED_RESULT_BYTES) {
-            error(entity, "Mapped row shape can exceed Vev's 64 MiB materialized-result safety budget");
+        if (Math.multiplyExact(maximumRowBytes, (long) maximumRows + 1) > MAXIMUM_MATERIALIZED_RESULT_BYTES) {
+            error(entity, "Mapped row shape can exceed Vev's 64 MiB materialized-result safety budget; reduce @VevRows or column bounds");
         }
     }
 
@@ -833,7 +838,7 @@ final class MappingCompiler {
     private void scanTypeAnnotations(TypeElement entity) {
         for (AnnotationMirror annotation : entity.getAnnotationMirrors()) {
             String name = annotationName(annotation);
-            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY)) {
+            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY) || name.equals(VEV_ROWS)) {
                 validateAnnotationShape(entity, annotation);
                 continue;
             }
@@ -1061,7 +1066,7 @@ final class MappingCompiler {
             case ENUMERATED -> Set.of("value");
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
-            case VEV_PRIMARY_KEY -> Set.of("value");
+            case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
             default -> ANNOTATION_MEMBERS.get(annotationName);
         };
         if (expected == null) {
@@ -1158,6 +1163,7 @@ final class MappingCompiler {
             if (!entity.primaryKeyShape().equals("TENANT_ID")) {
                 canonical.append("primaryKey|").append(entity.primaryKeyShape()).append('\n');
             }
+            if (entity.maximumRows() != 1000) canonical.append("maximumRows|").append(entity.maximumRows()).append('\n');
             for (PropertyMapping property : entity.properties()) {
                 canonical.append(property.name()).append('|')
                         .append(property.boxedType()).append('|')

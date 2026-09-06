@@ -465,6 +465,65 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void largeSnapshotsUseDeclaredBatchLimitsAndPreservePagingAndTenantIsolation() {
+        assertEquals(8, LargeTextVev.INSTANCE.maximumRows());
+        assertEquals(8, KotlinIdentityVev.INSTANCE.maximumRows());
+        String body = "🙂".repeat(65535);
+        var inputs = java.util.stream.IntStream.rangeClosed(1, 8).mapToObj(index -> new LargeText(index, 7, 0, "bulk", body)).toList();
+        var inserted = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(LargeTextVev.INSTANCE, Batch.copyOf(inputs)));
+        assertEquals(inputs, inserted.values());
+        vev.write(TENANT_7, tx -> tx.entities().insert(LargeTextVev.INSTANCE, new LargeText(9, 7, 0, "bulk", body)));
+        var first = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(LargeTextVev.INSTANCE, new QueryLimit(8))));
+        assertEquals(8, first.values().size());
+        assertTrue(first.hasMore());
+        var next = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanByIdAfter(LargeTextVev.INSTANCE.key(8), new QueryLimit(8))));
+        assertEquals(List.of(9), next.values().stream().map(LargeText::id).toList());
+        assertFalse(next.hasMore());
+        var indexed = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(LargeTextVev.CATEGORY, "bulk", new QueryLimit(8))));
+        assertEquals(first, indexed);
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(LargeTextVev.INSTANCE.key(1))).isEmpty());
+        var lookups = vev.read(TENANT_7, tx -> tx.entities().findMultiple(LargeTextVev.INSTANCE, Batch.copyOf(List.of(8, 1, 8, 2, 7, 6, 5, 4))));
+        assertEquals(8, lookups.size());
+        var updates = inputs.stream().map(row -> new LargeText(row.id(), 7, 0, null, "changed")).toList();
+        var updated = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(LargeTextVev.INSTANCE, Batch.copyOf(updates)));
+        assertEquals(8, updated.size());
+        assertTrue(updated.values().stream().allMatch(result -> result.entity().version() == 1));
+        assertEquals(8, vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.isNull(LargeTextVev.CATEGORY, new QueryLimit(8)))).values().size());
+    }
+
+    @Test
+    void oversizedPagesAndBatchesFailBeforeSqlWithoutPoisoningTheLexicalTransaction() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count),
+                IntegrationModelVev.POSTGRES, authority);
+        count.set(0);
+        var large = LargeTextVev.INSTANCE;
+        var keys = Batch.copyOf(java.util.stream.IntStream.rangeClosed(1, 9).boxed().toList());
+        var rows = Batch.copyOf(keys.values().stream().map(key -> new LargeText(key, 7, 0, "batch", "body")).toList());
+        var creations = Batch.copyOf(keys.values().stream().map(key -> new KotlinIdentityVev.New("row " + key, null)).toList());
+        runtime.write(authority.scope(7), tx -> {
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().findMultiple(large, keys));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().insertMultiple(large, rows));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().updateMultiple(large, rows));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().createMultiple(KotlinIdentityVev.INSTANCE, creations));
+            QueryLimit excessive = new QueryLimit(9);
+            for (var query : List.of(PgQueries.scanById(large, excessive), PgQueries.scanByIdAfter(large.key(1), excessive),
+                    PgQueries.equal(LargeTextVev.CATEGORY, "batch", excessive),
+                    PgQueries.equalAfter(LargeTextVev.CATEGORY, "batch", large.key(1), excessive),
+                    PgQueries.isNull(LargeTextVev.CATEGORY, excessive), PgQueries.isNullAfter(LargeTextVev.CATEGORY, large.key(1), excessive))) {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().many(query));
+            }
+            assertEquals(0, count.get());
+            tx.entities().insert(large, rows.get(0));
+            tx.entities().create(KotlinIdentityVev.INSTANCE, creations.get(0));
+            assertEquals(2, count.get());
+            return null;
+        });
+        assertEquals(rows.get(0), vev.read(TENANT_7, tx -> tx.entities().find(large.key(1))).orElseThrow());
+    }
+
+    @Test
     void checkCatalogAcceptsReviewedRowLocalExpressionsAndRejectsUnapprovedBehaviorWithoutExecution() throws SQLException {
         database.verifyCheckExpressionCatalog();
     }
@@ -2180,6 +2239,28 @@ final class VevPostgresIntegrationTest {
                         return cleanDataSource.getConnection();
                     }
                     return nonClosing(retainedConnection);
+                });
+    }
+
+    private static Object invokeTarget(Object target, java.lang.reflect.Method method, Object[] arguments) throws Throwable {
+        try {
+            return method.invoke(target, arguments);
+        } catch (InvocationTargetException failure) {
+            throw failure.getCause();
+        }
+    }
+
+    private static DataSource entityStatementCountingDataSource(DataSource source, AtomicInteger count) {
+        return (DataSource) Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(source, method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, operation, parameters) -> {
+                                if (operation.getName().equals("prepareStatement") && parameters[0] instanceof String sql
+                                        && sql.contains("\"vev_it\".")) count.incrementAndGet();
+                                return invokeTarget(connection, operation, parameters);
+                            });
                 });
     }
 

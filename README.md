@@ -60,6 +60,8 @@ Every mapped component must spell out `@Column(nullable = true)` or `@Column(nul
 
 Java records and [Kotlin `@JvmRecord` data classes](docs/kotlin-records.md) may also come from separately compiled class-path dependencies. Their constructor and accessor bytecode is verified at build time without loading application classes.
 
+Larger bounded snapshots can declare a smaller batch/page ceiling with [`@VevRows`](docs/row-limits.md), while retaining the compile-verified 64 MiB result estimate.
+
 Compilation proves the closed mapping model, not a live database. `PgVev` performs catalog and privilege attestation at startup. It requires a dedicated pgjdbc `DataSource` whose connections already report the exact `pg_catalog` search path, UTF-8, `DateStyle = ISO, MDY`, and `IntervalStyle = postgres` baseline; Vev rejects retained temporary schemas instead of repairing pooled state. Avoiding per-transaction `search_path` changes also preserves pgjdbc's prepared-query cache. This is illustrative source, not a compatibility or production-safety promise.
 
 ## Repository layout

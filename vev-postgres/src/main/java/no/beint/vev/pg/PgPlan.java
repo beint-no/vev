@@ -20,6 +20,7 @@ class PgPlan<M, E, K, T> {
     private final Class<K> keyType;
     private final String logicalName;
     private final ModelIdentity modelIdentity;
+    private final int maximumRows;
     private final PgCodec<K> keyCodec;
     private final PgCodec<T> tenantCodec;
     private final String schemaName;
@@ -42,6 +43,10 @@ class PgPlan<M, E, K, T> {
         this.keyType = Objects.requireNonNull(source.keyType(), "keyType");
         this.logicalName = Objects.requireNonNull(source.logicalName(), "logicalName");
         this.modelIdentity = Objects.requireNonNull(source.modelIdentity(), "modelIdentity");
+        this.maximumRows = source.maximumRows();
+        if (maximumRows < 1 || maximumRows > no.beint.vev.QueryLimit.MAX_VALUE || maximumRows > no.beint.vev.Batch.MAX_SIZE) {
+            throw new IllegalArgumentException("Entity row limit must be between 1 and 1000");
+        }
         this.keyCodec = Objects.requireNonNull(source.keyCodec(), "keyCodec");
         this.tenantCodec = Objects.requireNonNull(source.tenantCodec(), "tenantCodec");
         this.schemaName = Objects.requireNonNull(source.schemaName(), "schemaName");
@@ -179,6 +184,16 @@ class PgPlan<M, E, K, T> {
 
     ModelIdentity modelIdentity() {
         return modelIdentity;
+    }
+
+    int maximumRows() {
+        return maximumRows;
+    }
+
+    void requireRowCount(int count) {
+        if (count < 0 || count > maximumRows) {
+            throw new IllegalArgumentException("Entity batch or query page exceeds its generated " + maximumRows + "-row bound");
+        }
     }
 
     PgCodec<K> keyCodec() {

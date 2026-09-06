@@ -85,6 +85,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         guard.checkUsable();
         Objects.requireNonNull(keys, "keys");
         PgPlan<M, E, K, T> plan = plan(type);
+        plan.requireRowCount(keys.size());
         if (keys.isEmpty()) {
             return Batch.empty();
         }
@@ -145,6 +146,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private <R, K> Rows<R> executeIdScan(PgIdScan<M, R, K> scan) {
         PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.plan());
         int limit = scan.limit().value();
+        entityPlan.requireRowCount(limit);
         List<R> values = new ArrayList<>(limit);
         String sql = scan.hasAfterExclusive()
                 ? entityPlan.sql().scanByIdAfter()
@@ -181,6 +183,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.index().entityPlan());
         PgIndexSql statements = entityPlan.indexSql(scan.index());
         int limit = scan.limit().value();
+        entityPlan.requireRowCount(limit);
         List<R> values = new ArrayList<>(limit);
         boolean equality = scan.predicate() == PgIndexScan.Predicate.EQUAL;
         String sql;
@@ -238,6 +241,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         requireWrite();
         Objects.requireNonNull(inputs, "inputs");
         PgPlan<M, E, K, T> plan = plan(type);
+        plan.requireRowCount(inputs.size());
         if (!plan.generatedIdentity() || !identitySequences.containsKey(plan)) {
             throw new IllegalArgumentException("Creation requires a verified generated-identity plan");
         }
@@ -331,6 +335,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgPlan<M, E, K, T> plan = plan(type);
+        plan.requireRowCount(entities.size());
         Set<K> keys = new HashSet<>(Math.max(16, entities.size() * 2));
         for (E entity : entities) {
             validateInsert(plan, entity);
@@ -383,6 +388,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
+        plan.requireRowCount(entities.size());
         Set<K> keys = new HashSet<>(Math.max(16, entities.size() * 2));
         for (E entity : entities) {
             validateVersionedEntity(plan, entity);

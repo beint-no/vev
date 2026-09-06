@@ -2,7 +2,6 @@ package no.beint.vev.pg;
 
 import no.beint.vev.EntityType;
 import no.beint.vev.ModelIdentity;
-import no.beint.vev.QueryLimit;
 import no.beint.vev.VevIndex;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
@@ -226,7 +225,7 @@ public final class PgModel<M, T> {
                 }
             }
         }
-        long maximumPageBytes = Math.multiplyExact(maximumRowBytes, Math.addExact(QueryLimit.MAX_VALUE, 1));
+        long maximumPageBytes = Math.multiplyExact(maximumRowBytes, Math.addExact(plan.maximumRows(), 1));
         if (maximumPageBytes > MAXIMUM_MATERIALIZED_RESULT_BYTES) {
             throw new IllegalArgumentException(
                     "Entity plan can exceed Vev's 64 MiB materialized-result safety budget: " + plan.logicalName());

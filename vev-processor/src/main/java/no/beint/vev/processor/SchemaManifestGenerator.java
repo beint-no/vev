@@ -42,6 +42,7 @@ final class SchemaManifestGenerator {
                       "schema": %s,
                       "table": %s,
                       "appendOnly": %s,%s
+                      "maximumRows": %d,
                       "columns": [
                 %s
                       ],
@@ -54,7 +55,7 @@ final class SchemaManifestGenerator {
                       "privileges": {"select": true, "insert": [%s], "update": [%s], "delete": false}
                     }""".formatted(
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
-                entity.appendOnly(), identity(entity), columns(entity.properties()), primaryKey(entity),
+                entity.appendOnly(), identity(entity), entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
                 indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
                 entity.checkConstraints().stream().map(check -> "{\"name\": %s, \"expression\": %s}"
                         .formatted(quote(check.name()), quote(check.expression()))).collect(Collectors.joining(", ")),

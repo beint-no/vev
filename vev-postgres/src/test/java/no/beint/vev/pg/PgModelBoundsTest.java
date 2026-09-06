@@ -158,7 +158,42 @@ final class PgModelBoundsTest {
 
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
             List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks) {
+        return plan(columns, unique, shape, checks, () -> 1000);
+    }
+
+    @Test
+    void capturesRowLimitsOnceAndKeepsTheMaterializedResultBudget() {
+        var bound = new java.util.concurrent.atomic.AtomicInteger(8);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        List<PgColumn> columns = List.of(ID, TENANT, new PgColumn("body", PgCodecs.STRING, false, PgColumn.Role.VALUE, 65535, 0, 0));
+        var source = plan(columns, List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(), () -> {
+            calls.incrementAndGet();
+            return bound.get();
+        });
+        var model = new PgModel<>(IDENTITY, List.of(source));
+        bound.set(1000);
+        var captured = model.frozenPlans().getFirst();
+        assertEquals(8, captured.maximumRows());
+        captured.requireRowCount(8);
+        captured.requireRowCount(0);
+        assertThrows(IllegalArgumentException.class, () -> captured.requireRowCount(9));
+        assertEquals(1, calls.get());
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+        for (int invalid : List.of(-1, 0, 1001, Integer.MAX_VALUE)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(), () -> invalid))));
+        }
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks,
+            java.util.function.IntSupplier maximumRows) {
         return new PgEntityPlan<>() {
+            @Override
+            public int maximumRows() {
+                return maximumRows.getAsInt();
+            }
+
             @Override
             public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
                 return shape;

@@ -883,6 +883,54 @@ final class VevProcessorTest {
     }
 
     @Test
+    void declaredRowLimitsPermitLargerSnapshotsWithBinaryParityAndStableDefaults() throws IOException {
+        String entity = recordSource(validTable(), validComponents().replace("length = 255", "length = 65535"), "");
+        Compilation unlimited = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+        assertFalse(unlimited.success());
+        assertTrue(unlimited.diagnostics().contains("64 MiB materialized-result"), unlimited.diagnostics());
+        String bounded = entity.replace("@Entity", "@Entity @no.beint.vev.VevRows(8)");
+        Compilation source = compile(Map.of("example/Broken.java", bounded, "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(source.success(), source.diagnostics());
+        assertTrue(source.generated("example/BrokenVev.java").contains("public int maximumRows() {\n        return 8;"));
+        assertTrue(source.manifest("example.BrokenModel").contains("\"maximumRows\": 8"));
+        Compilation dependency = compile(Map.of("example/Broken.java", bounded), "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BrokenModel.java", brokenModelSource()), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(source.manifest("example.BrokenModel"), binary.manifest("example.BrokenModel"));
+        assertEquals(source.generated("example/BrokenVev.java"), binary.generated("example/BrokenVev.java"));
+        Compilation changed = compile(Map.of("example/Broken.java", bounded.replace("VevRows(8)", "VevRows(16)"),
+                "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(changed.success(), changed.diagnostics());
+        assertNotEquals(source.generated("example/BrokenModelVev.java"), changed.generated("example/BrokenModelVev.java"));
+        var defaults = positiveSources();
+        Compilation implicit = compile(defaults);
+        defaults.computeIfPresent("example/Account.java", (path, text) -> text.replace("@Entity", "@Entity @no.beint.vev.VevRows(1000)"));
+        Compilation explicit = compile(defaults);
+        assertTrue(explicit.success(), explicit.diagnostics());
+        assertEquals(implicit.manifest("example.BillingModel"), explicit.manifest("example.BillingModel"));
+    }
+
+    @Test
+    void rejectsInvalidRowLimitsAndCountsTheExtraPagingSentinelInTheMemoryBudget() throws IOException {
+        for (int limit : List.of(Integer.MIN_VALUE, -1, 0, 1001, Integer.MAX_VALUE)) {
+            String entity = recordSource(validTable(), validComponents(), "").replace("@Entity", "@Entity @no.beint.vev.VevRows(" + limit + ")");
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success());
+            assertTrue(result.diagnostics().contains("@VevRows must be between 1 and 1000"), result.diagnostics());
+            assertFalse(Files.exists(result.generatedDirectory().resolve("example/BrokenVev.java")));
+        }
+        // This four-column shape estimates 262,588 retained bytes per snapshot: 255 fit, 256 exceed 64 MiB.
+        for (int limit : List.of(254, 255)) {
+            String entity = recordSource(validTable(), validComponents().replace("length = 255", "length = 65535"), "")
+                    .replace("@Entity", "@Entity @no.beint.vev.VevRows(" + limit + ")");
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertEquals(limit == 254, result.success(), result.diagnostics());
+            if (limit == 255) assertTrue(result.diagnostics().contains("64 MiB materialized-result"), result.diagnostics());
+        }
+    }
+
+    @Test
     void rejectsAggregateCheckMetadataBeforeGeneratingAnyArtifact() throws IOException {
         var sources = new LinkedHashMap<String, String>();
         sources.put("example/CheckText.java", "package example; public final class CheckText { public static final String VALUE = \""

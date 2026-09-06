@@ -39,6 +39,15 @@ public interface EntityType<M, E, K> {
     ModelIdentity modelIdentity();
 
     /**
+     * Returns the generated maximum batch and query-page size for this entity.
+     *
+     * @return bounded snapshot count, reduced by {@link VevRows} for larger row shapes
+     */
+    default int maximumRows() {
+        return QueryLimit.MAX_VALUE;
+    }
+
+    /**
      * Creates a type-bound key.
      *
      * @param value primary-key value
