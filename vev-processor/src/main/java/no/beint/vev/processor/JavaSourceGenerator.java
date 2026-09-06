@@ -34,12 +34,19 @@ final class JavaSourceGenerator {
         if (entity.id().identity()) {
             appendCreationInput(source, entity);
         }
+        for (int index = 0; index < entity.properties().size(); index++) {
+            PropertyMapping property = entity.properties().get(index);
+            if (!property.enumConstants().isEmpty()) {
+                source.append("    private static final no.beint.vev.pg.PgCodec<").append(property.boxedType())
+                        .append("> __VEV_CODEC_").append(index).append(" = ").append(property.codec()).append(";\n\n");
+            }
+        }
         source.append("    private static final java.util.List<no.beint.vev.pg.PgColumn> COLUMNS = java.util.List.of(\n");
         for (int index = 0; index < entity.properties().size(); index++) {
             PropertyMapping property = entity.properties().get(index);
             source.append("            new no.beint.vev.pg.PgColumn(\"")
                     .append(escape(property.columnName())).append("\", ")
-                    .append(property.codec()).append(", ")
+                    .append(readerCodec(property, index)).append(", ")
                     .append(property.nullable()).append(", no.beint.vev.pg.PgColumn.Role.")
                     .append(columnRole(property)).append(", ")
                     .append(property.maximumLength()).append(", ")
@@ -84,16 +91,16 @@ final class JavaSourceGenerator {
                 .append("    }\n\n")
                 .append("    @Override\n")
                 .append("    public ").append(entity.qualifiedName())
-                .append(" instantiate(Object[] columnValues) {\n")
-                .append("        java.util.Objects.requireNonNull(columnValues, \"columnValues\");\n")
-                .append("        if (columnValues.length != ").append(entity.properties().size()).append(") {\n")
-                .append("            throw new IllegalArgumentException(\"Expected ")
-                .append(entity.properties().size()).append(" column values\");\n")
+                .append(" readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException {\n")
+                .append("        java.util.Objects.requireNonNull(resultSet, \"resultSet\");\n")
+                .append("        if (firstColumn < 1 || firstColumn > ").append(Integer.MAX_VALUE - entity.properties().size() + 1).append(") {\n")
+                .append("            throw new IllegalArgumentException(\"Mapped result columns require valid one-based positions\");\n")
                 .append("        }\n")
                 .append("        return new ").append(entity.qualifiedName()).append("(\n");
         for (int index = 0; index < entity.properties().size(); index++) {
             PropertyMapping property = entity.properties().get(index);
-            source.append("                ").append(instantiateExpression(property, index));
+            source.append("                ").append(readerCodec(property, index)).append(".readChecked(resultSet, firstColumn")
+                    .append(index == 0 ? "" : " + " + index).append(", COLUMNS.get(").append(index).append("))");
             source.append(index + 1 == entity.properties().size() ? ");\n" : ",\n");
         }
         source.append("    }\n\n");
@@ -282,12 +289,8 @@ final class JavaSourceGenerator {
                 "return entity." + entity.version().name() + "();");
     }
 
-    private String instantiateExpression(PropertyMapping property, int index) {
-        String value = "(" + property.boxedType() + ") columnValues[" + index + "]";
-        return property.nullable() && !isPrimitive(property.javaType())
-                ? value
-                : "(" + property.boxedType() + ") java.util.Objects.requireNonNull(columnValues[" + index
-                        + "], \"Database returned NULL for " + escape(property.columnName()) + "\")";
+    private String readerCodec(PropertyMapping property, int index) {
+        return property.enumConstants().isEmpty() ? property.codec() : "__VEV_CODEC_" + index;
     }
 
     private void method(StringBuilder source, String declaration, String statement) {
@@ -295,10 +298,6 @@ final class JavaSourceGenerator {
                 .append("    ").append(declaration).append(" {\n")
                 .append("        ").append(statement).append("\n")
                 .append("    }\n\n");
-    }
-
-    private boolean isPrimitive(String type) {
-        return SetHolder.PRIMITIVES.contains(type);
     }
 
     private String columnRole(PropertyMapping property) {
@@ -333,10 +332,4 @@ final class JavaSourceGenerator {
         return result.toString();
     }
 
-    private static final class SetHolder {
-        private static final java.util.Set<String> PRIMITIVES = java.util.Set.of("boolean", "int", "long", "short");
-
-        private SetHolder() {
-        }
-    }
 }

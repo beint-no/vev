@@ -706,15 +706,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private <E, K> E readEntity(PgPlan<M, E, K, T> plan, ResultSet resultSet, int firstColumn)
             throws SQLException {
         try {
-            List<PgColumn> columns = plan.columns();
-            Object[] columnValues = new Object[columns.size()];
-            for (int index = 0; index < columns.size(); index++) {
-                PgColumn column = columns.get(index);
-                Object value = column.codec().read(resultSet, firstColumn + index);
-                column.validateValue(value);
-                columnValues[index] = value;
-            }
-            return plan.instantiate(columnValues);
+            return plan.readRow(resultSet, firstColumn);
         } catch (RuntimeException failure) {
             throw invariant("Generated row hydration failed for " + plan.logicalName(), failure);
         }

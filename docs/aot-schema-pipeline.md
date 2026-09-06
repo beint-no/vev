@@ -8,7 +8,7 @@ Vev moves mapping discovery, member access, and supported query construction out
 
 The annotation processor reads selected source-level Jakarta Persistence annotations without loading mapped classes. Jakarta Persistence 4 forbids records as entities, so Vev deliberately interprets those annotations on its required immutable records as nonconforming source metadata. It rejects implicit names and access strategies, requires every `@Column` to explicitly state `nullable = true` or `nullable = false`, then resolves record components, identifiers, column flags, Java types, and Vev-specific safety metadata into a closed intermediate model. Jakarta's default nullability is never silently inherited.
 
-`@VevIndex(name = "...")` is accepted only on an ordinary scalar component. The processor validates the explicit PostgreSQL identifier, component and codec type, nullable/required distinction, per-entity index-count bound, generated-token name, schema-wide name uniqueness, and a conservative retained-key budget. It does not infer uniqueness or accept an index on an identifier, tenant key, or version token.
+`@VevIndex(name = "...")` is accepted on an ordinary scalar component or the identifier. The processor validates the explicit PostgreSQL identifier, component and codec type, nullable/required distinction, per-entity index-count bound, generated-token name, schema-wide name uniqueness, and a conservative retained-key budget. It does not infer uniqueness or accept an index on a tenant key or version token.
 
 The model is valid only when every encountered Jakarta Persistence or Hibernate annotation and every accepted annotation attribute is either implemented or explicitly rejected. Other provider namespaces are not a compatibility surface and must not be assumed to affect generated behavior. Unresolved Java types fail compilation.
 
@@ -52,10 +52,27 @@ For each accepted entity, the processor emits deterministic source containing:
 
 - an immutable per-entity plan and a closed model registry consumed by the runtime and Jakarta adapter;
 - stable PostgreSQL identifiers and column roles from which the runtime constructs fixed quoted statements;
-- immutable typed metadata consumed by Vev's closed built-in binders and row readers;
+- immutable typed metadata consumed by Vev's closed built-in binders, plus a direct checked JDBC row reader;
 - identity-stable typed query tokens for each generated scalar equality index, with an `IS NULL` seam only for nullable tokens;
 - a deterministic mapping fingerprint, including declared index identities, and table/tenant metadata used by runtime checks;
 - no environment-specific values or credentials.
+
+The generated `readRow(ResultSet, firstColumn)` evaluates typed codec reads in
+column order and calls the verified canonical constructor directly. Each read
+checks nullability and value bounds against immutable generated metadata; enum
+codecs are initialized once and reused. This removes the intermediate `Object[]`
+row container. Generated readers neither advance nor retain the result set and
+do not create statements or acquire connections. The runtime retains transaction
+ownership, result ordering, tenant/identity/version verification, returned-payload
+comparison, and cleanup/rollback handling. Driver and scalar-validation failures
+follow the same transaction failure paths.
+
+The generation SPI uses `readRow` instead of the former array-based `instantiate`
+method. Recompile application mappings with matching processor/runtime versions;
+this experimental SPI change does not provide compatibility with stale generated
+classes. The mapping fingerprint describes the schema, not generator ABI or
+performance. Allocation and latency effects require the benchmark evidence
+specified in the [benchmark policy](benchmark-policy.md).
 
 Generated plan and registry names use a Vev-specific `Vev` suffix instead of Jakarta's static-metamodel `_` suffix. Vev and a Jakarta/Hibernate metamodel processor may coexist in one build only for distinct source types; a Vev record cannot simultaneously be a Jakarta/Hibernate entity. The Vev processor claims only the `@VevModel` trigger annotation; it inspects the listed mapping annotations transitively without taking ownership of them from other processors.
 

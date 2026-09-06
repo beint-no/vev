@@ -353,8 +353,8 @@ final class PgModelBoundsTest {
             }
 
             @Override
-            public TestEntity instantiate(Object[] columnValues) {
-                return new TestEntity((Integer) columnValues[0], (Integer) columnValues[1]);
+            public TestEntity readRow(java.sql.ResultSet resultSet, int firstColumn) {
+                throw new UnsupportedOperationException("Metadata-only fixture has no JDBC hydration path");
             }
 
             @Override

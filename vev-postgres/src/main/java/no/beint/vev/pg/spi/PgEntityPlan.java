@@ -122,12 +122,16 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     Object columnValue(E entity, int columnIndex);
 
     /**
-     * Creates a detached entity snapshot from values in {@link #columns()} order.
+     * Reads a detached snapshot directly from the current JDBC row in {@link #columns()} order.
+     * Generated readers validate every scalar before calling the verified pure canonical constructor.
+     * The result set must not be retained, advanced, closed, or exposed to entity code.
      *
-     * @param columnValues one value per mapped column
+     * @param resultSet current result row
+     * @param firstColumn one-based position of the first mapped column
      * @return newly constructed detached snapshot
+     * @throws java.sql.SQLException if a mapped value cannot be read
      */
-    E instantiate(Object[] columnValues);
+    E readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException;
 
     /**
      * Reads the primary key from an entity snapshot.

@@ -55,9 +55,11 @@ final class VevProcessorTest {
         assertTrue(accountPlan.contains("public java.util.List<no.beint.vev.pg.PgIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, ?>> indexes()"));
         assertTrue(accountPlan.contains("return INDEXES;"));
         assertTrue(accountPlan.contains("public Object columnValue(example.Account entity, int columnIndex)"));
-        assertTrue(accountPlan.contains("public example.Account instantiate(Object[] columnValues)"));
+        assertTrue(accountPlan.contains("public example.Account readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException"));
+        assertFalse(accountPlan.contains("Object[] columnValues"));
         assertFalse(accountPlan.contains("PreparedStatement"));
-        assertFalse(accountPlan.contains("ResultSet"));
+        assertTrue(accountPlan.contains(".readChecked(resultSet, firstColumn, COLUMNS.get(0))"));
+        assertFalse(accountPlan.contains("resultSet.next("));
         assertFalse(accountPlan.contains("bindUpdate("));
         assertFalse(accountPlan.contains("bindUpsert("));
         assertFalse(accountPlan.contains("SELECT "));

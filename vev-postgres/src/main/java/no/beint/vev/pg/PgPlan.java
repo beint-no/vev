@@ -228,8 +228,8 @@ class PgPlan<M, E, K, T> {
         return source.columnValue(entity, columnIndex);
     }
 
-    E instantiate(Object[] columnValues) {
-        return source.instantiate(columnValues);
+    E readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException {
+        return source.readRow(resultSet, firstColumn);
     }
 
     K keyOf(E entity) {
