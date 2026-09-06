@@ -65,6 +65,7 @@ final class MappingCompiler {
     private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final String VEV_ROWS = "no.beint.vev.VevRows";
+    private static final String VEV_BINARY = "no.beint.vev.VevBinary";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
     private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES", "UNIQUE_CONSTRAINTS");
@@ -332,7 +333,7 @@ final class MappingCompiler {
         }
         validateIndexes(entity, properties);
         List<UniqueMapping> uniqueConstraints = compileUniqueConstraints(entity, table, properties);
-        List<CheckMapping> checkConstraints = compileCheckConstraints(entity, table);
+        List<CheckMapping> checkConstraints = compileCheckConstraints(entity, table, properties);
         AnnotationMirror rowLimit = annotation(entity, VEV_ROWS);
         int maximumRows = rowLimit == null ? 1000 : intValue(rowLimit, "value");
         if (maximumRows < 1 || maximumRows > 1000) error(entity, "@VevRows must be between 1 and 1000");
@@ -521,6 +522,7 @@ final class MappingCompiler {
             }
         }
         AnnotationMirror enumerated = consistentAnnotation(component, annotationSources, ENUMERATED);
+        AnnotationMirror binary = consistentAnnotation(component, annotationSources, VEV_BINARY);
         List<String> enumConstants = List.of();
         CodecMapping codec = CODECS.get(component.asType().toString());
         Element valueType = processingEnvironment.getTypeUtils().asElement(component.asType());
@@ -548,7 +550,7 @@ final class MappingCompiler {
         }
         if (codec == null) {
             error(component, "No safe PostgreSQL codec exists for " + component.asType()
-                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, Instant, and explicit STRING enums");
+                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, Instant, bounded Binary, and explicit STRING enums");
             return null;
         }
         boolean nullable = booleanValue(column, "nullable");
@@ -558,6 +560,10 @@ final class MappingCompiler {
         int maximumLength = 0;
         int numericPrecision = 0;
         int numericScale = 0;
+        String binaryCheckName = "";
+        if (binary != null && !codec.arrayElementType().equals("bytea")) {
+            error(component, "@VevBinary only applies to immutable Binary VALUE components");
+        }
         if (codec.arrayElementType().equals("character varying")) {
             maximumLength = intValue(column, "length");
             if (maximumLength < 1 || maximumLength > 65_535) {
@@ -574,6 +580,21 @@ final class MappingCompiler {
             if (index != null && maximumLength > 256) {
                 error(component, "Indexed String components must declare @Column(length <= 256) for Vev's deterministic B-tree key budget");
             }
+            rejectNonDefaultInt(component, column, "precision", 0);
+            rejectNonDefaultInt(component, column, "scale", 0);
+        } else if (codec.arrayElementType().equals("bytea")) {
+            if (binary == null || id || tenant || version) {
+                error(component, "Binary VALUE components require explicit @VevBinary byte bounds and a named check constraint");
+            } else {
+                maximumLength = intValue(binary, "maximumBytes");
+                binaryCheckName = stringValue(binary, "check");
+                validateIdentifier(component, binaryCheckName, "binary check constraint");
+                if (maximumLength < 1 || maximumLength > 32 * 1024 * 1024) {
+                    error(component, "@VevBinary.maximumBytes must be between 1 and 33554432");
+                    maximumLength = 0;
+                }
+            }
+            rejectNonDefaultInt(component, column, "length", 255);
             rejectNonDefaultInt(component, column, "precision", 0);
             rejectNonDefaultInt(component, column, "scale", 0);
         } else if (codec.codec().endsWith(".BIG_DECIMAL")) {
@@ -612,15 +633,24 @@ final class MappingCompiler {
                 referenceName,
                 referenceTarget,
                 generatedValue != null,
-                reference == null || booleanValue(reference, "tenantFirst"));
+                reference == null || booleanValue(reference, "tenantFirst"),
+                binaryCheckName);
     }
 
-    private List<CheckMapping> compileCheckConstraints(TypeElement entity, AnnotationMirror table) {
+    private List<CheckMapping> compileCheckConstraints(TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
         List<CheckMapping> result = new ArrayList<>();
         collectChecks(entity, table, result);
         for (RecordComponentElement component : entity.getRecordComponents()) {
             collectChecks(component, consistentAnnotation(component, componentSources(entity, component), COLUMN), result);
         }
+        for (PropertyMapping property : properties) {
+            if (!property.binaryCheckName().isEmpty()) {
+                result.add(new CheckMapping(property.binaryCheckName(),
+                        "(octet_length(" + property.quotedColumn() + ") <= " + property.maximumLength() + ')',
+                        property.columnName(), property.maximumLength()));
+            }
+        }
+        if (result.size() > 32) error(entity, "An entity must not exceed 32 declared check constraints including binary bounds");
         result.sort(Comparator.comparing(CheckMapping::name));
         return List.copyOf(result);
     }
@@ -752,6 +782,7 @@ final class MappingCompiler {
     }
 
     private int maximumIndexBytes(PropertyMapping property) {
+        if (property.arrayElementType().equals("bytea")) return Math.addExact(32, property.maximumLength());
         if (property.maximumLength() > 0) {
             return Math.multiplyExact(4, property.maximumLength());
         }
@@ -765,7 +796,9 @@ final class MappingCompiler {
         long maximumRowBytes = Math.addExact(128L, Math.multiplyExact(16L, properties.size()));
         for (PropertyMapping property : properties) {
             long maximumColumnBytes;
-            if (property.maximumLength() > 0) {
+            if (property.arrayElementType().equals("bytea")) {
+                maximumColumnBytes = Math.addExact(64L, property.maximumLength());
+            } else if (property.maximumLength() > 0) {
                 maximumColumnBytes = Math.addExact(64L, Math.multiplyExact(4L, property.maximumLength()));
             } else if (property.numericPrecision() > 0) {
                 maximumColumnBytes = Math.addExact(64L, Math.multiplyExact(2L, property.numericPrecision()));
@@ -855,7 +888,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY)) {
                     if (!componentElements.contains(member)) {
                         error(member, "Persistence mapping @" + simpleName(name)
                                 + " is forbidden on members unrelated to a record component");
@@ -877,7 +910,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY)) {
                     validateAnnotationShape(component, annotation);
                     continue;
                 }
@@ -1067,6 +1100,7 @@ final class MappingCompiler {
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
+            case VEV_BINARY -> Set.of("maximumBytes", "check");
             default -> ANNOTATION_MEMBERS.get(annotationName);
         };
         if (expected == null) {
@@ -1159,6 +1193,9 @@ final class MappingCompiler {
                 }
                 canonical.append("check|").append(check.name()).append('|')
                         .append(check.expression().length()).append('|').append(check.expression()).append('\n');
+                if (!check.binaryColumn().isEmpty()) {
+                    canonical.append("binaryMaximum|").append(check.binaryColumn()).append('|').append(check.maximumBytes()).append('\n');
+                }
             }
             if (!entity.primaryKeyShape().equals("TENANT_ID")) {
                 canonical.append("primaryKey|").append(entity.primaryKeyShape()).append('\n');
@@ -1330,6 +1367,7 @@ final class MappingCompiler {
         addCodec(codecs, "short", "java.lang.Short", "SHORT", "smallint");
         addCodec(codecs, "java.lang.Short", "java.lang.Short", "SHORT", "smallint");
         addCodec(codecs, "java.lang.String", "java.lang.String", "STRING", "character varying");
+        addCodec(codecs, "no.beint.vev.Binary", "no.beint.vev.Binary", "BINARY", "bytea");
         addCodec(codecs, "java.util.UUID", "java.util.UUID", "UUID", "uuid");
         addCodec(codecs, "java.math.BigDecimal", "java.math.BigDecimal", "BIG_DECIMAL", "numeric");
         addCodec(codecs, "java.time.LocalDate", "java.time.LocalDate", "LOCAL_DATE", "date");

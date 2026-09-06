@@ -72,13 +72,19 @@ final class PgChecks {
     private static void verifyDefinition(Connection connection, long oid, PgCheck check, PgPlan<?, ?, ?, ?> plan)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-                SELECT pg_catalog.substr(pg_catalog.pg_get_expr(conbin, conrelid, false), 1, ?)
+                SELECT pg_catalog.substr(pg_catalog.pg_get_expr(conbin, conrelid, false), 1, ?),
+                       CASE WHEN ?::pg_catalog.text = '' THEN ?::pg_catalog.text
+                            ELSE pg_catalog.format('(octet_length(%I) <= %s)', ?::pg_catalog.text, ?::pg_catalog.int4) END
                   FROM pg_catalog.pg_constraint WHERE oid = ?::pg_catalog.oid
                 """)) {
             statement.setInt(1, PgCheck.MAXIMUM_EXPRESSION_LENGTH + 1);
-            statement.setLong(2, oid);
+            statement.setString(2, check.binaryColumn());
+            statement.setString(3, check.expression());
+            statement.setString(4, check.binaryColumn());
+            statement.setInt(5, check.maximumBytes());
+            statement.setLong(6, oid);
             try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !check.expression().equals(row.getString(1)) || row.next()) throw invalid(plan);
+                if (!row.next() || !row.getString(2).equals(row.getString(1)) || row.next()) throw invalid(plan);
             }
         }
     }

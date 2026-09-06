@@ -57,8 +57,11 @@ final class SchemaManifestGenerator {
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
                 entity.appendOnly(), identity(entity), entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
                 indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
-                entity.checkConstraints().stream().map(check -> "{\"name\": %s, \"expression\": %s}"
-                        .formatted(quote(check.name()), quote(check.expression()))).collect(Collectors.joining(", ")),
+                entity.checkConstraints().stream().map(check -> check.binaryColumn().isEmpty()
+                        ? "{\"name\": %s, \"expression\": %s}".formatted(quote(check.name()), quote(check.expression()))
+                        : "{\"name\": %s, \"kind\": \"BINARY_MAXIMUM\", \"column\": %s, \"maximumBytes\": %d, \"expression\": %s}"
+                                .formatted(quote(check.name()), quote(check.binaryColumn()), check.maximumBytes(), quote(check.expression())))
+                        .collect(Collectors.joining(", ")),
                 references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()
                         .map(property -> quote(property.columnName())).collect(Collectors.joining(", ")), updates);

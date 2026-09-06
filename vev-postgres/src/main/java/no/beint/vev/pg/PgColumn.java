@@ -14,7 +14,7 @@ import java.util.regex.Pattern;
  * @param codec standard Vev codec for the column value
  * @param nullable whether the value column accepts {@code null}; identity, tenant, and version columns never do
  * @param role structural role of the column in its entity plan
- * @param maximumLength maximum Unicode code points for a string or enum-name column, or zero for other codecs
+ * @param maximumLength maximum Unicode code points for a string or enum-name column, bytes for Binary, or zero for other codecs
  * @param numericPrecision precision for a decimal column, or zero for other codecs
  * @param numericScale exact scale for a decimal column, or zero for other codecs
  */
@@ -42,7 +42,7 @@ public record PgColumn(
      * @param codec standard Vev codec for the column value
      * @param nullable whether the value column accepts {@code null}
      * @param role structural role of the column
-     * @param maximumLength maximum Unicode code points for a string or enum-name column, or zero
+     * @param maximumLength maximum Unicode code points for a string or enum-name column, bytes for Binary, or zero
      * @param numericPrecision precision for a decimal column, or zero
      * @param numericScale exact scale for a decimal column, or zero
      */
@@ -59,8 +59,12 @@ public record PgColumn(
             if (maximumLength < 1 || maximumLength > 65_535) {
                 throw new IllegalArgumentException("String and enum-name columns require a maximum length from 1 through 65535");
             }
+        } else if (codec == PgCodecs.BINARY) {
+            if (maximumLength < 1 || maximumLength > no.beint.vev.Binary.MAXIMUM_LENGTH || role != Role.VALUE) {
+                throw new IllegalArgumentException("Binary VALUE columns require an explicit byte bound from 1 through 32 MiB");
+            }
         } else if (maximumLength != 0) {
-            throw new IllegalArgumentException("Only String and enum-name columns may declare a maximum length");
+            throw new IllegalArgumentException("Only String, enum-name, and Binary columns may declare a maximum length");
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
             if (numericPrecision < 1 || numericPrecision > 128
@@ -74,6 +78,7 @@ public record PgColumn(
 
     /**
      * Creates column metadata with a 255-code-point string bound or decimal precision 38 and scale 2.
+     * Binary columns require an explicit byte bound through the complete constructor.
      *
      * @param name safe unquoted PostgreSQL identifier
      * @param codec standard Vev codec for the column value
@@ -106,6 +111,7 @@ public record PgColumn(
     }
 
     long maximumRetainedBytes() {
+        if (codec == PgCodecs.BINARY) return Math.addExact(64L, maximumLength);
         if (codec.usesCharacterVarying()) {
             return Math.addExact(64L, Math.multiplyExact(4L, maximumLength));
         }
@@ -131,6 +137,8 @@ public record PgColumn(
             if (text.codePointCount(0, text.length()) > maximumLength) {
                 throw new IllegalArgumentException(name + " exceeds its generated character bound");
             }
+        } else if (value instanceof no.beint.vev.Binary binary && binary.size() > maximumLength) {
+            throw new IllegalArgumentException(name + " exceeds its binary byte bound");
         } else if (value instanceof BigDecimal decimal
                 && (decimal.precision() > numericPrecision || decimal.scale() != numericScale)) {
             throw new IllegalArgumentException(name + " does not match its generated numeric precision and scale");

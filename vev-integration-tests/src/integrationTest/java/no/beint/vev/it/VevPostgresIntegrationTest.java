@@ -7,6 +7,7 @@ import jakarta.persistence.FindOption;
 import jakarta.persistence.PersistenceException;
 import jakarta.persistence.Timeout;
 import no.beint.vev.Batch;
+import no.beint.vev.Binary;
 import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityLookup;
 import no.beint.vev.ModelIdentity;
@@ -20,6 +21,8 @@ import no.beint.vev.fixtures.KotlinEntry;
 import no.beint.vev.fixtures.KotlinEntryVev;
 import no.beint.vev.fixtures.KotlinIdentity;
 import no.beint.vev.fixtures.KotlinIdentityVev;
+import no.beint.vev.fixtures.KotlinBinary;
+import no.beint.vev.fixtures.KotlinBinaryVev;
 import no.beint.vev.jakarta.VevEntityAgents;
 import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
@@ -37,6 +40,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Array;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -53,6 +57,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -465,6 +470,115 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void binarySnapshotsSupportNullableArraysIndexesAndCompleteBatchWrites() {
+        byte[] everyByte = new byte[256];
+        for (int index = 0; index < everyByte.length; index++) everyByte[index] = (byte) index;
+        byte[] maximum = new byte[65536];
+        new java.util.Random(1701).nextBytes(maximum);
+        var rows = List.of(new BinarySample(1, 7, 0, null, null),
+                new BinarySample(2, 7, 0, Binary.empty(), Binary.empty()),
+                new BinarySample(3, 7, 0, Binary.copyOf(everyByte), Binary.fromHex("00ff")),
+                new BinarySample(4, 7, 0, Binary.copyOf(maximum), Binary.fromHex("80")));
+        everyByte[0] = 99;
+        assertEquals(rows, vev.write(TENANT_7, tx -> tx.entities().insertMultiple(BinarySampleVev.INSTANCE, Batch.copyOf(rows))).values());
+        var lookedUp = vev.read(TENANT_7, tx -> tx.entities().findMultiple(BinarySampleVev.INSTANCE,
+                Batch.copyOf(List.of(4, 1, 3, 2, 99, 4))));
+        assertEquals(rows.get(3), ((EntityLookup.Found<?, ?, ?>) lookedUp.get(0)).entity());
+        assertInstanceOf(EntityLookup.Missing.class, lookedUp.get(4));
+        assertEquals(List.of(rows.get(2)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(BinarySampleVev.DIGEST, Binary.fromHex("00FF"), new QueryLimit(32)))).values());
+        assertEquals(List.of(rows.get(0)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.isNull(BinarySampleVev.DIGEST, new QueryLimit(32)))).values());
+        var updates = rows.stream().map(row -> new BinarySample(row.id(), 7, 0, Binary.empty(), row.digest())).toList();
+        assertEquals(4, vev.write(TENANT_7, tx -> tx.entities().updateMultiple(BinarySampleVev.INSTANCE, Batch.copyOf(updates))).size());
+        var otherTenant = new BinarySample(3, 8, 0, Binary.fromHex("01"), Binary.fromHex("00ff"));
+        vev.write(TENANT_8, tx -> tx.entities().insert(BinarySampleVev.INSTANCE, otherTenant));
+        assertEquals(List.of(otherTenant), vev.read(TENANT_8, tx -> tx.entities().many(
+                PgQueries.equal(BinarySampleVev.DIGEST, Binary.fromHex("00ff"), new QueryLimit(32)))).values());
+        UUID earlier = id("binary-unique-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "binary-rollback@example.test", "1.0000"));
+            return tx.entities().insertMultiple(BinarySampleVev.INSTANCE, Batch.copyOf(List.of(
+                    new BinarySample(5, 7, 0, Binary.empty(), Binary.fromHex("1234")),
+                    new BinarySample(6, 7, 0, Binary.empty(), Binary.fromHex("00ff")))));
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(5))).isEmpty());
+    }
+
+    @Test
+    void binaryIdentityCreationHandlesTwentyMiBAndKotlinNullableArrays() {
+        byte[] bytes = new byte[20 * 1024 * 1024];
+        new java.util.Random(827).nextBytes(bytes);
+        Binary content = Binary.copyOf(bytes);
+        var created = vev.write(TENANT_7, tx -> tx.entities().create(BinaryAssetVev.INSTANCE, new BinaryAssetVev.New(content)));
+        assertEquals(content, created.content());
+        assertEquals(created, vev.read(TENANT_7, tx -> tx.entities().find(BinaryAssetVev.INSTANCE.key(created.id()))).orElseThrow());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(BinaryAssetVev.INSTANCE.key(created.id()))).isEmpty());
+        var updated = vev.write(TENANT_7, tx -> tx.entities().update(BinaryAssetVev.INSTANCE,
+                new BinaryAsset(created.id(), 7, 0, Binary.empty())));
+        assertEquals(Binary.empty(), ((MutationResult.Applied<?, BinaryAsset, ?, ?>) updated).entity().content());
+        Binary excessive = Binary.copyOf(new byte[20 * 1024 * 1024 + 1]);
+        assertThrows(IllegalArgumentException.class, () -> vev.write(TENANT_7, tx -> tx.entities().create(BinaryAssetVev.INSTANCE,
+                new BinaryAssetVev.New(excessive))));
+        var kotlin = vev.write(TENANT_7, tx -> tx.entities().createMultiple(KotlinBinaryVev.INSTANCE, Batch.copyOf(List.of(
+                new KotlinBinaryVev.New(null), new KotlinBinaryVev.New(Binary.empty()),
+                new KotlinBinaryVev.New(Binary.fromHex("0001feff")), new KotlinBinaryVev.New(null)))));
+        assertNull(kotlin.get(0).payload());
+        assertEquals(Binary.empty(), kotlin.get(1).payload());
+        assertEquals(Binary.fromHex("0001feff"), kotlin.get(2).payload());
+        assertNull(kotlin.get(3).payload());
+        KotlinBinary first = kotlin.get(0);
+        KotlinBinary replacement = first.copy(first.id(), first.tenantId(), first.version(), Binary.fromHex("20"));
+        var changed = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(KotlinBinaryVev.INSTANCE, Batch.one(replacement)));
+        assertEquals(Binary.fromHex("20"), changed.get(0).entity().payload());
+    }
+
+    @Test
+    void binaryBoundsFailBeforeSqlAndReturnedSnapshotsDoNotAliasDriverBuffers() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count), IntegrationModelVev.POSTGRES, authority);
+        count.set(0);
+        var valid = new BinarySample(1, 7, 0, Binary.fromHex("12345678"), null);
+        runtime.write(authority.scope(7), tx -> {
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().insert(BinarySampleVev.INSTANCE,
+                    new BinarySample(2, 7, 0, Binary.copyOf(new byte[65537]), null)));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().insert(BinarySampleVev.INSTANCE,
+                    new BinarySample(2, 7, 0, null, Binary.copyOf(new byte[33]))));
+            assertEquals(0, count.get());
+            return tx.entities().insert(BinarySampleVev.INSTANCE, valid);
+        });
+        var borrowed = new AtomicReference<byte[]>();
+        var readAuthority = IntegrationModelVev.newTenantAuthority();
+        var reader = new PgVev<>(binaryResultDataSource(database.applicationDataSource(), borrowed, false), IntegrationModelVev.POSTGRES, readAuthority);
+        var snapshot = reader.read(readAuthority.scope(7), tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(1))).orElseThrow();
+        assertNotNull(borrowed.get());
+        java.util.Arrays.fill(borrowed.get(), (byte) 0);
+        assertEquals(valid, snapshot);
+    }
+
+    @Test
+    void corruptedBinaryResultsAndArrayCleanupFailuresRollbackEarlierWrites() {
+        for (boolean corrupt : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var failures = new AtomicInteger();
+            DataSource source = corrupt ? binaryResultDataSource(database.applicationDataSource(), new AtomicReference<>(), true)
+                    : arrayCleanupFailureDataSource(database.applicationDataSource(), failures);
+            var runtime = new PgVev<>(source, IntegrationModelVev.POSTGRES, authority);
+            UUID earlier = id("binary-failure-" + corrupt);
+            assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "binary-failure@example.test", "1.0000"));
+                return tx.entities().insertMultiple(BinarySampleVev.INSTANCE,
+                        Batch.one(new BinarySample(1, 7, 0, Binary.fromHex("aabb"), null)));
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(1))).isEmpty());
+            if (!corrupt) assertTrue(failures.get() > 0);
+        }
+    }
+
+    @Test
     void largeSnapshotsUseDeclaredBatchLimitsAndPreservePagingAndTenantIsolation() {
         assertEquals(8, LargeTextVev.INSTANCE.maximumRows());
         assertEquals(8, KotlinIdentityVev.INSTANCE.maximumRows());
@@ -560,6 +674,20 @@ final class VevPostgresIntegrationTest {
         assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> tx.entities().update(IdentityEntryVev.INSTANCE,
                 new IdentityEntry(created.id(), 7, created.version(), "", null, null))));
         assertEquals(created, vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(created.id()))).orElseThrow());
+    }
+
+    @Test
+    void binaryBoundsRequireExactColumnsLengthsNamesValidationAndEnforcementAtBootstrap() throws SQLException {
+        for (String variant : List.of("missing", "renamed", "weakened", "tightened", "wrongcolumn",
+                "unvalidated", "unenforced", "noinherit", "extra", "unsafe")) {
+            try {
+                database.binarySampleBound(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.binarySampleBound("valid");
+            }
+        }
+        runtime(database.applicationDataSource());
     }
 
     @Test
@@ -2239,6 +2367,33 @@ final class VevPostgresIntegrationTest {
                         return cleanDataSource.getConnection();
                     }
                     return nonClosing(retainedConnection);
+                });
+    }
+
+    private static DataSource binaryResultDataSource(DataSource source, AtomicReference<byte[]> borrowed, boolean corrupt) {
+        return (DataSource) Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(source, method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, operation, parameters) -> {
+                                Object value = invokeTarget(connection, operation, parameters);
+                                if (!(value instanceof PreparedStatement statement)) return value;
+                                return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                                        (statementProxy, call, inputs) -> {
+                                            Object output = invokeTarget(statement, call, inputs);
+                                            if (!(output instanceof java.sql.ResultSet rows)) return output;
+                                            return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{java.sql.ResultSet.class},
+                                                    (rowsProxy, access, positions) -> {
+                                                        Object cell = invokeTarget(rows, access, positions);
+                                                        if (access.getName().equals("getBytes") && cell instanceof byte[] bytes) {
+                                                            borrowed.set(bytes);
+                                                            if (corrupt && bytes.length > 0) bytes[0] ^= (byte) 0xff;
+                                                        }
+                                                        return cell;
+                                                    });
+                                        });
+                            });
                 });
     }
 

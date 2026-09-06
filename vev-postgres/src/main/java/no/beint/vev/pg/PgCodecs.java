@@ -30,6 +30,15 @@ public final class PgCodecs {
     /** Java {@link String} mapped to bounded PostgreSQL {@code character varying}. */
     public static final PgCodec<String> STRING = codec(
             String.class, "character varying", ResultSet::getString, PreparedStatement::setString);
+    /** Immutable {@link no.beint.vev.Binary} mapped to byte-length-bounded PostgreSQL {@code bytea}. */
+    public static final PgCodec<no.beint.vev.Binary> BINARY = codec(
+            no.beint.vev.Binary.class, "bytea",
+            (resultSet, index) -> {
+                byte[] bytes = resultSet.getBytes(index);
+                return bytes == null ? null : no.beint.vev.Binary.copyOf(bytes);
+            },
+            (statement, index, value) -> statement.setBinaryStream(index, value.openStream(), value.size()),
+            no.beint.vev.Binary::toByteArray);
     /** Java {@link UUID} mapped to PostgreSQL {@code uuid}. */
     public static final PgCodec<UUID> UUID = objectCodec(UUID.class, "uuid");
     /** Java {@link BigDecimal} mapped to precision- and scale-bounded PostgreSQL {@code numeric}. */
@@ -50,7 +59,7 @@ public final class PgCodecs {
             (statement, index, value) -> statement.setObject(index, value.atOffset(java.time.ZoneOffset.UTC)),
             value -> value.atOffset(java.time.ZoneOffset.UTC));
     private static final Set<PgCodec<?>> STANDARD = Set.of(
-            BOOLEAN, INTEGER, LONG, SHORT, STRING, UUID, BIG_DECIMAL,
+            BOOLEAN, INTEGER, LONG, SHORT, STRING, BINARY, UUID, BIG_DECIMAL,
             LOCAL_DATE, LOCAL_DATE_TIME, INSTANT);
 
     private PgCodecs() {

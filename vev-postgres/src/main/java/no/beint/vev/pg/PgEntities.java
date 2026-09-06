@@ -874,7 +874,9 @@ final class PgEntities<M, T> implements WriteEntities<M> {
                 int parameter,
                 PgCodec<?> codec,
                 Object[] values) throws SQLException {
-            Array array = connection.createArrayOf(codec.jdbcType(), values);
+            // pgjdbc treats byte[][] as one-dimensional bytea[] and rejects byte[] inside a generic Object[].
+            Object[] encoded = codec == PgCodecs.BINARY ? java.util.Arrays.copyOf(values, values.length, byte[][].class) : values;
+            Array array = connection.createArrayOf(codec.jdbcType(), encoded);
             arrays.add(array);
             statement.setArray(parameter, array);
         }

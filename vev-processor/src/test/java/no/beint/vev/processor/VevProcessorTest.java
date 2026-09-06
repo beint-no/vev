@@ -365,6 +365,92 @@ final class VevProcessorTest {
     }
 
     @Test
+    void boundedBinaryMappingsPreserveTypedChecksAndSourceClasspathParity() throws IOException {
+        String entity = binaryRecordSource(20 * 1024 * 1024).replace("@Entity", "@Entity @no.beint.vev.VevRows(1)");
+        Compilation source = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(source.success(), source.diagnostics());
+        String generated = source.generated("example/BrokenVev.java");
+        assertTrue(generated.contains("no.beint.vev.pg.PgCodecs.BINARY"), generated);
+        assertTrue(generated.contains("PgCheck.binaryMaximum(\"broken_payload_max\", \"payload\", 20971520)"), generated);
+        String manifest = source.manifest("example.BrokenModel");
+        assertTrue(manifest.contains("\"kind\": \"BINARY_MAXIMUM\""), manifest);
+        assertTrue(manifest.contains("\"maximumBytes\": 20971520"), manifest);
+        Compilation dependency = compile(Map.of("example/Broken.java", entity), "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BrokenModel.java", brokenModelSource()), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(generated, binary.generated("example/BrokenVev.java"));
+        assertEquals(manifest, binary.manifest("example.BrokenModel"));
+        Compilation changed = compile(Map.of("example/Broken.java", entity.replace("20971520", "20971519"),
+                "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(changed.success(), changed.diagnostics());
+        assertNotEquals(source.generated("example/BrokenModelVev.java"), changed.generated("example/BrokenModelVev.java"));
+    }
+
+    @Test
+    void rejectsMutableBinaryMissingBoundsWrongRolesAndConflictingColumnMetadata() throws IOException {
+        String valid = binaryRecordSource(32);
+        for (String entity : List.of(
+                valid.replace("@no.beint.vev.VevBinary(maximumBytes = 32, check = \"broken_payload_max\")", ""),
+                valid.replace("no.beint.vev.Binary payload", "byte[] payload"),
+                valid.replace("no.beint.vev.Binary payload", "java.nio.ByteBuffer payload"),
+                valid.replace("no.beint.vev.Binary payload", "String payload"),
+                valid.replace("name = \"payload\"", "length = 32, name = \"payload\""),
+                valid.replace("name = \"payload\"", "precision = 32, name = \"payload\""),
+                valid.replace("broken_payload_max", "bad.name"),
+                valid.replace("broken_payload_max", ""),
+                valid.replace("@Id @Column", "@Column").replace("@no.beint.vev.VevBinary", "@Id @no.beint.vev.VevBinary"),
+                valid.replace("@TenantKey @Column", "@Column").replace("@no.beint.vev.VevBinary", "@TenantKey @no.beint.vev.VevBinary"),
+                valid.replace("@Version @Column", "@Column").replace("@no.beint.vev.VevBinary", "@Version @no.beint.vev.VevBinary"),
+                valid.replace("schema = \"ledger\")", "schema = \"ledger\", check = @CheckConstraint(name = \"broken_payload_max\", constraint = \"true\"))"))) {
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success(), entity);
+            assertFalse(Files.exists(result.classesDirectory().resolve("META-INF/vev/example.BrokenModel.schema.json")));
+        }
+        for (int invalid : List.of(Integer.MIN_VALUE, -1, 0, 33554433, Integer.MAX_VALUE)) {
+            Compilation result = compile(Map.of("example/Broken.java", binaryRecordSource(invalid),
+                    "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success());
+            assertTrue(result.diagnostics().contains("@VevBinary.maximumBytes"), result.diagnostics());
+        }
+    }
+
+    @Test
+    void binaryRowAndIndexBudgetsIncludePayloadBytesAndPagingSentinels() throws IOException {
+        for (int bytes : List.of(20 * 1024 * 1024, 32 * 1024 * 1024)) {
+            Compilation result = compile(Map.of("example/Broken.java", binaryRecordSource(bytes),
+                    "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success());
+            assertTrue(result.diagnostics().contains("64 MiB materialized-result"), result.diagnostics());
+        }
+        // Even one row needs space for the paging sentinel and object overhead.
+        Compilation tooLarge = compile(Map.of("example/Broken.java", binaryRecordSource(32 * 1024 * 1024)
+                .replace("@Entity", "@Entity @no.beint.vev.VevRows(1)"), "example/BrokenModel.java", brokenModelSource()));
+        assertFalse(tooLarge.success());
+        assertTrue(tooLarge.diagnostics().contains("64 MiB materialized-result"), tooLarge.diagnostics());
+        for (int bytes : List.of(32, 2048)) {
+            String indexed = binaryRecordSource(bytes).replace("@no.beint.vev.VevBinary", "@VevIndex(name = \"payload_idx\") @no.beint.vev.VevBinary");
+            String unique = binaryRecordSource(bytes).replace("schema = \"ledger\")", "schema = \"ledger\", uniqueConstraints = "
+                    + "@UniqueConstraint(name = \"payload_key\", columnNames = {\"tenant_id\", \"payload\"}))");
+            for (String entity : List.of(indexed, unique)) {
+                Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+                assertEquals(bytes == 32, result.success(), result.diagnostics());
+                if (bytes == 32 && entity.equals(indexed)) {
+                    assertTrue(result.generated("example/BrokenVev.java").contains("no.beint.vev.Binary> PAYLOAD"));
+                }
+            }
+        }
+    }
+
+    private static String binaryRecordSource(int bytes) {
+        String components = validComponents().replace(
+                "@Column(name = \"display_name\", nullable = false, length = 255) String displayName",
+                "@no.beint.vev.VevBinary(maximumBytes = " + bytes + ", check = \"broken_payload_max\") "
+                        + "@Column(name = \"payload\", nullable = false) no.beint.vev.Binary payload");
+        return recordSource(validTable(), components, "");
+    }
+
+    @Test
     void referenceColumnOrderIsExplicitAndStableAcrossCompilationBoundaries() throws IOException {
         var sources = referenceSources();
         Compilation tenantFirst = compile(sources);

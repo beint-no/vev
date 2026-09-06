@@ -65,8 +65,10 @@ and `IntervalStyle = postgres`. Display settings must match the dedicated pool's
 session baseline and are checked again before commit without another SQL round trip. Type
 inspection rejects polymorphic concatenation of arrays, binary data, and JSON
 values; their formatting is outside the approved scalar context. Type
-inspection can accept builtin constants such as `bytea` and `jsonb`; that does
-not add corresponding entity codecs.
+inspection can accept builtin constants such as `bytea` and `jsonb`; accepting
+a constant does not itself add an entity codec. The separately specified
+[Binary mapping](binary-values.md) supplies a bounded `bytea` codec and its
+required generated length check.
 
 The exact allowlist lives in `PgCheckCatalog`; additions require synthetic
 compiler and database evidence. The internal node representation is tied to

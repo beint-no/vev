@@ -62,6 +62,8 @@ Java records and [Kotlin `@JvmRecord` data classes](docs/kotlin-records.md) may 
 
 Larger bounded snapshots can declare a smaller batch/page ceiling with [`@VevRows`](docs/row-limits.md), while retaining the compile-verified 64 MiB result estimate.
 
+[`Binary`](docs/binary-values.md) provides immutable PostgreSQL `bytea` values with explicit `@VevBinary` byte bounds and verified database length checks. Large values use smaller row limits; small digests support typed indexes and tenant-scoped uniqueness.
+
 Compilation proves the closed mapping model, not a live database. `PgVev` performs catalog and privilege attestation at startup. It requires a dedicated pgjdbc `DataSource` whose connections already report the exact `pg_catalog` search path, UTF-8, `DateStyle = ISO, MDY`, and `IntervalStyle = postgres` baseline; Vev rejects retained temporary schemas instead of repairing pooled state. Avoiding per-transaction `search_path` changes also preserves pgjdbc's prepared-query cache. This is illustrative source, not a compatibility or production-safety promise.
 
 ## Repository layout

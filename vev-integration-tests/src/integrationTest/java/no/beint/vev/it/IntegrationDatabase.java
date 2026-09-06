@@ -66,6 +66,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : binarySchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -78,7 +83,7 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary");
         }
     }
 
@@ -110,6 +115,34 @@ final class IntegrationDatabase {
                 };
                 statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT " + name + " CHECK (" + check + ")" + suffix);
                 if (variant.equals("extra")) statement.execute("ALTER TABLE vev_it.identity_entry ADD CONSTRAINT extra_label_check CHECK (label IS NOT NULL)");
+            }
+        }
+    }
+
+    void binarySampleBound(String variant) throws SQLException {
+        String expression = switch (variant) {
+            case "valid", "renamed", "unvalidated", "unenforced", "noinherit", "extra" -> "octet_length(\"user\") <= 65536";
+            case "weakened" -> "octet_length(\"user\") <= 65537";
+            case "tightened" -> "octet_length(\"user\") <= 65535";
+            case "wrongcolumn" -> "octet_length(digest) <= 65536";
+            case "unsafe" -> "octet_length(\"user\") <= 65536 AND current_setting('application_name') IS NOT NULL";
+            case "missing" -> null;
+            default -> throw new IllegalArgumentException(variant);
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            for (String name : List.of("binary_sample_user_max", "renamed_binary_bound", "extra_binary_bound")) {
+                statement.execute("ALTER TABLE vev_it.binary_sample DROP CONSTRAINT IF EXISTS " + name);
+            }
+            if (expression != null) {
+                String name = variant.equals("renamed") ? "renamed_binary_bound" : "binary_sample_user_max";
+                String suffix = switch (variant) {
+                    case "unvalidated" -> " NOT VALID";
+                    case "unenforced" -> " NOT ENFORCED";
+                    case "noinherit" -> " NO INHERIT";
+                    default -> "";
+                };
+                statement.execute("ALTER TABLE vev_it.binary_sample ADD CONSTRAINT " + name + " CHECK (" + expression + ")" + suffix);
+                if (variant.equals("extra")) statement.execute("ALTER TABLE vev_it.binary_sample ADD CONSTRAINT extra_binary_bound CHECK (octet_length(\"user\") >= 0)");
             }
         }
     }
@@ -961,6 +994,35 @@ final class IntegrationDatabase {
                 }
             }
         }
+    }
+
+    private static List<String> binarySchemaStatements() {
+        var statements = new java.util.ArrayList<String>();
+        for (String table : List.of("binary_asset", "binary_sample", "kotlin_binary")) {
+            boolean generated = !table.equals("binary_sample");
+            String values = switch (table) {
+                case "binary_asset" -> ", content bytea NOT NULL, CONSTRAINT binary_asset_content_max CHECK (octet_length(content) <= 20971520)";
+                case "kotlin_binary" -> ", payload bytea, CONSTRAINT kotlin_binary_payload_max CHECK (octet_length(payload) <= 128)";
+                default -> ", \"user\" bytea, digest bytea, CONSTRAINT binary_sample_user_max CHECK (octet_length(\"user\") <= 65536),"
+                        + " CONSTRAINT binary_sample_digest_max CHECK (octet_length(digest) <= 32), CONSTRAINT binary_sample_digest_key UNIQUE (tenant_id, digest)";
+            };
+            String writable = "version, " + (table.equals("binary_asset") ? "content" : table.equals("kotlin_binary") ? "payload" : "\"user\", digest");
+            statements.add("CREATE TABLE vev_it." + table + " (id " + (table.equals("binary_asset") ? "bigint" : "integer")
+                    + (generated ? " GENERATED ALWAYS AS IDENTITY" : " NOT NULL")
+                    + ", tenant_id integer NOT NULL, version integer NOT NULL" + values + ", PRIMARY KEY (tenant_id, id))");
+            statements.add("ALTER TABLE vev_it." + table + " OWNER TO " + OWNER_ROLE);
+            statements.add("ALTER TABLE vev_it." + table + " ENABLE ROW LEVEL SECURITY");
+            statements.add("ALTER TABLE vev_it." + table + " FORCE ROW LEVEL SECURITY");
+            statements.add("CREATE POLICY " + table + "_tenant ON vev_it." + table
+                    + " FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer)"
+                    + " WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)");
+            statements.add("GRANT SELECT ON vev_it." + table + " TO " + APPLICATION_USER);
+            statements.add("GRANT INSERT (id, tenant_id, " + writable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
+            statements.add("GRANT UPDATE (" + writable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
+            if (generated) statements.add("GRANT USAGE ON SEQUENCE vev_it." + table + "_id_seq TO " + APPLICATION_USER);
+        }
+        statements.add("CREATE INDEX binary_sample_digest_idx ON vev_it.binary_sample (tenant_id, digest, id)");
+        return statements;
     }
 
     private static List<String> largeTextSchemaStatements() {

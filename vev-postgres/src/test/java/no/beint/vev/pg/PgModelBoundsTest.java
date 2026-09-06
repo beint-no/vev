@@ -162,6 +162,42 @@ final class PgModelBoundsTest {
     }
 
     @Test
+    void binaryColumnsRequireExactlyOneMatchingTypedDatabaseBound() {
+        var payload = new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, 32, 0, 0);
+        var bound = PgCheck.binaryMaximum("payload_max", "payload", 32);
+        var model = new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, payload), List.of(),
+                no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound))));
+        assertEquals(List.of(bound), model.frozenPlans().getFirst().checkConstraints());
+        assertEquals(-1, payload.expectedTypeModifier());
+        payload.validateValue(no.beint.vev.Binary.copyOf(new byte[32]));
+        assertThrows(IllegalArgumentException.class, () -> payload.validateValue(no.beint.vev.Binary.copyOf(new byte[33])));
+        assertThrows(IllegalArgumentException.class, () -> payload.validateValue(new byte[32]));
+        for (List<PgCheck> checks : List.<List<PgCheck>>of(List.of(), List.of(new PgCheck("payload_max", bound.expression())),
+                List.of(PgCheck.binaryMaximum("payload_max", "payload", 31)),
+                List.of(PgCheck.binaryMaximum("payload_max", "other_column", 32)),
+                List.of(bound, PgCheck.binaryMaximum("duplicate_max", "payload", 32)))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT, payload), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks))));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound)))));
+        for (var role : List.of(PgColumn.Role.ID, PgColumn.Role.TENANT, PgColumn.Role.VERSION)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.BINARY, false, role, 32, 0, 0));
+        }
+        for (int length : List.of(-1, 0, no.beint.vev.Binary.MAXIMUM_LENGTH + 1)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, length, 0, 0));
+            assertThrows(IllegalArgumentException.class, () -> PgCheck.binaryMaximum("payload_max", "payload", length));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", "payload", 32));
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", "", 32));
+        assertThrows(IllegalArgumentException.class, () -> PgCheck.binaryMaximum("payload_max", "bad.name", 32));
+        var large = new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, 2048, 0, 0);
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, large),
+                List.of(new PgUnique("payload_key", List.of(1, 2))), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID,
+                List.of(PgCheck.binaryMaximum("payload_max", "payload", 2048))))));
+    }
+
+    @Test
     void capturesRowLimitsOnceAndKeepsTheMaterializedResultBudget() {
         var bound = new java.util.concurrent.atomic.AtomicInteger(8);
         var calls = new java.util.concurrent.atomic.AtomicInteger();

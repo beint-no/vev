@@ -17,17 +17,19 @@ Format version 1 identifies itself with `format: "vev-schema"`,
 Consumers must reject unknown format versions or profiles. The resource includes:
 
 - the model's qualified name and the exact generated mapping fingerprint;
-- entity Java types, schema/table identifiers, and append-only semantics;
+- entity Java types, schema/table identifiers, append-only semantics, and maximum row counts;
 - ordered columns with boxed Java type, PostgreSQL type, nullability, structural
-  role, string length, decimal precision, scale, and sorted enum names;
+  role, string code-point or binary byte length, decimal precision, scale, and sorted enum names;
 - ordered primary-key and secondary-index columns, plus named tenant-scoped unique constraints with distinct-null and immediate enforcement semantics;
 - explicit scalar references with composite source/target columns, exact target relation, and immediate non-cascading enforcement;
+- named exact check expressions and generated binary bounds with `kind: "BINARY_MAXIMUM"`, column, and maximum bytes;
+- assigned/identity identifier strategy and the required owned-sequence contract for identity creation;
 - required enabled/forced tenant row security and its transaction-local setting;
 - the exact application insert/update column sets and the absence of delete access.
 
 The profile also requires the catalog restrictions in
 [the schema pipeline](aot-schema-pipeline.md#3-schema-verification), including
-absence of column defaults, identity generation, extra constraints, and undeclared
+absence of arbitrary column defaults, undeclared identity generation, extra constraints, and undeclared
 indexes. The manifest is a reviewable description of generated expectations, not a
 DDL script or a complete description of a live database. It deliberately does not
 choose deployment role names, grant credentials, install a fingerprint, or run
