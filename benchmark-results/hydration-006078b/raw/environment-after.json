@@ -1,0 +1,16 @@
+{
+  "commit": "006078b85bedbc2440d169dce2e73417c1dddcfc",
+  "archiveSha256": {
+    "after/vev-benchmark-vev/lib/HikariCP-7.1.0.jar": "2be45c641b841e81df87292e181f2c203500c5f0e9a1676f135927387f3cf40b",
+    "after/vev-benchmark-vev/lib/checker-qual-3.55.1.jar": "857658c8bdcbff794949a8d9922f88d63ee3751c203c7cd7d21ea97f9e745288",
+    "after/vev-benchmark-vev/lib/commons-math3-3.6.1.jar": "1e56d7b058d28b65abd256b8458e3885b674c1d588fa43cd7d1cbb9c7ef2b308",
+    "after/vev-benchmark-vev/lib/jmh-core-1.37.jar": "dc0eaf2bbf0036a70b60798c785d6e03a9daf06b68b8edb0f1ba9eb3421baeb3",
+    "after/vev-benchmark-vev/lib/jopt-simple-5.0.4.jar": "df26cc58f235f477db07f753ba5a3ab243ebe5789d9f89ecf68dd62ea9a66c28",
+    "after/vev-benchmark-vev/lib/postgresql-42.7.13.jar": "6e0e4cc2d8cae902084f8a2b18728b073a6fd9d1f87c9d8bff8f298c18185b93",
+    "after/vev-benchmark-vev/lib/slf4j-api-2.0.18.jar": "44508fd1576500688c790b190acdd16fec4f8c79a3e0b900afd70503cf055f55",
+    "after/vev-benchmark-vev/lib/slf4j-nop-2.0.18.jar": "40e6be27d583d884183ca466cd20203112691f2a075a650e9e8d5c2e51aa5f49",
+    "after/vev-benchmark-vev/lib/vev-benchmark-vev-0.2.0-SNAPSHOT.jar": "1ee7f70cbe627f9fdbf5c091b03a877393c31f6d8980fc25f7934fead8dada62",
+    "after/vev-benchmark-vev/lib/vev-core-0.2.0-SNAPSHOT.jar": "6ed6d5b69bac38f24a3609801c9b0764480380c85a6e2f659a12f02c3300a8db",
+    "after/vev-benchmark-vev/lib/vev-postgres-0.2.0-SNAPSHOT.jar": "8e230c6bc6a22223dd8663dd2307ca7947e40a1286522f9102e102113257115c"
+  }
+}

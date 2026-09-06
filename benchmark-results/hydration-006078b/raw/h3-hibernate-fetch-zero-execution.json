@@ -1,0 +1,30 @@
+{
+  "started": "2026-09-06T12:14:07.001215+00:00",
+  "finished": "2026-09-06T12:15:31.492337+00:00",
+  "returncode": 0,
+  "revision": "reference",
+  "module": "vev-benchmark-hibernate",
+  "arguments": [
+    "^no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.(findOne|findMultiple256)$",
+    "-f",
+    "3",
+    "-wi",
+    "5",
+    "-i",
+    "8",
+    "-w",
+    "1s",
+    "-r",
+    "1s",
+    "-t",
+    "1",
+    "-bm",
+    "sample",
+    "-prof",
+    "gc",
+    "-rf",
+    "json",
+    "-rff",
+    "h3-hibernate-fetch-zero.json"
+  ]
+}

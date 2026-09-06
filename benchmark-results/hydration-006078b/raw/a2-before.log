@@ -1,0 +1,925 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 27, OpenJDK 64-Bit Server VM, 27+35-2325
+# VM invoker: <JDK_HOME>/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 5 iterations, 1 s each
+# Measurement: 8 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Sampling time
+# Benchmark: no.beint.vev.benchmark.VevBenchmark.findMultiple256
+
+# Run progress: 0,00% complete, ETA 00:01:18
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 461,685 ±(99.9%) 12,320 us/op
+# Warmup Iteration   2: 410,799 ±(99.9%) 4,415 us/op
+# Warmup Iteration   3: 404,602 ±(99.9%) 2,018 us/op
+# Warmup Iteration   4: 403,015 ±(99.9%) 1,222 us/op
+# Warmup Iteration   5: 400,143 ±(99.9%) 1,231 us/op
+Iteration   1: 400,959 ±(99.9%) 1,186 us/op
+                 gc.alloc.rate:      359,875 MB/sec
+                 gc.alloc.rate.norm: 151460,836 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              373,248 us/op
+                 p0.50:              397,824 us/op
+                 p0.90:              416,768 us/op
+                 p0.95:              425,472 us/op
+                 p0.99:              440,105 us/op
+                 p0.999:             681,382 us/op
+                 p0.9999:            727,040 us/op
+                 p1.00:              727,040 us/op
+
+Iteration   2: 400,074 ±(99.9%) 1,129 us/op
+                 gc.alloc.rate:      360,666 MB/sec
+                 gc.alloc.rate.norm: 151461,213 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              357,376 us/op
+                 p0.50:              397,312 us/op
+                 p0.90:              417,792 us/op
+                 p0.95:              424,448 us/op
+                 p0.99:              439,245 us/op
+                 p0.999:             663,828 us/op
+                 p0.9999:            679,936 us/op
+                 p1.00:              679,936 us/op
+
+Iteration   3: 401,054 ±(99.9%) 1,098 us/op
+                 gc.alloc.rate:      359,790 MB/sec
+                 gc.alloc.rate.norm: 151461,030 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              372,736 us/op
+                 p0.50:              397,824 us/op
+                 p0.90:              418,304 us/op
+                 p0.95:              425,472 us/op
+                 p0.99:              443,377 us/op
+                 p0.999:             650,234 us/op
+                 p0.9999:            663,552 us/op
+                 p1.00:              663,552 us/op
+
+Iteration   4: 400,829 ±(99.9%) 1,185 us/op
+                 gc.alloc.rate:      359,984 MB/sec
+                 gc.alloc.rate.norm: 151461,230 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              359,936 us/op
+                 p0.50:              397,824 us/op
+                 p0.90:              419,328 us/op
+                 p0.95:              427,008 us/op
+                 p0.99:              442,312 us/op
+                 p0.999:             652,451 us/op
+                 p0.9999:            671,744 us/op
+                 p1.00:              671,744 us/op
+
+Iteration   5: 400,432 ±(99.9%) 1,074 us/op
+                 gc.alloc.rate:      360,347 MB/sec
+                 gc.alloc.rate.norm: 151460,744 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              362,496 us/op
+                 p0.50:              397,824 us/op
+                 p0.90:              417,280 us/op
+                 p0.95:              423,424 us/op
+                 p0.99:              439,695 us/op
+                 p0.999:             659,276 us/op
+                 p0.9999:            672,768 us/op
+                 p1.00:              672,768 us/op
+
+Iteration   6: 399,858 ±(99.9%) 1,201 us/op
+                 gc.alloc.rate:      360,867 MB/sec
+                 gc.alloc.rate.norm: 151461,024 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              358,912 us/op
+                 p0.50:              397,312 us/op
+                 p0.90:              417,280 us/op
+                 p0.95:              425,472 us/op
+                 p0.99:              438,656 us/op
+                 p0.999:             675,763 us/op
+                 p0.9999:            688,128 us/op
+                 p1.00:              688,128 us/op
+
+Iteration   7: 401,093 ±(99.9%) 1,091 us/op
+                 gc.alloc.rate:      359,760 MB/sec
+                 gc.alloc.rate.norm: 151461,016 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              369,152 us/op
+                 p0.50:              397,824 us/op
+                 p0.90:              418,304 us/op
+                 p0.95:              424,960 us/op
+                 p0.99:              440,320 us/op
+                 p0.999:             649,728 us/op
+                 p0.9999:            667,648 us/op
+                 p1.00:              667,648 us/op
+
+Iteration   8: 397,175 ±(99.9%) 1,253 us/op
+                 gc.alloc.rate:      363,013 MB/sec
+                 gc.alloc.rate.norm: 151558,725 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              356,864 us/op
+                 p0.50:              395,776 us/op
+                 p0.90:              415,744 us/op
+                 p0.95:              423,168 us/op
+                 p0.99:              444,109 us/op
+                 p0.999:             668,662 us/op
+                 p0.9999:            691,200 us/op
+                 p1.00:              691,200 us/op
+
+
+# Run progress: 16,67% complete, ETA 00:01:07
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 458,907 ±(99.9%) 11,871 us/op
+# Warmup Iteration   2: 408,596 ±(99.9%) 4,389 us/op
+# Warmup Iteration   3: 404,410 ±(99.9%) 1,958 us/op
+# Warmup Iteration   4: 398,813 ±(99.9%) 1,225 us/op
+# Warmup Iteration   5: 399,623 ±(99.9%) 1,220 us/op
+Iteration   1: 398,751 ±(99.9%) 1,230 us/op
+                 gc.alloc.rate:      361,935 MB/sec
+                 gc.alloc.rate.norm: 151492,966 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              354,816 us/op
+                 p0.50:              396,288 us/op
+                 p0.90:              416,256 us/op
+                 p0.95:              422,912 us/op
+                 p0.99:              437,432 us/op
+                 p0.999:             685,142 us/op
+                 p0.9999:            709,632 us/op
+                 p1.00:              709,632 us/op
+
+Iteration   2: 399,667 ±(99.9%) 0,997 us/op
+                 gc.alloc.rate:      361,103 MB/sec
+                 gc.alloc.rate.norm: 151492,812 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              368,640 us/op
+                 p0.50:              396,800 us/op
+                 p0.90:              417,280 us/op
+                 p0.95:              423,859 us/op
+                 p0.99:              440,202 us/op
+                 p0.999:             589,824 us/op
+                 p0.9999:            608,256 us/op
+                 p1.00:              608,256 us/op
+
+Iteration   3: 398,881 ±(99.9%) 1,270 us/op
+                 gc.alloc.rate:      361,826 MB/sec
+                 gc.alloc.rate.norm: 151493,075 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              356,352 us/op
+                 p0.50:              396,288 us/op
+                 p0.90:              417,792 us/op
+                 p0.95:              423,424 us/op
+                 p0.99:              436,736 us/op
+                 p0.999:             673,729 us/op
+                 p0.9999:            709,632 us/op
+                 p1.00:              709,632 us/op
+
+Iteration   4: 399,014 ±(99.9%) 1,041 us/op
+                 gc.alloc.rate:      361,703 MB/sec
+                 gc.alloc.rate.norm: 151492,694 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              366,592 us/op
+                 p0.50:              396,288 us/op
+                 p0.90:              415,232 us/op
+                 p0.95:              421,888 us/op
+                 p0.99:              434,176 us/op
+                 p0.999:             629,555 us/op
+                 p0.9999:            644,096 us/op
+                 p1.00:              644,096 us/op
+
+Iteration   5: 399,189 ±(99.9%) 1,147 us/op
+                 gc.alloc.rate:      361,544 MB/sec
+                 gc.alloc.rate.norm: 151493,028 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              359,936 us/op
+                 p0.50:              396,800 us/op
+                 p0.90:              416,768 us/op
+                 p0.95:              423,936 us/op
+                 p0.99:              440,243 us/op
+                 p0.999:             675,210 us/op
+                 p0.9999:            694,272 us/op
+                 p1.00:              694,272 us/op
+
+Iteration   6: 400,404 ±(99.9%) 1,172 us/op
+                 gc.alloc.rate:      360,444 MB/sec
+                 gc.alloc.rate.norm: 151492,862 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              370,176 us/op
+                 p0.50:              397,312 us/op
+                 p0.90:              416,768 us/op
+                 p0.95:              423,936 us/op
+                 p0.99:              442,573 us/op
+                 p0.999:             674,611 us/op
+                 p0.9999:            684,032 us/op
+                 p1.00:              684,032 us/op
+
+Iteration   7: 397,139 ±(99.9%) 1,201 us/op
+                 gc.alloc.rate:      363,408 MB/sec
+                 gc.alloc.rate.norm: 151492,941 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              356,864 us/op
+                 p0.50:              394,752 us/op
+                 p0.90:              415,232 us/op
+                 p0.95:              422,400 us/op
+                 p0.99:              436,029 us/op
+                 p0.999:             665,924 us/op
+                 p0.9999:            677,888 us/op
+                 p1.00:              677,888 us/op
+
+Iteration   8: 400,129 ±(99.9%) 1,165 us/op
+                 gc.alloc.rate:      360,418 MB/sec
+                 gc.alloc.rate.norm: 151547,023 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              371,200 us/op
+                 p0.50:              396,800 us/op
+                 p0.90:              417,792 us/op
+                 p0.95:              425,984 us/op
+                 p0.99:              443,290 us/op
+                 p0.999:             653,148 us/op
+                 p0.9999:            664,576 us/op
+                 p1.00:              664,576 us/op
+
+
+# Run progress: 33,33% complete, ETA 00:00:53
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 464,150 ±(99.9%) 12,264 us/op
+# Warmup Iteration   2: 413,292 ±(99.9%) 4,259 us/op
+# Warmup Iteration   3: 403,401 ±(99.9%) 1,864 us/op
+# Warmup Iteration   4: 400,164 ±(99.9%) 1,266 us/op
+# Warmup Iteration   5: 399,455 ±(99.9%) 1,167 us/op
+Iteration   1: 399,355 ±(99.9%) 1,097 us/op
+                 gc.alloc.rate:      361,438 MB/sec
+                 gc.alloc.rate.norm: 151508,879 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              366,592 us/op
+                 p0.50:              396,288 us/op
+                 p0.90:              415,232 us/op
+                 p0.95:              424,448 us/op
+                 p0.99:              442,880 us/op
+                 p0.999:             644,833 us/op
+                 p0.9999:            667,648 us/op
+                 p1.00:              667,648 us/op
+
+Iteration   2: 399,094 ±(99.9%) 1,115 us/op
+                 gc.alloc.rate:      361,669 MB/sec
+                 gc.alloc.rate.norm: 151509,099 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              360,960 us/op
+                 p0.50:              396,800 us/op
+                 p0.90:              416,256 us/op
+                 p0.95:              424,960 us/op
+                 p0.99:              440,832 us/op
+                 p0.999:             650,121 us/op
+                 p0.9999:            703,488 us/op
+                 p1.00:              703,488 us/op
+
+Iteration   3: 400,844 ±(99.9%) 1,137 us/op
+                 gc.alloc.rate:      360,097 MB/sec
+                 gc.alloc.rate.norm: 151508,987 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              358,912 us/op
+                 p0.50:              397,824 us/op
+                 p0.90:              417,792 us/op
+                 p0.95:              425,472 us/op
+                 p0.99:              442,368 us/op
+                 p0.999:             667,638 us/op
+                 p0.9999:            674,816 us/op
+                 p1.00:              674,816 us/op
+
+Iteration   4: 414,605 ±(99.9%) 5,702 us/op
+                 gc.alloc.rate:      348,118 MB/sec
+                 gc.alloc.rate.norm: 151519,549 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              367,616 us/op
+                 p0.50:              397,312 us/op
+                 p0.90:              424,960 us/op
+                 p0.95:              501,760 us/op
+                 p0.99:              747,213 us/op
+                 p0.999:             1794,068 us/op
+                 p0.9999:            1900,544 us/op
+                 p1.00:              1900,544 us/op
+
+Iteration   5: 400,021 ±(99.9%) 1,114 us/op
+                 gc.alloc.rate:      360,842 MB/sec
+                 gc.alloc.rate.norm: 151508,978 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              363,520 us/op
+                 p0.50:              396,800 us/op
+                 p0.90:              416,256 us/op
+                 p0.95:              423,424 us/op
+                 p0.99:              440,832 us/op
+                 p0.999:             652,288 us/op
+                 p0.9999:            659,456 us/op
+                 p1.00:              659,456 us/op
+
+Iteration   6: 398,321 ±(99.9%) 1,178 us/op
+                 gc.alloc.rate:      362,367 MB/sec
+                 gc.alloc.rate.norm: 151508,840 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              360,960 us/op
+                 p0.50:              395,776 us/op
+                 p0.90:              413,696 us/op
+                 p0.95:              421,888 us/op
+                 p0.99:              435,021 us/op
+                 p0.999:             685,578 us/op
+                 p0.9999:            707,584 us/op
+                 p1.00:              707,584 us/op
+
+Iteration   7: 398,698 ±(99.9%) 1,133 us/op
+                 gc.alloc.rate:      362,035 MB/sec
+                 gc.alloc.rate.norm: 151509,065 B/op
+                 gc.count:           5,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              358,912 us/op
+                 p0.50:              396,288 us/op
+                 p0.90:              414,208 us/op
+                 p0.95:              420,864 us/op
+                 p0.99:              439,721 us/op
+                 p0.999:             662,424 us/op
+                 p0.9999:            716,800 us/op
+                 p1.00:              716,800 us/op
+
+Iteration   8: 399,502 ±(99.9%) 1,156 us/op
+                 gc.alloc.rate:      360,981 MB/sec
+                 gc.alloc.rate.norm: 151562,954 B/op
+                 gc.count:           6,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              358,912 us/op
+                 p0.50:              396,800 us/op
+                 p0.90:              416,768 us/op
+                 p0.95:              424,448 us/op
+                 p0.99:              440,033 us/op
+                 p0.999:             659,137 us/op
+                 p0.9999:            679,936 us/op
+                 p1.00:              679,936 us/op
+
+
+
+Result "no.beint.vev.benchmark.VevBenchmark.findMultiple256":
+  N = 60362
+  mean =    400,187 ±(99.9%) 0,327 us/op
+
+  Histogram, us/op:
+    [   0,000,  125,000) = 0 
+    [ 125,000,  250,000) = 0 
+    [ 250,000,  375,000) = 915 
+    [ 375,000,  500,000) = 59192 
+    [ 500,000,  625,000) = 96 
+    [ 625,000,  750,000) = 135 
+    [ 750,000,  875,000) = 13 
+    [ 875,000, 1000,000) = 2 
+    [1000,000, 1125,000) = 3 
+    [1125,000, 1250,000) = 0 
+    [1250,000, 1375,000) = 1 
+    [1375,000, 1500,000) = 1 
+    [1500,000, 1625,000) = 1 
+    [1625,000, 1750,000) = 1 
+    [1750,000, 1875,000) = 0 
+
+  Percentiles, us/op:
+      p(0,0000) =    354,816 us/op
+     p(50,0000) =    396,800 us/op
+     p(90,0000) =    416,768 us/op
+     p(95,0000) =    424,448 us/op
+     p(99,0000) =    442,368 us/op
+     p(99,9000) =    679,936 us/op
+     p(99,9900) =   1320,603 us/op
+     p(99,9990) =   1900,544 us/op
+     p(99,9999) =   1900,544 us/op
+    p(100,0000) =   1900,544 us/op
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findMultiple256:gc.alloc.rate":
+  360,593 ±(99.9%) 2,182 MB/sec [Average]
+  (min, avg, max) = (348,118, 360,593, 363,408), stdev = 2,837
+  CI (99.9%): [358,411, 362,775] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findMultiple256:gc.alloc.rate.norm":
+  151496,649 ±(99.9%) 23,355 B/op [Average]
+  (min, avg, max) = (151460,744, 151496,649, 151562,954), stdev = 30,368
+  CI (99.9%): [151473,294, 151520,004] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findMultiple256:gc.count":
+  136,000 ±(99.9%) 0,001 counts [Sum]
+  (min, avg, max) = (5,000, 5,667, 6,000), stdev = 0,482
+  CI (99.9%): [136,000, 136,000] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findMultiple256:gc.time":
+  31,000 ±(99.9%) 0,001 ms [Sum]
+  (min, avg, max) = (1,000, 1,292, 2,000), stdev = 0,464
+  CI (99.9%): [31,000, 31,000] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 27, OpenJDK 64-Bit Server VM, 27+35-2325
+# VM invoker: <JDK_HOME>/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 5 iterations, 1 s each
+# Measurement: 8 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Sampling time
+# Benchmark: no.beint.vev.benchmark.VevBenchmark.findOne
+
+# Run progress: 50,00% complete, ETA 00:00:40
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 189,995 ±(99.9%) 3,196 us/op
+# Warmup Iteration   2: 174,238 ±(99.9%) 1,628 us/op
+# Warmup Iteration   3: 173,806 ±(99.9%) 1,509 us/op
+# Warmup Iteration   4: 171,270 ±(99.9%) 1,251 us/op
+# Warmup Iteration   5: 171,152 ±(99.9%) 1,011 us/op
+Iteration   1: 172,325 ±(99.9%) 1,050 us/op
+                 gc.alloc.rate:      55,446 MB/sec
+                 gc.alloc.rate.norm: 10031,775 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            3,000 ms
+                 p0.00:              146,176 us/op
+                 p0.50:              170,240 us/op
+                 p0.90:              186,112 us/op
+                 p0.95:              191,578 us/op
+                 p0.99:              202,240 us/op
+                 p0.999:             220,502 us/op
+                 p0.9999:            1419,264 us/op
+                 p1.00:              1419,264 us/op
+
+Iteration   2: 174,090 ±(99.9%) 0,796 us/op
+                 gc.alloc.rate:      55,068 MB/sec
+                 gc.alloc.rate.norm: 10064,772 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              148,480 us/op
+                 p0.50:              172,288 us/op
+                 p0.90:              188,160 us/op
+                 p0.95:              193,792 us/op
+                 p0.99:              204,288 us/op
+                 p0.999:             228,211 us/op
+                 p0.9999:            1157,120 us/op
+                 p1.00:              1157,120 us/op
+
+Iteration   3: 171,742 ±(99.9%) 0,561 us/op
+                 gc.alloc.rate:      55,799 MB/sec
+                 gc.alloc.rate.norm: 10060,960 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              140,544 us/op
+                 p0.50:              169,984 us/op
+                 p0.90:              185,600 us/op
+                 p0.95:              190,720 us/op
+                 p0.99:              201,728 us/op
+                 p0.999:             258,615 us/op
+                 p0.9999:            531,456 us/op
+                 p1.00:              531,456 us/op
+
+Iteration   4: 171,582 ±(99.9%) 0,510 us/op
+                 gc.alloc.rate:      55,833 MB/sec
+                 gc.alloc.rate.norm: 10057,518 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              143,360 us/op
+                 p0.50:              169,472 us/op
+                 p0.90:              185,600 us/op
+                 p0.95:              191,488 us/op
+                 p0.99:              203,054 us/op
+                 p0.999:             229,738 us/op
+                 p0.9999:            491,008 us/op
+                 p1.00:              491,008 us/op
+
+Iteration   5: 170,394 ±(99.9%) 0,548 us/op
+                 gc.alloc.rate:      56,223 MB/sec
+                 gc.alloc.rate.norm: 10057,506 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            ≈ 0 ms
+                 p0.00:              145,664 us/op
+                 p0.50:              167,936 us/op
+                 p0.90:              184,064 us/op
+                 p0.95:              190,464 us/op
+                 p0.99:              203,520 us/op
+                 p0.999:             261,566 us/op
+                 p0.9999:            507,392 us/op
+                 p1.00:              507,392 us/op
+
+Iteration   6: 170,920 ±(99.9%) 0,487 us/op
+                 gc.alloc.rate:      56,022 MB/sec
+                 gc.alloc.rate.norm: 10052,583 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              146,688 us/op
+                 p0.50:              168,960 us/op
+                 p0.90:              184,320 us/op
+                 p0.95:              190,195 us/op
+                 p0.99:              202,749 us/op
+                 p0.999:             232,902 us/op
+                 p0.9999:            461,824 us/op
+                 p1.00:              461,824 us/op
+
+Iteration   7: 170,795 ±(99.9%) 0,525 us/op
+                 gc.alloc.rate:      56,094 MB/sec
+                 gc.alloc.rate.norm: 10057,478 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            ≈ 0 ms
+                 p0.00:              143,872 us/op
+                 p0.50:              168,704 us/op
+                 p0.90:              185,344 us/op
+                 p0.95:              191,744 us/op
+                 p0.99:              202,982 us/op
+                 p0.999:             228,232 us/op
+                 p0.9999:            485,888 us/op
+                 p1.00:              485,888 us/op
+
+Iteration   8: 170,725 ±(99.9%) 0,511 us/op
+                 gc.alloc.rate:      56,173 MB/sec
+                 gc.alloc.rate.norm: 10080,486 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              148,736 us/op
+                 p0.50:              168,704 us/op
+                 p0.90:              184,576 us/op
+                 p0.95:              189,952 us/op
+                 p0.99:              201,485 us/op
+                 p0.999:             218,971 us/op
+                 p0.9999:            474,624 us/op
+                 p1.00:              474,624 us/op
+
+
+# Run progress: 66,67% complete, ETA 00:00:26
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 187,753 ±(99.9%) 3,064 us/op
+# Warmup Iteration   2: 171,303 ±(99.9%) 1,814 us/op
+# Warmup Iteration   3: 173,194 ±(99.9%) 1,805 us/op
+# Warmup Iteration   4: 174,131 ±(99.9%) 1,214 us/op
+# Warmup Iteration   5: 172,940 ±(99.9%) 1,218 us/op
+Iteration   1: 170,796 ±(99.9%) 0,519 us/op
+                 gc.alloc.rate:      55,919 MB/sec
+                 gc.alloc.rate.norm: 10028,860 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              145,408 us/op
+                 p0.50:              168,704 us/op
+                 p0.90:              184,064 us/op
+                 p0.95:              189,696 us/op
+                 p0.99:              200,960 us/op
+                 p0.999:             215,782 us/op
+                 p0.9999:            526,336 us/op
+                 p1.00:              526,336 us/op
+
+Iteration   2: 169,797 ±(99.9%) 0,523 us/op
+                 gc.alloc.rate:      56,235 MB/sec
+                 gc.alloc.rate.norm: 10025,372 B/op
+                 gc.count:           4,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              145,152 us/op
+                 p0.50:              167,936 us/op
+                 p0.90:              182,784 us/op
+                 p0.95:              188,160 us/op
+                 p0.99:              200,192 us/op
+                 p0.999:             236,847 us/op
+                 p0.9999:            485,376 us/op
+                 p1.00:              485,376 us/op
+
+Iteration   3: 171,920 ±(99.9%) 0,534 us/op
+                 gc.alloc.rate:      55,542 MB/sec
+                 gc.alloc.rate.norm: 10025,503 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              146,176 us/op
+                 p0.50:              169,984 us/op
+                 p0.90:              185,344 us/op
+                 p0.95:              190,976 us/op
+                 p0.99:              202,578 us/op
+                 p0.999:             235,679 us/op
+                 p0.9999:            523,776 us/op
+                 p1.00:              523,776 us/op
+
+Iteration   4: 170,155 ±(99.9%) 0,562 us/op
+                 gc.alloc.rate:      56,116 MB/sec
+                 gc.alloc.rate.norm: 10025,508 B/op
+                 gc.count:           4,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              142,848 us/op
+                 p0.50:              167,936 us/op
+                 p0.90:              184,576 us/op
+                 p0.95:              190,208 us/op
+                 p0.99:              203,008 us/op
+                 p0.999:             262,136 us/op
+                 p0.9999:            462,848 us/op
+                 p1.00:              462,848 us/op
+
+Iteration   5: 171,332 ±(99.9%) 0,512 us/op
+                 gc.alloc.rate:      55,733 MB/sec
+                 gc.alloc.rate.norm: 10025,435 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              147,968 us/op
+                 p0.50:              169,216 us/op
+                 p0.90:              185,088 us/op
+                 p0.95:              190,976 us/op
+                 p0.99:              201,984 us/op
+                 p0.999:             227,156 us/op
+                 p0.9999:            484,352 us/op
+                 p1.00:              484,352 us/op
+
+Iteration   6: 169,760 ±(99.9%) 0,552 us/op
+                 gc.alloc.rate:      56,248 MB/sec
+                 gc.alloc.rate.norm: 10025,473 B/op
+                 gc.count:           4,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              141,312 us/op
+                 p0.50:              167,680 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              189,440 us/op
+                 p0.99:              202,665 us/op
+                 p0.999:             231,102 us/op
+                 p0.9999:            479,744 us/op
+                 p1.00:              479,744 us/op
+
+Iteration   7: 171,316 ±(99.9%) 0,515 us/op
+                 gc.alloc.rate:      55,742 MB/sec
+                 gc.alloc.rate.norm: 10025,416 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            ≈ 0 ms
+                 p0.00:              147,200 us/op
+                 p0.50:              169,216 us/op
+                 p0.90:              184,832 us/op
+                 p0.95:              190,720 us/op
+                 p0.99:              201,472 us/op
+                 p0.999:             226,940 us/op
+                 p0.9999:            445,952 us/op
+                 p1.00:              445,952 us/op
+
+Iteration   8: 169,719 ±(99.9%) 0,541 us/op
+                 gc.alloc.rate:      56,324 MB/sec
+                 gc.alloc.rate.norm: 10048,388 B/op
+                 gc.count:           4,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              145,152 us/op
+                 p0.50:              167,424 us/op
+                 p0.90:              183,424 us/op
+                 p0.95:              189,184 us/op
+                 p0.99:              200,614 us/op
+                 p0.999:             256,244 us/op
+                 p0.9999:            485,376 us/op
+                 p1.00:              485,376 us/op
+
+
+# Run progress: 83,33% complete, ETA 00:00:13
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/before/vev-benchmark-vev/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: 188,952 ±(99.9%) 2,997 us/op
+# Warmup Iteration   2: 172,534 ±(99.9%) 1,672 us/op
+# Warmup Iteration   3: 172,351 ±(99.9%) 1,484 us/op
+# Warmup Iteration   4: 170,412 ±(99.9%) 1,197 us/op
+# Warmup Iteration   5: 168,788 ±(99.9%) 0,969 us/op
+Iteration   1: 171,361 ±(99.9%) 1,194 us/op
+                 gc.alloc.rate:      55,897 MB/sec
+                 gc.alloc.rate.norm: 10057,215 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            3,000 ms
+                 p0.00:              144,640 us/op
+                 p0.50:              167,680 us/op
+                 p0.90:              184,320 us/op
+                 p0.95:              192,512 us/op
+                 p0.99:              226,947 us/op
+                 p0.999:             392,280 us/op
+                 p0.9999:            1462,272 us/op
+                 p1.00:              1462,272 us/op
+
+Iteration   2: 170,806 ±(99.9%) 0,779 us/op
+                 gc.alloc.rate:      56,033 MB/sec
+                 gc.alloc.rate.norm: 10048,461 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              147,200 us/op
+                 p0.50:              168,192 us/op
+                 p0.90:              184,064 us/op
+                 p0.95:              189,952 us/op
+                 p0.99:              203,054 us/op
+                 p0.999:             255,249 us/op
+                 p0.9999:            1089,536 us/op
+                 p1.00:              1089,536 us/op
+
+Iteration   3: 171,866 ±(99.9%) 0,549 us/op
+                 gc.alloc.rate:      55,654 MB/sec
+                 gc.alloc.rate.norm: 10041,565 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              143,872 us/op
+                 p0.50:              169,728 us/op
+                 p0.90:              186,880 us/op
+                 p0.95:              193,024 us/op
+                 p0.99:              204,544 us/op
+                 p0.999:             245,008 us/op
+                 p0.9999:            501,248 us/op
+                 p1.00:              501,248 us/op
+
+Iteration   4: 170,373 ±(99.9%) 0,492 us/op
+                 gc.alloc.rate:      56,142 MB/sec
+                 gc.alloc.rate.norm: 10041,489 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            ≈ 0 ms
+                 p0.00:              143,616 us/op
+                 p0.50:              168,192 us/op
+                 p0.90:              183,296 us/op
+                 p0.95:              189,696 us/op
+                 p0.99:              201,882 us/op
+                 p0.999:             243,415 us/op
+                 p0.9999:            467,456 us/op
+                 p1.00:              467,456 us/op
+
+Iteration   5: 170,377 ±(99.9%) 0,755 us/op
+                 gc.alloc.rate:      56,154 MB/sec
+                 gc.alloc.rate.norm: 10045,089 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              145,152 us/op
+                 p0.50:              167,424 us/op
+                 p0.90:              183,040 us/op
+                 p0.95:              189,952 us/op
+                 p0.99:              213,637 us/op
+                 p0.999:             454,928 us/op
+                 p0.9999:            569,344 us/op
+                 p1.00:              569,344 us/op
+
+Iteration   6: 170,022 ±(99.9%) 0,497 us/op
+                 gc.alloc.rate:      56,270 MB/sec
+                 gc.alloc.rate.norm: 10043,452 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              145,152 us/op
+                 p0.50:              167,680 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              189,952 us/op
+                 p0.99:              201,216 us/op
+                 p0.999:             222,017 us/op
+                 p0.9999:            494,592 us/op
+                 p1.00:              494,592 us/op
+
+Iteration   7: 169,165 ±(99.9%) 0,483 us/op
+                 gc.alloc.rate:      56,544 MB/sec
+                 gc.alloc.rate.norm: 10041,330 B/op
+                 gc.count:           3,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              146,944 us/op
+                 p0.50:              166,912 us/op
+                 p0.90:              182,528 us/op
+                 p0.95:              188,416 us/op
+                 p0.99:              199,680 us/op
+                 p0.999:             238,603 us/op
+                 p0.9999:            446,464 us/op
+                 p1.00:              446,464 us/op
+
+Iteration   8: 168,314 ±(99.9%) 0,452 us/op
+                 gc.alloc.rate:      56,894 MB/sec
+                 gc.alloc.rate.norm: 10063,923 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            ≈ 0 ms
+                 p0.00:              148,992 us/op
+                 p0.50:              166,400 us/op
+                 p0.90:              179,968 us/op
+                 p0.95:              185,344 us/op
+                 p0.99:              199,936 us/op
+                 p0.999:             222,729 us/op
+                 p0.9999:            500,224 us/op
+                 p1.00:              500,224 us/op
+
+
+
+Result "no.beint.vev.benchmark.VevBenchmark.findOne":
+  N = 141409
+  mean =    170,811 ±(99.9%) 0,128 us/op
+
+  Histogram, us/op:
+    [   0,000,  125,000) = 0 
+    [ 125,000,  250,000) = 141254 
+    [ 250,000,  375,000) = 80 
+    [ 375,000,  500,000) = 56 
+    [ 500,000,  625,000) = 11 
+    [ 625,000,  750,000) = 1 
+    [ 750,000,  875,000) = 1 
+    [ 875,000, 1000,000) = 0 
+    [1000,000, 1125,000) = 1 
+    [1125,000, 1250,000) = 1 
+    [1250,000, 1375,000) = 2 
+    [1375,000, 1500,000) = 2 
+    [1500,000, 1625,000) = 0 
+    [1625,000, 1750,000) = 0 
+    [1750,000, 1875,000) = 0 
+
+  Percentiles, us/op:
+      p(0,0000) =    140,544 us/op
+     p(50,0000) =    168,704 us/op
+     p(90,0000) =    184,576 us/op
+     p(95,0000) =    190,464 us/op
+     p(99,0000) =    202,752 us/op
+     p(99,9000) =    257,057 us/op
+     p(99,9900) =    525,975 us/op
+     p(99,9990) =   1444,462 us/op
+     p(99,9999) =   1462,272 us/op
+    p(100,0000) =   1462,272 us/op
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findOne:gc.alloc.rate":
+  56,004 ±(99.9%) 0,290 MB/sec [Average]
+  (min, avg, max) = (55,068, 56,004, 56,894), stdev = 0,377
+  CI (99.9%): [55,715, 56,294] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findOne:gc.alloc.rate.norm":
+  10044,815 ±(99.9%) 12,138 B/op [Average]
+  (min, avg, max) = (10025,372, 10044,815, 10080,486), stdev = 15,783
+  CI (99.9%): [10032,677, 10056,953] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findOne:gc.count":
+  66,000 ±(99.9%) 0,001 counts [Sum]
+  (min, avg, max) = (2,000, 2,750, 4,000), stdev = 0,737
+  CI (99.9%): [66,000, 66,000] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.VevBenchmark.findOne:gc.time":
+  23,000 ±(99.9%) 0,001 ms [Sum]
+  (min, avg, max) = (≈ 0, 0,958, 3,000), stdev = 0,751
+  CI (99.9%): [23,000, 23,000] (assumes normal distribution)
+
+
+# Run complete. Total time: 00:01:20
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                                          Mode     Cnt       Score    Error   Units
+VevBenchmark.findMultiple256                     sample   60362     400,187 ±  0,327   us/op
+VevBenchmark.findMultiple256:gc.alloc.rate       sample      24     360,593 ±  2,182  MB/sec
+VevBenchmark.findMultiple256:gc.alloc.rate.norm  sample      24  151496,649 ± 23,355    B/op
+VevBenchmark.findMultiple256:gc.count            sample      24     136,000           counts
+VevBenchmark.findMultiple256:gc.time             sample      24      31,000               ms
+VevBenchmark.findMultiple256:p0.00               sample             354,816            us/op
+VevBenchmark.findMultiple256:p0.50               sample             396,800            us/op
+VevBenchmark.findMultiple256:p0.90               sample             416,768            us/op
+VevBenchmark.findMultiple256:p0.95               sample             424,448            us/op
+VevBenchmark.findMultiple256:p0.99               sample             442,368            us/op
+VevBenchmark.findMultiple256:p0.999              sample             679,936            us/op
+VevBenchmark.findMultiple256:p0.9999             sample            1320,603            us/op
+VevBenchmark.findMultiple256:p1.00               sample            1900,544            us/op
+VevBenchmark.findOne                             sample  141409     170,811 ±  0,128   us/op
+VevBenchmark.findOne:gc.alloc.rate               sample      24      56,004 ±  0,290  MB/sec
+VevBenchmark.findOne:gc.alloc.rate.norm          sample      24   10044,815 ± 12,138    B/op
+VevBenchmark.findOne:gc.count                    sample      24      66,000           counts
+VevBenchmark.findOne:gc.time                     sample      24      23,000               ms
+VevBenchmark.findOne:p0.00                       sample             140,544            us/op
+VevBenchmark.findOne:p0.50                       sample             168,704            us/op
+VevBenchmark.findOne:p0.90                       sample             184,576            us/op
+VevBenchmark.findOne:p0.95                       sample             190,464            us/op
+VevBenchmark.findOne:p0.99                       sample             202,752            us/op
+VevBenchmark.findOne:p0.999                      sample             257,057            us/op
+VevBenchmark.findOne:p0.9999                     sample             525,975            us/op
+VevBenchmark.findOne:p1.00                       sample            1462,272            us/op
+
+Benchmark result is saved to <CAMPAIGN>/a2-before.json

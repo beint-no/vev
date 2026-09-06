@@ -1,0 +1,1022 @@
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# JMH version: 1.37
+# VM version: JDK 27, OpenJDK 64-Bit Server VM, 27+35-2325
+# VM invoker: <JDK_HOME>/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 5 iterations, 1 s each
+# Measurement: 8 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Sampling time
+# Benchmark: no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findMultiple256
+
+# Run progress: 0,00% complete, ETA 00:01:18
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Sept 06, 2026 2:15:32 PM org.hibernate.Version logVersion
+INFO: HHH000001: Hibernate ORM core version 8.0.0.Beta1
+Sept 06, 2026 2:15:32 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://127.0.0.1:55439/vev_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 18.6
+	Default catalog/schema: vev_bench/pg_catalog
+	Autocommit mode: undefined/unknown
+	Isolation level: SERIALIZABLE [default SERIALIZABLE]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+Sept 06, 2026 2:15:32 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+1489,952 ±(99.9%) 63,197 us/op
+# Warmup Iteration   2: 1183,210 ±(99.9%) 10,607 us/op
+# Warmup Iteration   3: 1148,508 ±(99.9%) 7,309 us/op
+# Warmup Iteration   4: 1154,477 ±(99.9%) 10,410 us/op
+# Warmup Iteration   5: 1136,621 ±(99.9%) 7,098 us/op
+Iteration   1: 1135,426 ±(99.9%) 7,066 us/op
+                 gc.alloc.rate:      275,655 MB/sec
+                 gc.alloc.rate.norm: 328559,928 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1085,440 us/op
+                 p0.50:              1128,448 us/op
+                 p0.90:              1159,168 us/op
+                 p0.95:              1176,781 us/op
+                 p0.99:              1204,716 us/op
+                 p0.999:             2940,928 us/op
+                 p0.9999:            2940,928 us/op
+                 p1.00:              2940,928 us/op
+
+Iteration   2: 1140,931 ±(99.9%) 9,507 us/op
+                 gc.alloc.rate:      274,136 MB/sec
+                 gc.alloc.rate.norm: 328348,702 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            3,000 ms
+                 p0.00:              1058,816 us/op
+                 p0.50:              1128,448 us/op
+                 p0.90:              1177,600 us/op
+                 p0.95:              1187,840 us/op
+                 p0.99:              1217,495 us/op
+                 p0.999:             2863,104 us/op
+                 p0.9999:            2863,104 us/op
+                 p1.00:              2863,104 us/op
+
+Iteration   3: 1156,800 ±(99.9%) 8,676 us/op
+                 gc.alloc.rate:      270,189 MB/sec
+                 gc.alloc.rate.norm: 328128,938 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1087,488 us/op
+                 p0.50:              1134,592 us/op
+                 p0.90:              1236,992 us/op
+                 p0.95:              1259,520 us/op
+                 p0.99:              1294,336 us/op
+                 p0.999:             2961,408 us/op
+                 p0.9999:            2961,408 us/op
+                 p1.00:              2961,408 us/op
+
+Iteration   4: 1140,599 ±(99.9%) 7,920 us/op
+                 gc.alloc.rate:      273,825 MB/sec
+                 gc.alloc.rate.norm: 327888,815 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1073,152 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1182,925 us/op
+                 p0.95:              1236,992 us/op
+                 p0.99:              1315,389 us/op
+                 p0.999:             2838,528 us/op
+                 p0.9999:            2838,528 us/op
+                 p1.00:              2838,528 us/op
+
+Iteration   5: 1132,758 ±(99.9%) 9,216 us/op
+                 gc.alloc.rate:      275,581 MB/sec
+                 gc.alloc.rate.norm: 327722,927 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1048,576 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1159,168 us/op
+                 p0.95:              1174,323 us/op
+                 p0.99:              1342,095 us/op
+                 p0.999:             2912,256 us/op
+                 p0.9999:            2912,256 us/op
+                 p1.00:              2912,256 us/op
+
+Iteration   6: 1125,792 ±(99.9%) 4,216 us/op
+                 gc.alloc.rate:      277,270 MB/sec
+                 gc.alloc.rate.norm: 327702,700 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1040,384 us/op
+                 p0.50:              1122,304 us/op
+                 p0.90:              1146,266 us/op
+                 p0.95:              1161,216 us/op
+                 p0.99:              1181,839 us/op
+                 p0.999:             2125,824 us/op
+                 p0.9999:            2125,824 us/op
+                 p1.00:              2125,824 us/op
+
+Iteration   7: 1129,818 ±(99.9%) 4,218 us/op
+                 gc.alloc.rate:      276,276 MB/sec
+                 gc.alloc.rate.norm: 327680,045 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1050,624 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1155,072 us/op
+                 p0.95:              1167,360 us/op
+                 p0.99:              1194,312 us/op
+                 p0.999:             2109,440 us/op
+                 p0.9999:            2109,440 us/op
+                 p1.00:              2109,440 us/op
+
+Iteration   8: 1127,874 ±(99.9%) 4,102 us/op
+                 gc.alloc.rate:      276,535 MB/sec
+                 gc.alloc.rate.norm: 327808,474 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1079,296 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1144,832 us/op
+                 p0.95:              1165,722 us/op
+                 p0.99:              1189,888 us/op
+                 p0.999:             2011,136 us/op
+                 p0.9999:            2011,136 us/op
+                 p1.00:              2011,136 us/op
+
+
+# Run progress: 16,67% complete, ETA 00:01:09
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Sept 06, 2026 2:15:46 PM org.hibernate.Version logVersion
+INFO: HHH000001: Hibernate ORM core version 8.0.0.Beta1
+Sept 06, 2026 2:15:46 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://127.0.0.1:55439/vev_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 18.6
+	Default catalog/schema: vev_bench/pg_catalog
+	Autocommit mode: undefined/unknown
+	Isolation level: SERIALIZABLE [default SERIALIZABLE]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+Sept 06, 2026 2:15:46 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+1490,436 ±(99.9%) 65,058 us/op
+# Warmup Iteration   2: 1177,782 ±(99.9%) 10,023 us/op
+# Warmup Iteration   3: 1146,057 ±(99.9%) 7,478 us/op
+# Warmup Iteration   4: 1151,595 ±(99.9%) 10,531 us/op
+# Warmup Iteration   5: 1132,167 ±(99.9%) 7,202 us/op
+Iteration   1: 1130,735 ±(99.9%) 6,951 us/op
+                 gc.alloc.rate:      276,789 MB/sec
+                 gc.alloc.rate.norm: 328560,279 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1064,960 us/op
+                 p0.50:              1126,400 us/op
+                 p0.90:              1159,168 us/op
+                 p0.95:              1173,504 us/op
+                 p0.99:              1204,408 us/op
+                 p0.999:             2871,296 us/op
+                 p0.9999:            2871,296 us/op
+                 p1.00:              2871,296 us/op
+
+Iteration   2: 1142,607 ±(99.9%) 9,667 us/op
+                 gc.alloc.rate:      273,875 MB/sec
+                 gc.alloc.rate.norm: 328523,153 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            3,000 ms
+                 p0.00:              1081,344 us/op
+                 p0.50:              1130,496 us/op
+                 p0.90:              1179,648 us/op
+                 p0.95:              1189,888 us/op
+                 p0.99:              1223,946 us/op
+                 p0.999:             2883,584 us/op
+                 p0.9999:            2883,584 us/op
+                 p1.00:              2883,584 us/op
+
+Iteration   3: 1145,793 ±(99.9%) 7,938 us/op
+                 gc.alloc.rate:      272,942 MB/sec
+                 gc.alloc.rate.norm: 328310,227 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1073,152 us/op
+                 p0.50:              1128,448 us/op
+                 p0.90:              1199,923 us/op
+                 p0.95:              1238,938 us/op
+                 p0.99:              1297,162 us/op
+                 p0.999:             2883,584 us/op
+                 p0.9999:            2883,584 us/op
+                 p1.00:              2883,584 us/op
+
+Iteration   4: 1148,220 ±(99.9%) 8,292 us/op
+                 gc.alloc.rate:      272,057 MB/sec
+                 gc.alloc.rate.norm: 327950,890 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1075,200 us/op
+                 p0.50:              1128,448 us/op
+                 p0.90:              1220,608 us/op
+                 p0.95:              1251,328 us/op
+                 p0.99:              1327,923 us/op
+                 p0.999:             2809,856 us/op
+                 p0.9999:            2809,856 us/op
+                 p1.00:              2809,856 us/op
+
+Iteration   5: 1130,933 ±(99.9%) 8,790 us/op
+                 gc.alloc.rate:      276,069 MB/sec
+                 gc.alloc.rate.norm: 327764,000 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            3,000 ms
+                 p0.00:              1064,960 us/op
+                 p0.50:              1122,304 us/op
+                 p0.90:              1157,120 us/op
+                 p0.95:              1170,739 us/op
+                 p0.99:              1235,292 us/op
+                 p0.999:             2969,600 us/op
+                 p0.9999:            2969,600 us/op
+                 p1.00:              2969,600 us/op
+
+Iteration   6: 1128,822 ±(99.9%) 4,037 us/op
+                 gc.alloc.rate:      276,546 MB/sec
+                 gc.alloc.rate.norm: 327696,636 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1056,768 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1146,880 us/op
+                 p0.95:              1163,878 us/op
+                 p0.99:              1194,107 us/op
+                 p0.999:             2082,816 us/op
+                 p0.9999:            2082,816 us/op
+                 p1.00:              2082,816 us/op
+
+Iteration   7: 1128,085 ±(99.9%) 4,176 us/op
+                 gc.alloc.rate:      276,739 MB/sec
+                 gc.alloc.rate.norm: 327719,991 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1073,152 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1148,928 us/op
+                 p0.95:              1164,595 us/op
+                 p0.99:              1186,058 us/op
+                 p0.999:             2121,728 us/op
+                 p0.9999:            2121,728 us/op
+                 p1.00:              2121,728 us/op
+
+Iteration   8: 1127,664 ±(99.9%) 4,565 us/op
+                 gc.alloc.rate:      276,622 MB/sec
+                 gc.alloc.rate.norm: 327849,147 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1058,816 us/op
+                 p0.50:              1122,304 us/op
+                 p0.90:              1148,928 us/op
+                 p0.95:              1165,312 us/op
+                 p0.99:              1187,840 us/op
+                 p0.999:             2084,864 us/op
+                 p0.9999:            2084,864 us/op
+                 p1.00:              2084,864 us/op
+
+
+# Run progress: 33,33% complete, ETA 00:00:55
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Sept 06, 2026 2:16:00 PM org.hibernate.Version logVersion
+INFO: HHH000001: Hibernate ORM core version 8.0.0.Beta1
+Sept 06, 2026 2:16:00 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://127.0.0.1:55439/vev_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 18.6
+	Default catalog/schema: vev_bench/pg_catalog
+	Autocommit mode: undefined/unknown
+	Isolation level: SERIALIZABLE [default SERIALIZABLE]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+Sept 06, 2026 2:16:00 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+1501,483 ±(99.9%) 64,568 us/op
+# Warmup Iteration   2: 1179,564 ±(99.9%) 9,424 us/op
+# Warmup Iteration   3: 1164,781 ±(99.9%) 11,396 us/op
+# Warmup Iteration   4: 1154,940 ±(99.9%) 12,521 us/op
+# Warmup Iteration   5: 1136,608 ±(99.9%) 7,265 us/op
+Iteration   1: 1134,689 ±(99.9%) 10,135 us/op
+                 gc.alloc.rate:      276,068 MB/sec
+                 gc.alloc.rate.norm: 328847,775 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            3,000 ms
+                 p0.00:              1081,344 us/op
+                 p0.50:              1126,400 us/op
+                 p0.90:              1157,120 us/op
+                 p0.95:              1171,456 us/op
+                 p0.99:              1196,401 us/op
+                 p0.999:             3051,520 us/op
+                 p0.9999:            3051,520 us/op
+                 p1.00:              3051,520 us/op
+
+Iteration   2: 1139,598 ±(99.9%) 8,410 us/op
+                 gc.alloc.rate:      274,703 MB/sec
+                 gc.alloc.rate.norm: 328640,219 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1093,632 us/op
+                 p0.50:              1130,496 us/op
+                 p0.90:              1173,504 us/op
+                 p0.95:              1183,744 us/op
+                 p0.99:              1223,086 us/op
+                 p0.999:             3248,128 us/op
+                 p0.9999:            3248,128 us/op
+                 p1.00:              3248,128 us/op
+
+Iteration   3: 1149,701 ±(99.9%) 8,746 us/op
+                 gc.alloc.rate:      272,102 MB/sec
+                 gc.alloc.rate.norm: 328418,326 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              1077,248 us/op
+                 p0.50:              1130,496 us/op
+                 p0.90:              1214,464 us/op
+                 p0.95:              1249,280 us/op
+                 p0.99:              1309,123 us/op
+                 p0.999:             3047,424 us/op
+                 p0.9999:            3047,424 us/op
+                 p1.00:              3047,424 us/op
+
+Iteration   4: 1142,677 ±(99.9%) 10,085 us/op
+                 gc.alloc.rate:      273,667 MB/sec
+                 gc.alloc.rate.norm: 328290,118 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            4,000 ms
+                 p0.00:              1071,104 us/op
+                 p0.50:              1128,448 us/op
+                 p0.90:              1177,600 us/op
+                 p0.95:              1196,032 us/op
+                 p0.99:              1325,834 us/op
+                 p0.999:             2895,872 us/op
+                 p0.9999:            2895,872 us/op
+                 p1.00:              2895,872 us/op
+
+Iteration   5: 1133,339 ±(99.9%) 5,684 us/op
+                 gc.alloc.rate:      275,735 MB/sec
+                 gc.alloc.rate.norm: 328075,448 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1083,392 us/op
+                 p0.50:              1124,352 us/op
+                 p0.90:              1165,312 us/op
+                 p0.95:              1179,648 us/op
+                 p0.99:              1339,392 us/op
+                 p0.999:             2310,144 us/op
+                 p0.9999:            2310,144 us/op
+                 p1.00:              2310,144 us/op
+
+Iteration   6: 1134,370 ±(99.9%) 6,887 us/op
+                 gc.alloc.rate:      275,429 MB/sec
+                 gc.alloc.rate.norm: 328019,227 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1064,960 us/op
+                 p0.50:              1122,304 us/op
+                 p0.90:              1166,131 us/op
+                 p0.95:              1181,082 us/op
+                 p0.99:              1366,303 us/op
+                 p0.999:             2179,072 us/op
+                 p0.9999:            2179,072 us/op
+                 p1.00:              2179,072 us/op
+
+Iteration   7: 1137,475 ±(99.9%) 6,886 us/op
+                 gc.alloc.rate:      274,651 MB/sec
+                 gc.alloc.rate.norm: 327957,595 B/op
+                 gc.count:           2,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1083,392 us/op
+                 p0.50:              1126,400 us/op
+                 p0.90:              1165,312 us/op
+                 p0.95:              1181,696 us/op
+                 p0.99:              1358,500 us/op
+                 p0.999:             2179,072 us/op
+                 p0.9999:            2179,072 us/op
+                 p1.00:              2179,072 us/op
+
+Iteration   8: 1129,985 ±(99.9%) 3,039 us/op
+                 gc.alloc.rate:      276,201 MB/sec
+                 gc.alloc.rate.norm: 328080,672 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              1077,248 us/op
+                 p0.50:              1126,400 us/op
+                 p0.90:              1150,976 us/op
+                 p0.95:              1165,312 us/op
+                 p0.99:              1185,792 us/op
+                 p0.999:             1773,568 us/op
+                 p0.9999:            1773,568 us/op
+                 p1.00:              1773,568 us/op
+
+
+
+Result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findMultiple256":
+  N = 21259
+  mean =   1136,393 ±(99.9%) 1,509 us/op
+
+  Histogram, us/op:
+    [1000,000, 1250,000) = 20956 
+    [1250,000, 1500,000) = 257 
+    [1500,000, 1750,000) = 14 
+    [1750,000, 2000,000) = 1 
+    [2000,000, 2250,000) = 10 
+    [2250,000, 2500,000) = 3 
+    [2500,000, 2750,000) = 0 
+    [2750,000, 3000,000) = 15 
+    [3000,000, 3250,000) = 3 
+    [3250,000, 3500,000) = 0 
+    [3500,000, 3750,000) = 0 
+
+  Percentiles, us/op:
+      p(0,0000) =   1040,384 us/op
+     p(50,0000) =   1126,400 us/op
+     p(90,0000) =   1169,408 us/op
+     p(95,0000) =   1187,840 us/op
+     p(99,0000) =   1265,664 us/op
+     p(99,9000) =   2263,941 us/op
+     p(99,9900) =   3051,004 us/op
+     p(99,9990) =   3248,128 us/op
+     p(99,9999) =   3248,128 us/op
+    p(100,0000) =   3248,128 us/op
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findMultiple256:gc.alloc.rate":
+  274,986 ±(99.9%) 1,393 MB/sec [Average]
+  (min, avg, max) = (270,189, 274,986, 277,270), stdev = 1,811
+  CI (99.9%): [273,593, 276,379] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findMultiple256:gc.alloc.rate.norm":
+  328106,010 ±(99.9%) 270,049 B/op [Average]
+  (min, avg, max) = (327680,045, 328106,010, 328847,775), stdev = 351,139
+  CI (99.9%): [327835,961, 328376,058] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findMultiple256:gc.count":
+  33,000 ±(99.9%) 0,001 counts [Sum]
+  (min, avg, max) = (1,000, 1,375, 2,000), stdev = 0,495
+  CI (99.9%): [33,000, 33,000] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findMultiple256:gc.time":
+  44,000 ±(99.9%) 0,001 ms [Sum]
+  (min, avg, max) = (1,000, 1,833, 4,000), stdev = 0,868
+  CI (99.9%): [44,000, 44,000] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 27, OpenJDK 64-Bit Server VM, 27+35-2325
+# VM invoker: <JDK_HOME>/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 5 iterations, 1 s each
+# Measurement: 8 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Sampling time
+# Benchmark: no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findOne
+
+# Run progress: 50,00% complete, ETA 00:00:41
+# Fork: 1 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Sept 06, 2026 2:16:14 PM org.hibernate.Version logVersion
+INFO: HHH000001: Hibernate ORM core version 8.0.0.Beta1
+Sept 06, 2026 2:16:14 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://127.0.0.1:55439/vev_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 18.6
+	Default catalog/schema: vev_bench/pg_catalog
+	Autocommit mode: undefined/unknown
+	Isolation level: SERIALIZABLE [default SERIALIZABLE]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+Sept 06, 2026 2:16:14 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+213,465 ±(99.9%) 6,012 us/op
+# Warmup Iteration   2: 174,401 ±(99.9%) 1,539 us/op
+# Warmup Iteration   3: 168,572 ±(99.9%) 0,509 us/op
+# Warmup Iteration   4: 168,401 ±(99.9%) 1,231 us/op
+# Warmup Iteration   5: 169,098 ±(99.9%) 0,485 us/op
+Iteration   1: 167,757 ±(99.9%) 0,484 us/op
+                 gc.alloc.rate:      72,977 MB/sec
+                 gc.alloc.rate.norm: 12853,993 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              139,520 us/op
+                 p0.50:              165,120 us/op
+                 p0.90:              183,808 us/op
+                 p0.95:              189,952 us/op
+                 p0.99:              202,458 us/op
+                 p0.999:             218,578 us/op
+                 p0.9999:            240,640 us/op
+                 p1.00:              240,640 us/op
+
+Iteration   2: 169,327 ±(99.9%) 1,178 us/op
+                 gc.alloc.rate:      72,338 MB/sec
+                 gc.alloc.rate.norm: 12860,828 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              146,688 us/op
+                 p0.50:              166,400 us/op
+                 p0.90:              185,344 us/op
+                 p0.95:              190,720 us/op
+                 p0.99:              203,366 us/op
+                 p0.999:             223,754 us/op
+                 p0.9999:            2109,440 us/op
+                 p1.00:              2109,440 us/op
+
+Iteration   3: 167,142 ±(99.9%) 0,504 us/op
+                 gc.alloc.rate:      73,265 MB/sec
+                 gc.alloc.rate.norm: 12857,452 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              138,752 us/op
+                 p0.50:              164,864 us/op
+                 p0.90:              183,040 us/op
+                 p0.95:              188,928 us/op
+                 p0.99:              202,225 us/op
+                 p0.999:             223,741 us/op
+                 p0.9999:            267,776 us/op
+                 p1.00:              267,776 us/op
+
+Iteration   4: 168,270 ±(99.9%) 0,478 us/op
+                 gc.alloc.rate:      72,775 MB/sec
+                 gc.alloc.rate.norm: 12857,385 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              143,872 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              183,808 us/op
+                 p0.95:              189,440 us/op
+                 p0.99:              201,564 us/op
+                 p0.999:             220,481 us/op
+                 p0.9999:            262,656 us/op
+                 p1.00:              262,656 us/op
+
+Iteration   5: 168,442 ±(99.9%) 1,152 us/op
+                 gc.alloc.rate:      72,698 MB/sec
+                 gc.alloc.rate.norm: 12857,519 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              139,776 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              190,208 us/op
+                 p0.99:              203,520 us/op
+                 p0.999:             222,464 us/op
+                 p0.9999:            2045,952 us/op
+                 p1.00:              2045,952 us/op
+
+Iteration   6: 168,909 ±(99.9%) 0,470 us/op
+                 gc.alloc.rate:      72,486 MB/sec
+                 gc.alloc.rate.norm: 12853,926 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              141,568 us/op
+                 p0.50:              166,656 us/op
+                 p0.90:              184,320 us/op
+                 p0.95:              189,952 us/op
+                 p0.99:              201,472 us/op
+                 p0.999:             214,848 us/op
+                 p0.9999:            246,784 us/op
+                 p1.00:              246,784 us/op
+
+Iteration   7: 168,509 ±(99.9%) 1,170 us/op
+                 gc.alloc.rate:      72,673 MB/sec
+                 gc.alloc.rate.norm: 12857,447 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              143,872 us/op
+                 p0.50:              165,632 us/op
+                 p0.90:              183,808 us/op
+                 p0.95:              189,696 us/op
+                 p0.99:              202,342 us/op
+                 p0.999:             230,410 us/op
+                 p0.9999:            2093,056 us/op
+                 p1.00:              2093,056 us/op
+
+Iteration   8: 168,165 ±(99.9%) 0,451 us/op
+                 gc.alloc.rate:      72,822 MB/sec
+                 gc.alloc.rate.norm: 12876,614 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              145,152 us/op
+                 p0.50:              166,144 us/op
+                 p0.90:              182,528 us/op
+                 p0.95:              188,160 us/op
+                 p0.99:              199,936 us/op
+                 p0.999:             214,531 us/op
+                 p0.9999:            225,280 us/op
+                 p1.00:              225,280 us/op
+
+
+# Run progress: 66,67% complete, ETA 00:00:27
+# Fork: 2 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Sept 06, 2026 2:16:27 PM org.hibernate.Version logVersion
+INFO: HHH000001: Hibernate ORM core version 8.0.0.Beta1
+Sept 06, 2026 2:16:28 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://127.0.0.1:55439/vev_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 18.6
+	Default catalog/schema: vev_bench/pg_catalog
+	Autocommit mode: undefined/unknown
+	Isolation level: SERIALIZABLE [default SERIALIZABLE]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+Sept 06, 2026 2:16:28 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+212,578 ±(99.9%) 5,191 us/op
+# Warmup Iteration   2: 172,801 ±(99.9%) 1,371 us/op
+# Warmup Iteration   3: 168,923 ±(99.9%) 1,422 us/op
+# Warmup Iteration   4: 168,247 ±(99.9%) 0,505 us/op
+# Warmup Iteration   5: 167,354 ±(99.9%) 0,451 us/op
+Iteration   1: 167,292 ±(99.9%) 1,165 us/op
+                 gc.alloc.rate:      73,193 MB/sec
+                 gc.alloc.rate.norm: 12857,380 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              138,752 us/op
+                 p0.50:              164,608 us/op
+                 p0.90:              182,528 us/op
+                 p0.95:              188,416 us/op
+                 p0.99:              201,464 us/op
+                 p0.999:             221,950 us/op
+                 p0.9999:            2101,248 us/op
+                 p1.00:              2101,248 us/op
+
+Iteration   2: 168,636 ±(99.9%) 0,466 us/op
+                 gc.alloc.rate:      72,616 MB/sec
+                 gc.alloc.rate.norm: 12857,357 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              144,128 us/op
+                 p0.50:              166,528 us/op
+                 p0.90:              183,808 us/op
+                 p0.95:              188,966 us/op
+                 p0.99:              199,936 us/op
+                 p0.999:             214,689 us/op
+                 p0.9999:            267,776 us/op
+                 p1.00:              267,776 us/op
+
+Iteration   3: 167,926 ±(99.9%) 0,489 us/op
+                 gc.alloc.rate:      72,906 MB/sec
+                 gc.alloc.rate.norm: 12853,987 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              135,168 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              189,696 us/op
+                 p0.99:              200,463 us/op
+                 p0.999:             217,353 us/op
+                 p0.9999:            236,288 us/op
+                 p1.00:              236,288 us/op
+
+Iteration   4: 168,901 ±(99.9%) 1,233 us/op
+                 gc.alloc.rate:      72,505 MB/sec
+                 gc.alloc.rate.norm: 12857,522 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              137,984 us/op
+                 p0.50:              166,144 us/op
+                 p0.90:              184,576 us/op
+                 p0.95:              190,208 us/op
+                 p0.99:              202,496 us/op
+                 p0.999:             223,547 us/op
+                 p0.9999:            2199,552 us/op
+                 p1.00:              2199,552 us/op
+
+Iteration   5: 167,683 ±(99.9%) 0,464 us/op
+                 gc.alloc.rate:      73,030 MB/sec
+                 gc.alloc.rate.norm: 12857,247 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              137,216 us/op
+                 p0.50:              165,376 us/op
+                 p0.90:              182,528 us/op
+                 p0.95:              187,930 us/op
+                 p0.99:              199,634 us/op
+                 p0.999:             219,593 us/op
+                 p0.9999:            307,712 us/op
+                 p1.00:              307,712 us/op
+
+Iteration   6: 167,592 ±(99.9%) 1,167 us/op
+                 gc.alloc.rate:      73,086 MB/sec
+                 gc.alloc.rate.norm: 12860,781 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            1,000 ms
+                 p0.00:              137,728 us/op
+                 p0.50:              165,120 us/op
+                 p0.90:              182,272 us/op
+                 p0.95:              188,160 us/op
+                 p0.99:              200,192 us/op
+                 p0.999:             226,926 us/op
+                 p0.9999:            2113,536 us/op
+                 p1.00:              2113,536 us/op
+
+Iteration   7: 168,471 ±(99.9%) 0,468 us/op
+                 gc.alloc.rate:      72,679 MB/sec
+                 gc.alloc.rate.norm: 12853,902 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              143,872 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              189,440 us/op
+                 p0.99:              202,043 us/op
+                 p0.999:             216,850 us/op
+                 p0.9999:            228,608 us/op
+                 p1.00:              228,608 us/op
+
+Iteration   8: 167,585 ±(99.9%) 0,485 us/op
+                 gc.alloc.rate:      73,090 MB/sec
+                 gc.alloc.rate.norm: 12876,575 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              138,752 us/op
+                 p0.50:              165,376 us/op
+                 p0.90:              183,296 us/op
+                 p0.95:              188,928 us/op
+                 p0.99:              200,392 us/op
+                 p0.999:             220,410 us/op
+                 p0.9999:            260,864 us/op
+                 p1.00:              260,864 us/op
+
+
+# Run progress: 83,33% complete, ETA 00:00:13
+# Fork: 3 of 3
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.openjdk.jmh.util.Utils (file:<CAMPAIGN>/reference/vev-benchmark-hibernate/lib/jmh-core-1.37.jar)
+WARNING: Please consider reporting this to the maintainers of class org.openjdk.jmh.util.Utils
+WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release
+# Warmup Iteration   1: SLF4J(W): No SLF4J providers were found.
+SLF4J(W): Defaulting to no-operation (NOP) logger implementation
+SLF4J(W): See https://www.slf4j.org/codes.html#noProviders for further details.
+Sept 06, 2026 2:16:41 PM org.hibernate.Version logVersion
+INFO: HHH000001: Hibernate ORM core version 8.0.0.Beta1
+Sept 06, 2026 2:16:42 PM org.hibernate.engine.jdbc.env.internal.JdbcEnvironmentInitiator logConnectionInfo
+INFO: HHH10001005: Database info:
+	Database JDBC URL [jdbc:postgresql://127.0.0.1:55439/vev_bench]
+	Database driver: PostgreSQL JDBC Driver
+	Database dialect: PostgreSQLDialect
+	Database version: 18.6
+	Default catalog/schema: vev_bench/pg_catalog
+	Autocommit mode: undefined/unknown
+	Isolation level: SERIALIZABLE [default SERIALIZABLE]
+	JDBC fetch size: none
+	Pool: DataSourceConnectionProvider
+	Minimum pool size: undefined/unknown
+	Maximum pool size: undefined/unknown
+Sept 06, 2026 2:16:42 PM org.hibernate.engine.transaction.jta.platform.internal.JtaPlatformInitiator initiateService
+INFO: HHH000489: No JTA platform available (set 'hibernate.transaction.jta.platform' to enable JTA platform integration)
+209,509 ±(99.9%) 5,009 us/op
+# Warmup Iteration   2: 173,265 ±(99.9%) 1,394 us/op
+# Warmup Iteration   3: 167,876 ±(99.9%) 1,294 us/op
+# Warmup Iteration   4: 167,692 ±(99.9%) 0,472 us/op
+# Warmup Iteration   5: 166,801 ±(99.9%) 0,484 us/op
+Iteration   1: 168,654 ±(99.9%) 1,203 us/op
+                 gc.alloc.rate:      72,621 MB/sec
+                 gc.alloc.rate.norm: 12860,778 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              145,664 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              189,696 us/op
+                 p0.99:              201,516 us/op
+                 p0.999:             225,041 us/op
+                 p0.9999:            2170,880 us/op
+                 p1.00:              2170,880 us/op
+
+Iteration   2: 165,239 ±(99.9%) 0,505 us/op
+                 gc.alloc.rate:      74,090 MB/sec
+                 gc.alloc.rate.norm: 12853,935 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              135,936 us/op
+                 p0.50:              163,584 us/op
+                 p0.90:              180,992 us/op
+                 p0.95:              187,392 us/op
+                 p0.99:              199,007 us/op
+                 p0.999:             223,774 us/op
+                 p0.9999:            244,992 us/op
+                 p1.00:              244,992 us/op
+
+Iteration   3: 167,710 ±(99.9%) 0,489 us/op
+                 gc.alloc.rate:      73,021 MB/sec
+                 gc.alloc.rate.norm: 12857,411 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              138,752 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              182,784 us/op
+                 p0.95:              189,184 us/op
+                 p0.99:              198,943 us/op
+                 p0.999:             230,252 us/op
+                 p0.9999:            287,232 us/op
+                 p1.00:              287,232 us/op
+
+Iteration   4: 167,878 ±(99.9%) 1,139 us/op
+                 gc.alloc.rate:      72,947 MB/sec
+                 gc.alloc.rate.norm: 12857,446 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              137,984 us/op
+                 p0.50:              165,888 us/op
+                 p0.90:              182,784 us/op
+                 p0.95:              188,928 us/op
+                 p0.99:              200,192 us/op
+                 p0.999:             215,040 us/op
+                 p0.9999:            2043,904 us/op
+                 p1.00:              2043,904 us/op
+
+Iteration   5: 168,418 ±(99.9%) 0,471 us/op
+                 gc.alloc.rate:      72,691 MB/sec
+                 gc.alloc.rate.norm: 12853,947 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              143,872 us/op
+                 p0.50:              166,144 us/op
+                 p0.90:              183,552 us/op
+                 p0.95:              189,440 us/op
+                 p0.99:              202,240 us/op
+                 p0.999:             216,129 us/op
+                 p0.9999:            236,800 us/op
+                 p1.00:              236,800 us/op
+
+Iteration   6: 167,486 ±(99.9%) 0,479 us/op
+                 gc.alloc.rate:      73,104 MB/sec
+                 gc.alloc.rate.norm: 12853,897 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              140,800 us/op
+                 p0.50:              165,632 us/op
+                 p0.90:              182,784 us/op
+                 p0.95:              188,416 us/op
+                 p0.99:              199,613 us/op
+                 p0.999:             222,707 us/op
+                 p0.9999:            253,952 us/op
+                 p1.00:              253,952 us/op
+
+Iteration   7: 168,357 ±(99.9%) 1,062 us/op
+                 gc.alloc.rate:      72,742 MB/sec
+                 gc.alloc.rate.norm: 12857,314 B/op
+                 gc.count:           1,000 counts
+                 gc.time:            2,000 ms
+                 p0.00:              140,544 us/op
+                 p0.50:              166,144 us/op
+                 p0.90:              183,040 us/op
+                 p0.95:              188,416 us/op
+                 p0.99:              199,168 us/op
+                 p0.999:             216,133 us/op
+                 p0.9999:            1904,640 us/op
+                 p1.00:              1904,640 us/op
+
+Iteration   8: 167,074 ±(99.9%) 0,486 us/op
+                 gc.alloc.rate:      73,331 MB/sec
+                 gc.alloc.rate.norm: 12879,883 B/op
+                 gc.count:           ≈ 0 counts
+                 p0.00:              136,192 us/op
+                 p0.50:              165,120 us/op
+                 p0.90:              182,528 us/op
+                 p0.95:              188,416 us/op
+                 p0.99:              200,704 us/op
+                 p0.999:             215,286 us/op
+                 p0.9999:            302,080 us/op
+                 p1.00:              302,080 us/op
+
+
+
+Result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findOne":
+  N = 143690
+  mean =    167,972 ±(99.9%) 0,165 us/op
+
+  Histogram, us/op:
+    [   0,000,  250,000) = 143661 
+    [ 250,000,  500,000) = 20 
+    [ 500,000,  750,000) = 0 
+    [ 750,000, 1000,000) = 0 
+    [1000,000, 1250,000) = 0 
+    [1250,000, 1500,000) = 0 
+    [1500,000, 1750,000) = 0 
+    [1750,000, 2000,000) = 1 
+    [2000,000, 2250,000) = 8 
+    [2250,000, 2500,000) = 0 
+    [2500,000, 2750,000) = 0 
+
+  Percentiles, us/op:
+      p(0,0000) =    135,168 us/op
+     p(50,0000) =    165,632 us/op
+     p(90,0000) =    183,296 us/op
+     p(95,0000) =    189,184 us/op
+     p(99,0000) =    200,960 us/op
+     p(99,9000) =    219,727 us/op
+     p(99,9900) =    275,590 us/op
+     p(99,9990) =   2187,025 us/op
+     p(99,9999) =   2199,552 us/op
+    p(100,0000) =   2199,552 us/op
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findOne:gc.alloc.rate":
+  72,904 ±(99.9%) 0,278 MB/sec [Average]
+  (min, avg, max) = (72,338, 72,904, 74,090), stdev = 0,362
+  CI (99.9%): [72,626, 73,182] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findOne:gc.alloc.rate.norm":
+  12859,355 ±(99.9%) 5,713 B/op [Average]
+  (min, avg, max) = (12853,897, 12859,355, 12879,883), stdev = 7,428
+  CI (99.9%): [12853,643, 12865,068] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findOne:gc.count":
+  9,000 ±(99.9%) 0,001 counts [Sum]
+  (min, avg, max) = (≈ 0, 0,375, 1,000), stdev = 0,495
+  CI (99.9%): [9,000, 9,000] (assumes normal distribution)
+
+Secondary result "no.beint.vev.benchmark.hibernate.HibernateEntityAgentBenchmark.findOne:gc.time":
+  16,000 ±(99.9%) 0,001 ms [Sum]
+  (min, avg, max) = (≈ 0, 0,667, 2,000), stdev = 0,917
+  CI (99.9%): [16,000, 16,000] (assumes normal distribution)
+
+
+# Run complete. Total time: 00:01:23
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                                                           Mode     Cnt       Score     Error   Units
+HibernateEntityAgentBenchmark.findMultiple256                     sample   21259    1136,393 ±   1,509   us/op
+HibernateEntityAgentBenchmark.findMultiple256:gc.alloc.rate       sample      24     274,986 ±   1,393  MB/sec
+HibernateEntityAgentBenchmark.findMultiple256:gc.alloc.rate.norm  sample      24  328106,010 ± 270,049    B/op
+HibernateEntityAgentBenchmark.findMultiple256:gc.count            sample      24      33,000            counts
+HibernateEntityAgentBenchmark.findMultiple256:gc.time             sample      24      44,000                ms
+HibernateEntityAgentBenchmark.findMultiple256:p0.00               sample            1040,384             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p0.50               sample            1126,400             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p0.90               sample            1169,408             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p0.95               sample            1187,840             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p0.99               sample            1265,664             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p0.999              sample            2263,941             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p0.9999             sample            3051,004             us/op
+HibernateEntityAgentBenchmark.findMultiple256:p1.00               sample            3248,128             us/op
+HibernateEntityAgentBenchmark.findOne                             sample  143690     167,972 ±   0,165   us/op
+HibernateEntityAgentBenchmark.findOne:gc.alloc.rate               sample      24      72,904 ±   0,278  MB/sec
+HibernateEntityAgentBenchmark.findOne:gc.alloc.rate.norm          sample      24   12859,355 ±   5,713    B/op
+HibernateEntityAgentBenchmark.findOne:gc.count                    sample      24       9,000            counts
+HibernateEntityAgentBenchmark.findOne:gc.time                     sample      24      16,000                ms
+HibernateEntityAgentBenchmark.findOne:p0.00                       sample             135,168             us/op
+HibernateEntityAgentBenchmark.findOne:p0.50                       sample             165,632             us/op
+HibernateEntityAgentBenchmark.findOne:p0.90                       sample             183,296             us/op
+HibernateEntityAgentBenchmark.findOne:p0.95                       sample             189,184             us/op
+HibernateEntityAgentBenchmark.findOne:p0.99                       sample             200,960             us/op
+HibernateEntityAgentBenchmark.findOne:p0.999                      sample             219,727             us/op
+HibernateEntityAgentBenchmark.findOne:p0.9999                     sample             275,590             us/op
+HibernateEntityAgentBenchmark.findOne:p1.00                       sample            2199,552             us/op
+
+Benchmark result is saved to <CAMPAIGN>/h4-hibernate-fetch-zero.json
