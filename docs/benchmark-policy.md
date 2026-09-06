@@ -70,6 +70,14 @@ The [current A–B–B–A bundle](../benchmark-results/final-b0b026d19959b4ca84
 
 ## Interpretation
 
+The [direct-reader campaign](../benchmark-results/hydration-006078b/report.md)
+compares Vev before/after generated JDBC hydration and retains both the original
+and corrected-fetch-size Hibernate reference runs. The 256-key workload (255
+present rows and one missing result) allocated approximately 10.2 KB less per
+operation after the change; point-read allocation was essentially unchanged.
+Incomplete early telemetry and timing drift preclude a latency advantage claim.
+The report includes every run, raw results, environment details, and checksums.
+
 Do not describe Vev as faster, lower-allocation, or more scalable from one machine or one entity shape. Report absolute measurements and uncertainty first. A regression in any representative workload remains part of the result; it must not be hidden behind a favorable aggregate.
 
 No performance number belongs in the main README until it is reproduced, reviewed, tied to raw output, and bounded to the exact workload. Even then, it is evidence rather than a universal claim.
