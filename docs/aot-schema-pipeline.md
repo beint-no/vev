@@ -68,9 +68,15 @@ comparison, and cleanup/rollback handling. Driver and scalar-validation failures
 follow the same transaction failure paths.
 
 The generation SPI uses `readRow` instead of the former array-based `instantiate`
-method. Recompile application mappings with matching processor/runtime versions;
-this experimental SPI change does not provide compatibility with stale generated
-classes. The mapping fingerprint describes the schema, not generator ABI or
+method. Each plan embeds its processor's generated-plan ABI as an integer literal.
+`PgModel` checks that version once, before capturing any other plan metadata or
+constructing runtime SQL. Unversioned output (ABI zero) and incompatible versions
+fail with a recompilation diagnostic before a database connection is acquired.
+Recompile application mappings with matching processor/runtime versions; this
+check provides an early failure, not compatibility with stale generated classes.
+It does not attest handwritten or transformed implementations. Incompatible SPI
+changes must increment the runtime and processor ABI together. The mapping
+fingerprint describes the schema, not generator ABI or
 performance. Allocation and latency effects require the benchmark evidence
 specified in the [benchmark policy](benchmark-policy.md).
 

@@ -39,6 +39,12 @@ class PgPlan<M, E, K, T> {
 
     PgPlan(PgEntityPlan<M, E, K, T> source) {
         this.source = Objects.requireNonNull(source, "source");
+        int generatedAbi = source.generatedPlanAbi();
+        if (generatedAbi != PgEntityPlan.ABI_VERSION) {
+            throw new IllegalArgumentException("Generated PostgreSQL plan ABI mismatch: runtime requires "
+                    + PgEntityPlan.ABI_VERSION + ", plan declares " + generatedAbi
+                    + "; recompile mappings with matching Vev processor/runtime versions");
+        }
         this.javaType = Objects.requireNonNull(source.javaType(), "javaType");
         this.keyType = Objects.requireNonNull(source.keyType(), "keyType");
         this.logicalName = Objects.requireNonNull(source.logicalName(), "logicalName");

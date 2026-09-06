@@ -28,6 +28,23 @@ import java.util.List;
  */
 public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     /**
+     * Generated-plan binary contract accepted by this runtime. Incompatible SPI changes increment this value.
+     * This version is independent of the database schema fingerprint and the library release version.
+     */
+    int ABI_VERSION = 1;
+
+    /**
+     * Returns the binary contract embedded by the processor that generated this plan.
+     * The default deliberately identifies older, unversioned output as incompatible. Generated implementations
+     * embed a literal; they must not read the current runtime's version dynamically.
+     *
+     * @return generated ABI version, or zero for an unversioned plan requiring recompilation
+     */
+    default int generatedPlanAbi() {
+        return 0;
+    }
+
+    /**
      * Returns the standard codec for entity primary keys.
      *
      * @return key codec matching {@link #keyType()}

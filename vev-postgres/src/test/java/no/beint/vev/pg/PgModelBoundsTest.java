@@ -271,7 +271,43 @@ final class PgModelBoundsTest {
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
             List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks,
             java.util.function.IntSupplier maximumRows) {
+        return plan(columns, unique, shape, checks, maximumRows, () -> PgEntityPlan.ABI_VERSION);
+    }
+
+    @Test
+    void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+            var source = plan(null, null, null, null, () -> {
+                throw new AssertionError("Incompatible plans must fail before metadata access");
+            }, abi == null ? null : () -> abi);
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+            assertEquals("Generated PostgreSQL plan ABI mismatch: runtime requires " + PgEntityPlan.ABI_VERSION
+                    + ", plan declares " + (abi == null ? 0 : abi)
+                    + "; recompile mappings with matching Vev processor/runtime versions", failure.getMessage());
+        }
+    }
+
+    @Test
+    void capturesGeneratedPlanAbiOnceDuringModelConstruction() {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var source = plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(),
+                () -> 1000, () -> calls.incrementAndGet() == 1 ? PgEntityPlan.ABI_VERSION : 0);
+        var model = new PgModel<>(IDENTITY, List.of(source));
+        model.frozenPlans().getFirst().requireRowCount(1);
+        assertEquals(1, calls.get());
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+        assertEquals(2, calls.get());
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks,
+            java.util.function.IntSupplier maximumRows, java.util.function.IntSupplier abi) {
         return new PgEntityPlan<>() {
+            @Override
+            public int generatedPlanAbi() {
+                return abi == null ? PgEntityPlan.super.generatedPlanAbi() : abi.getAsInt();
+            }
+
             @Override
             public int maximumRows() {
                 return maximumRows.getAsInt();
@@ -284,6 +320,7 @@ final class PgModelBoundsTest {
 
             @Override
             public Class<TestEntity> javaType() {
+                if (columns == null) throw new AssertionError("Incompatible plans must fail before any metadata access");
                 return TestEntity.class;
             }
 

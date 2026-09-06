@@ -59,6 +59,8 @@ final class JavaSourceGenerator {
         appendReferences(source, entity);
         appendUniqueConstraints(source, entity);
         appendCheckConstraints(source, entity);
+        // Embed this generator's contract, never a runtime version lookup in generated output.
+        method(source, "public int generatedPlanAbi()", "return 1;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
