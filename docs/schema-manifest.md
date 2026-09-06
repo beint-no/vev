@@ -22,7 +22,7 @@ Consumers must reject unknown format versions or profiles. The resource includes
   role, string code-point or binary byte length, decimal precision, scale, and sorted enum names;
 - ordered primary-key and secondary-index columns, plus named tenant-scoped unique constraints with distinct-null and immediate enforcement semantics;
 - explicit scalar references with composite source/target columns, exact target relation, and immediate non-cascading enforcement;
-- named exact check expressions and generated binary bounds with `kind: "BINARY_MAXIMUM"`, column, and maximum bytes;
+- named exact check expressions and generated length bounds: `BINARY_MAXIMUM` with `maximumBytes`, or `TEXT_MAXIMUM` with `maximumCodePoints`, plus the column and canonical expression;
 - assigned/identity identifier strategy and the required owned-sequence contract for identity creation;
 - required enabled/forced tenant row security and its transaction-local setting;
 - the exact application insert/update column sets and the absence of delete access.

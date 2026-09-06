@@ -70,6 +70,10 @@ a constant does not itself add an entity codec. The separately specified
 [Binary mapping](binary-values.md) supplies a bounded `bytea` codec and its
 required generated length check.
 
+[`@VevText`](text-values.md) uses a generated character-length check for bounded
+PostgreSQL text. Generated bounds count toward the same entity and model limits
+as ordinary declared checks, and receive the same dependency approval.
+
 The exact allowlist lives in `PgCheckCatalog`; additions require synthetic
 compiler and database evidence. The internal node representation is tied to
 PostgreSQL 18 and is not a cross-version API. PostgreSQL upgrades require

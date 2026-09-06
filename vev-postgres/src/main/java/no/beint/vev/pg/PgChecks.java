@@ -74,15 +74,16 @@ final class PgChecks {
         try (PreparedStatement statement = connection.prepareStatement("""
                 SELECT pg_catalog.substr(pg_catalog.pg_get_expr(conbin, conrelid, false), 1, ?),
                        CASE WHEN ?::pg_catalog.text = '' THEN ?::pg_catalog.text
-                            ELSE pg_catalog.format('(octet_length(%I) <= %s)', ?::pg_catalog.text, ?::pg_catalog.int4) END
+                            ELSE pg_catalog.format(?::pg_catalog.text, ?::pg_catalog.text, ?::pg_catalog.int4) END
                   FROM pg_catalog.pg_constraint WHERE oid = ?::pg_catalog.oid
                 """)) {
             statement.setInt(1, PgCheck.MAXIMUM_EXPRESSION_LENGTH + 1);
-            statement.setString(2, check.binaryColumn());
+            statement.setString(2, check.boundColumn());
             statement.setString(3, check.expression());
-            statement.setString(4, check.binaryColumn());
-            statement.setInt(5, check.maximumBytes());
-            statement.setLong(6, oid);
+            statement.setString(4, check.boundFormat());
+            statement.setString(5, check.boundColumn());
+            statement.setInt(6, check.maximumLength());
+            statement.setLong(7, oid);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next() || !row.getString(2).equals(row.getString(1)) || row.next()) throw invalid(plan);
             }

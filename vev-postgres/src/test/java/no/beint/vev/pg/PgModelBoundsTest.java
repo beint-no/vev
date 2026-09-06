@@ -188,13 +188,47 @@ final class PgModelBoundsTest {
             assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, length, 0, 0));
             assertThrows(IllegalArgumentException.class, () -> PgCheck.binaryMaximum("payload_max", "payload", length));
         }
-        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", "payload", 32));
-        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", "", 32));
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", PgCheck.Kind.BINARY_MAXIMUM, "payload", 32));
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", PgCheck.Kind.EXACT, "", 32));
         assertThrows(IllegalArgumentException.class, () -> PgCheck.binaryMaximum("payload_max", "bad.name", 32));
         var large = new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, 2048, 0, 0);
         assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, large),
                 List.of(new PgUnique("payload_key", List.of(1, 2))), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID,
                 List.of(PgCheck.binaryMaximum("payload_max", "payload", 2048))))));
+    }
+
+    @Test
+    void textMetadataSeparatesCharacterBoundsFromBinaryBytesAndVarcharTypeModifiers() {
+        var text = new PgColumn("payload", PgCodecs.TEXT, true, PgColumn.Role.VALUE, 32, 0, 0);
+        var bound = PgCheck.textMaximum("payload_max", "payload", 32);
+        var model = new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, text), List.of(),
+                no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound))));
+        assertEquals(List.of(bound), model.frozenPlans().getFirst().checkConstraints());
+        assertEquals(-1, text.expectedTypeModifier());
+        assertEquals(64 + 4 * 32, text.maximumRetainedBytes());
+        text.validateValue("🙂".repeat(32));
+        assertThrows(IllegalArgumentException.class, () -> text.validateValue("🙂".repeat(33)));
+        for (List<PgCheck> checks : List.<List<PgCheck>>of(List.of(), List.of(PgCheck.binaryMaximum("payload_max", "payload", 32)),
+                List.of(PgCheck.textMaximum("payload_max", "payload", 31)), List.of(PgCheck.textMaximum("payload_max", "other", 32)),
+                List.of(bound, PgCheck.textMaximum("duplicate", "payload", 32)))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT, text), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks))));
+        }
+        var varchar = new PgColumn("payload", PgCodecs.STRING, true, PgColumn.Role.VALUE, 32, 0, 0);
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT, varchar), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound)))));
+        for (var role : List.of(PgColumn.Role.ID, PgColumn.Role.TENANT, PgColumn.Role.VERSION)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.TEXT, false, role, 32, 0, 0));
+        }
+        for (int length : List.of(-1, 0, no.beint.vev.VevText.MAXIMUM_LENGTH + 1)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.TEXT, true, PgColumn.Role.VALUE, length, 0, 0));
+            assertThrows(IllegalArgumentException.class, () -> PgCheck.textMaximum("payload_max", "payload", length));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", bound.expression(), PgCheck.Kind.BINARY_MAXIMUM, "payload", 32));
+        var large = new PgColumn("payload", PgCodecs.TEXT, true, PgColumn.Role.VALUE, 1048576, 0, 0);
+        var source = plan(List.of(ID, TENANT, large), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID,
+                List.of(PgCheck.textMaximum("payload_max", "payload", 1048576)));
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
     }
 
     @Test

@@ -451,6 +451,68 @@ final class VevProcessorTest {
     }
 
     @Test
+    void textMappingsCompileExplicitCharacterBoundsAndPreserveClasspathMetadata() throws IOException {
+        String entity = textRecordSource(1048576).replace("@Entity", "@Entity @no.beint.vev.VevRows(4)");
+        Compilation source = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(source.success(), source.diagnostics());
+        assertTrue(source.generated("example/BrokenVev.java").contains("PgCheck.textMaximum(\"broken_display_name_max\", \"display_name\", 1048576)"));
+        assertTrue(source.manifest("example.BrokenModel").contains("\"kind\": \"TEXT_MAXIMUM\""));
+        assertTrue(source.manifest("example.BrokenModel").contains("\"maximumCodePoints\": 1048576"));
+        Compilation dependency = compile(Map.of("example/Broken.java", entity), "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BrokenModel.java", brokenModelSource()), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(source.generated("example/BrokenVev.java"), binary.generated("example/BrokenVev.java"));
+        assertEquals(source.manifest("example.BrokenModel"), binary.manifest("example.BrokenModel"));
+        Compilation changed = compile(Map.of("example/Broken.java", entity.replace("1048576", "1048575"), "example/BrokenModel.java", brokenModelSource()));
+        assertTrue(changed.success(), changed.diagnostics());
+        assertNotEquals(source.generated("example/BrokenModelVev.java"), changed.generated("example/BrokenModelVev.java"));
+    }
+
+    @Test
+    void textMappingsRejectImplicitBoundsWrongTypesRolesAndConflictingSelectors() throws IOException {
+        String valid = textRecordSource(32);
+        for (String entity : List.of(valid.replace(", length = 32", ""), valid.replace("String displayName", "Integer displayName"),
+                valid.replace("@Id @Column", "@Column").replace("@no.beint.vev.VevText", "@Id @no.beint.vev.VevText"),
+                valid.replace("@TenantKey @Column", "@Column").replace("@no.beint.vev.VevText", "@TenantKey @no.beint.vev.VevText"),
+                valid.replace("@Version @Column", "@Column").replace("@no.beint.vev.VevText", "@Version @no.beint.vev.VevText"),
+                valid.replace("broken_display_name_max", "bad.name"), valid.replace("broken_display_name_max", ""),
+                valid.replace("name = \"display_name\"", "columnDefinition = \"text\", name = \"display_name\""),
+                valid.replace("name = \"display_name\"", "precision = 32, name = \"display_name\""),
+                valid.replace("@no.beint.vev.VevText", "@no.beint.vev.VevBinary(maximumBytes = 32, check = \"binary_max\") @no.beint.vev.VevText"),
+                valid.replace("schema = \"ledger\")", "schema = \"ledger\", check = @CheckConstraint(name = \"broken_display_name_max\", constraint = \"true\"))"))) {
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success(), entity);
+            assertFalse(Files.exists(result.classesDirectory().resolve("META-INF/vev/example.BrokenModel.schema.json")));
+        }
+        for (int invalid : List.of(-1, 0, 8388609, Integer.MAX_VALUE)) {
+            Compilation result = compile(Map.of("example/Broken.java", textRecordSource(invalid), "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success());
+            assertTrue(result.diagnostics().contains("@VevText requires explicit @Column.length"), result.diagnostics());
+        }
+    }
+
+    @Test
+    void textMappingsRetainResultAndStringIndexBudgets() throws IOException {
+        for (String entity : List.of(textRecordSource(1048576), textRecordSource(8388608).replace("@Entity", "@Entity @no.beint.vev.VevRows(1)"))) {
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertFalse(result.success());
+            assertTrue(result.diagnostics().contains("64 MiB materialized-result"), result.diagnostics());
+        }
+        for (int length : List.of(256, 257)) {
+            String entity = textRecordSource(length).replace("@no.beint.vev.VevText", "@VevIndex(name = \"text_idx\") @no.beint.vev.VevText");
+            Compilation result = compile(Map.of("example/Broken.java", entity, "example/BrokenModel.java", brokenModelSource()));
+            assertEquals(length == 256, result.success(), result.diagnostics());
+        }
+    }
+
+    private static String textRecordSource(int codePoints) {
+        return recordSource(validTable(), validComponents().replace("@Column(name = \"display_name\"",
+                "@no.beint.vev.VevText(check = \"broken_display_name_max\") @Column(name = \"display_name\"")
+                .replace("length = 255", "length = " + codePoints), "");
+    }
+
+    @Test
     void referenceColumnOrderIsExplicitAndStableAcrossCompilationBoundaries() throws IOException {
         var sources = referenceSources();
         Compilation tenantFirst = compile(sources);

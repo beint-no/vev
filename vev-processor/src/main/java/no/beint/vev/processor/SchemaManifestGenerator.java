@@ -57,10 +57,12 @@ final class SchemaManifestGenerator {
                 quote(entity.qualifiedName()), quote(entity.schemaName()), quote(entity.tableName()),
                 entity.appendOnly(), identity(entity), entity.maximumRows(), columns(entity.properties()), primaryKey(entity),
                 indexes.isEmpty() ? "" : "\n" + indexes + "\n      ", uniqueConstraints(entity),
-                entity.checkConstraints().stream().map(check -> check.binaryColumn().isEmpty()
+                entity.checkConstraints().stream().map(check -> check.kind() == CheckMapping.Kind.EXACT
                         ? "{\"name\": %s, \"expression\": %s}".formatted(quote(check.name()), quote(check.expression()))
-                        : "{\"name\": %s, \"kind\": \"BINARY_MAXIMUM\", \"column\": %s, \"maximumBytes\": %d, \"expression\": %s}"
-                                .formatted(quote(check.name()), quote(check.binaryColumn()), check.maximumBytes(), quote(check.expression())))
+                        : "{\"name\": %s, \"kind\": %s, \"column\": %s, %s: %d, \"expression\": %s}"
+                                .formatted(quote(check.name()), quote(check.kind().name()), quote(check.boundColumn()),
+                                        quote(check.kind() == CheckMapping.Kind.BINARY_MAXIMUM ? "maximumBytes" : "maximumCodePoints"),
+                                        check.maximumLength(), quote(check.expression())))
                         .collect(Collectors.joining(", ")),
                 references(model, entity),
                 quote(entity.tenant().columnName()), entity.properties().stream()

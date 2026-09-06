@@ -59,6 +59,10 @@ public record PgColumn(
             if (maximumLength < 1 || maximumLength > 65_535) {
                 throw new IllegalArgumentException("String and enum-name columns require a maximum length from 1 through 65535");
             }
+        } else if (codec == PgCodecs.TEXT) {
+            if (maximumLength < 1 || maximumLength > no.beint.vev.VevText.MAXIMUM_LENGTH || role != Role.VALUE) {
+                throw new IllegalArgumentException("Text VALUE columns require an explicit code-point bound from 1 through 8388608");
+            }
         } else if (codec == PgCodecs.BINARY) {
             if (maximumLength < 1 || maximumLength > no.beint.vev.Binary.MAXIMUM_LENGTH || role != Role.VALUE) {
                 throw new IllegalArgumentException("Binary VALUE columns require an explicit byte bound from 1 through 32 MiB");
@@ -78,7 +82,7 @@ public record PgColumn(
 
     /**
      * Creates column metadata with a 255-code-point string bound or decimal precision 38 and scale 2.
-     * Binary columns require an explicit byte bound through the complete constructor.
+     * Binary and text columns require an explicit byte/code-point bound through the complete constructor.
      *
      * @param name safe unquoted PostgreSQL identifier
      * @param codec standard Vev codec for the column value
@@ -112,7 +116,7 @@ public record PgColumn(
 
     long maximumRetainedBytes() {
         if (codec == PgCodecs.BINARY) return Math.addExact(64L, maximumLength);
-        if (codec.usesCharacterVarying()) {
+        if (codec.usesCharacterVarying() || codec == PgCodecs.TEXT) {
             return Math.addExact(64L, Math.multiplyExact(4L, maximumLength));
         }
         if (codec == PgCodecs.BIG_DECIMAL) {

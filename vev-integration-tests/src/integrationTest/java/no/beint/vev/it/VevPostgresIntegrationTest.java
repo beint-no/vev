@@ -23,6 +23,7 @@ import no.beint.vev.fixtures.KotlinIdentity;
 import no.beint.vev.fixtures.KotlinIdentityVev;
 import no.beint.vev.fixtures.KotlinBinary;
 import no.beint.vev.fixtures.KotlinBinaryVev;
+import no.beint.vev.fixtures.KotlinTextVev;
 import no.beint.vev.jakarta.VevEntityAgents;
 import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
@@ -576,6 +577,97 @@ final class VevPostgresIntegrationTest {
             assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(1))).isEmpty());
             if (!corrupt) assertTrue(failures.get() > 0);
         }
+    }
+
+    @Test
+    void boundedTextPreservesUnicodeWhitespaceNullsAndTypedBatchQueries() {
+        String maximum = "🙂".repeat(1048576);
+        var rows = List.of(new TextDocument(1, 7, 0, maximum, "  trailing  "),
+                new TextDocument(2, 7, 0, "e\u0301é\n\t'\\{}", "🙂".repeat(128)),
+                new TextDocument(3, 7, 0, "", ""), new TextDocument(4, 7, 0, null, null));
+        assertEquals(rows, vev.write(TENANT_7, tx -> tx.entities().insertMultiple(TextDocumentVev.INSTANCE, Batch.copyOf(rows))).values());
+        assertEquals(rows.get(0), vev.read(TENANT_7, tx -> tx.entities().find(TextDocumentVev.INSTANCE.key(1))).orElseThrow());
+        assertEquals(List.of(rows.get(0)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(TextDocumentVev.LABEL, "  trailing  ", new QueryLimit(4)))).values());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(TextDocumentVev.LABEL, "  trailing", new QueryLimit(4)))).values().isEmpty());
+        assertEquals(List.of(rows.get(3)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.isNull(TextDocumentVev.LABEL, new QueryLimit(4)))).values());
+        var page = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(TextDocumentVev.INSTANCE, new QueryLimit(2))));
+        assertEquals(rows.subList(0, 2), page.values());
+        assertTrue(page.hasMore());
+        assertEquals(rows.subList(2, 4), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.scanByIdAfter(TextDocumentVev.INSTANCE.key(2), new QueryLimit(4)))).values());
+        var changed = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(TextDocumentVev.INSTANCE, Batch.copyOf(
+                rows.stream().map(row -> new TextDocument(row.id(), 7, 0, null, row.label())).toList())));
+        assertEquals(4, changed.size());
+        assertTrue(changed.values().stream().allMatch(result -> result.entity().version() == 1 && result.entity().body() == null));
+        var other = new TextDocument(1, 8, 0, "other", "  trailing  ");
+        vev.write(TENANT_8, tx -> tx.entities().insert(TextDocumentVev.INSTANCE, other));
+        assertEquals(List.of(other), vev.read(TENANT_8, tx -> tx.entities().many(
+                PgQueries.equal(TextDocumentVev.LABEL, "  trailing  ", new QueryLimit(4)))).values());
+    }
+
+    @Test
+    void kotlinTextIdentityBatchesPreserveNullAndExactCharacterBounds() {
+        var inputs = List.of(new KotlinTextVev.New(null), new KotlinTextVev.New(""),
+                new KotlinTextVev.New("🙂".repeat(64)), new KotlinTextVev.New(" leading and trailing "));
+        var created = vev.write(TENANT_7, tx -> tx.entities().createMultiple(KotlinTextVev.INSTANCE, Batch.copyOf(inputs)));
+        for (int index = 0; index < inputs.size(); index++) assertEquals(inputs.get(index).payload(), created.get(index).payload());
+        var first = created.get(0);
+        var replacement = first.copy(first.id(), first.tenantId(), first.version(), "changed");
+        var changed = vev.write(TENANT_7, tx -> tx.entities().update(KotlinTextVev.INSTANCE, replacement));
+        assertEquals("changed", ((MutationResult.Applied<?, no.beint.vev.fixtures.KotlinText, ?, ?>) changed).entity().payload());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(KotlinTextVev.INSTANCE.key(first.id()))).isEmpty());
+    }
+
+    @Test
+    void textValidationRunsBeforeSqlAndConstraintFailuresRollbackEarlierWrites() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count), IntegrationModelVev.POSTGRES, authority);
+        count.set(0);
+        runtime.write(authority.scope(7), tx -> {
+            for (String invalid : List.of("x".repeat(1048577), "\0", "\ud800", "\udc00")) {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().insert(TextDocumentVev.INSTANCE,
+                        new TextDocument(1, 7, 0, invalid, null)));
+            }
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(
+                    PgQueries.equal(TextDocumentVev.LABEL, "🙂".repeat(129), new QueryLimit(4))));
+            assertEquals(0, count.get());
+            return tx.entities().insert(TextDocumentVev.INSTANCE, new TextDocument(1, 7, 0, "valid", "unique"));
+        });
+        UUID earlier = id("text-rollback-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "text-rollback@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().insertMultiple(TextDocumentVev.INSTANCE,
+                    Batch.copyOf(List.of(new TextDocument(2, 7, 0, "would succeed", "new"), new TextDocument(3, 7, 0, "conflicts", "unique")))));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(TextDocumentVev.INSTANCE.key(2))).isEmpty());
+    }
+
+    @Test
+    void textSchemaRejectsWrongBoundsUnitsTypesAndConstraintStates() throws SQLException {
+        for (String variant : List.of("missing", "renamed", "weakened", "tightened", "wrongcolumn", "wrongunits",
+                "unvalidated", "unenforced", "noinherit", "extra")) {
+            try {
+                database.textDocumentBound(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.textDocumentBound("valid");
+            }
+        }
+        try {
+            database.textDocumentUsesVarchar(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.textDocumentUsesVarchar(false);
+        }
+        runtime(database.applicationDataSource());
+        SQLException oversized = assertThrows(SQLException.class, () -> database.insertTextBeyondDatabaseBound());
+        assertEquals("23514", oversized.getSQLState());
     }
 
     @Test

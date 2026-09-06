@@ -41,7 +41,8 @@ classes. The manifest records the limit. A nondefault limit changes the model
 fingerprint, while explicitly declaring the existing default preserves it.
 Update the migration-managed fingerprint when changing a model's row contract.
 
-Row limits also bound [immutable binary values](binary-values.md). They add no
+Row limits also bound [immutable binary values](binary-values.md) and
+[PostgreSQL text values](text-values.md). They add no
 JSON, XML, array, streaming, or projection codec by themselves.
 Those mappings need their own immutable value contract, database bounds, and
 failure-path verification.

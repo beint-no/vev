@@ -66,6 +66,7 @@ final class MappingCompiler {
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final String VEV_ROWS = "no.beint.vev.VevRows";
     private static final String VEV_BINARY = "no.beint.vev.VevBinary";
+    private static final String VEV_TEXT = "no.beint.vev.VevText";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
     private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES", "UNIQUE_CONSTRAINTS");
@@ -523,8 +524,16 @@ final class MappingCompiler {
         }
         AnnotationMirror enumerated = consistentAnnotation(component, annotationSources, ENUMERATED);
         AnnotationMirror binary = consistentAnnotation(component, annotationSources, VEV_BINARY);
+        AnnotationMirror text = consistentAnnotation(component, annotationSources, VEV_TEXT);
         List<String> enumConstants = List.of();
         CodecMapping codec = CODECS.get(component.asType().toString());
+        if (text != null) {
+            if (!component.asType().toString().equals("java.lang.String") || id || tenant || version) {
+                error(component, "@VevText only applies to String VALUE components");
+            } else {
+                codec = new CodecMapping("java.lang.String", "no.beint.vev.pg.PgCodecs.TEXT", "text");
+            }
+        }
         Element valueType = processingEnvironment.getTypeUtils().asElement(component.asType());
         if (valueType instanceof TypeElement enumType && enumType.getKind() == ElementKind.ENUM) {
             if (enumerated == null || !enumValue(enumerated, "value").equals("STRING")) {
@@ -560,7 +569,7 @@ final class MappingCompiler {
         int maximumLength = 0;
         int numericPrecision = 0;
         int numericScale = 0;
-        String binaryCheckName = "";
+        String lengthCheckName = "";
         if (binary != null && !codec.arrayElementType().equals("bytea")) {
             error(component, "@VevBinary only applies to immutable Binary VALUE components");
         }
@@ -582,13 +591,26 @@ final class MappingCompiler {
             }
             rejectNonDefaultInt(component, column, "precision", 0);
             rejectNonDefaultInt(component, column, "scale", 0);
+        } else if (codec.arrayElementType().equals("text")) {
+            maximumLength = intValue(column, "length");
+            if (!hasExplicitValue(column, "length") || maximumLength < 1 || maximumLength > 8 * 1024 * 1024) {
+                error(component, "@VevText requires explicit @Column.length between 1 and 8388608 code points");
+                maximumLength = 0;
+            }
+            lengthCheckName = stringValue(text, "check");
+            validateIdentifier(component, lengthCheckName, "text length check constraint");
+            if (index != null && maximumLength > 256) {
+                error(component, "Indexed text components must declare @Column(length <= 256) for Vev's deterministic B-tree key budget");
+            }
+            rejectNonDefaultInt(component, column, "precision", 0);
+            rejectNonDefaultInt(component, column, "scale", 0);
         } else if (codec.arrayElementType().equals("bytea")) {
             if (binary == null || id || tenant || version) {
                 error(component, "Binary VALUE components require explicit @VevBinary byte bounds and a named check constraint");
             } else {
                 maximumLength = intValue(binary, "maximumBytes");
-                binaryCheckName = stringValue(binary, "check");
-                validateIdentifier(component, binaryCheckName, "binary check constraint");
+                lengthCheckName = stringValue(binary, "check");
+                validateIdentifier(component, lengthCheckName, "binary check constraint");
                 if (maximumLength < 1 || maximumLength > 32 * 1024 * 1024) {
                     error(component, "@VevBinary.maximumBytes must be between 1 and 33554432");
                     maximumLength = 0;
@@ -634,7 +656,7 @@ final class MappingCompiler {
                 referenceTarget,
                 generatedValue != null,
                 reference == null || booleanValue(reference, "tenantFirst"),
-                binaryCheckName);
+                lengthCheckName);
     }
 
     private List<CheckMapping> compileCheckConstraints(TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
@@ -644,13 +666,15 @@ final class MappingCompiler {
             collectChecks(component, consistentAnnotation(component, componentSources(entity, component), COLUMN), result);
         }
         for (PropertyMapping property : properties) {
-            if (!property.binaryCheckName().isEmpty()) {
-                result.add(new CheckMapping(property.binaryCheckName(),
-                        "(octet_length(" + property.quotedColumn() + ") <= " + property.maximumLength() + ')',
+            if (!property.lengthCheckName().isEmpty()) {
+                boolean binaryBound = property.arrayElementType().equals("bytea");
+                result.add(new CheckMapping(property.lengthCheckName(),
+                        "(" + (binaryBound ? "octet_length" : "char_length") + "(" + property.quotedColumn() + ") <= " + property.maximumLength() + ')',
+                        binaryBound ? CheckMapping.Kind.BINARY_MAXIMUM : CheckMapping.Kind.TEXT_MAXIMUM,
                         property.columnName(), property.maximumLength()));
             }
         }
-        if (result.size() > 32) error(entity, "An entity must not exceed 32 declared check constraints including binary bounds");
+        if (result.size() > 32) error(entity, "An entity must not exceed 32 declared check constraints including generated length bounds");
         result.sort(Comparator.comparing(CheckMapping::name));
         return List.copyOf(result);
     }
@@ -888,7 +912,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
                     if (!componentElements.contains(member)) {
                         error(member, "Persistence mapping @" + simpleName(name)
                                 + " is forbidden on members unrelated to a record component");
@@ -910,7 +934,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
                     validateAnnotationShape(component, annotation);
                     continue;
                 }
@@ -1101,6 +1125,7 @@ final class MappingCompiler {
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
             case VEV_BINARY -> Set.of("maximumBytes", "check");
+            case VEV_TEXT -> Set.of("check");
             default -> ANNOTATION_MEMBERS.get(annotationName);
         };
         if (expected == null) {
@@ -1193,8 +1218,9 @@ final class MappingCompiler {
                 }
                 canonical.append("check|").append(check.name()).append('|')
                         .append(check.expression().length()).append('|').append(check.expression()).append('\n');
-                if (!check.binaryColumn().isEmpty()) {
-                    canonical.append("binaryMaximum|").append(check.binaryColumn()).append('|').append(check.maximumBytes()).append('\n');
+                if (check.kind() != CheckMapping.Kind.EXACT) {
+                    canonical.append(check.kind() == CheckMapping.Kind.BINARY_MAXIMUM ? "binaryMaximum|" : "textMaximum|")
+                            .append(check.boundColumn()).append('|').append(check.maximumLength()).append('\n');
                 }
             }
             if (!entity.primaryKeyShape().equals("TENANT_ID")) {

@@ -5,11 +5,12 @@ package no.beint.vev.pg;
  *
  * @param name explicit constraint name
  * @param expression exact {@code pg_get_expr(conbin, conrelid, false)} output for ordinary checks;
- *                   canonical quoted-column expression for a generated binary bound
- * @param binaryColumn bounded binary column, or empty for an ordinary exact expression
- * @param maximumBytes binary byte bound, or zero for an ordinary exact expression
+ *                   canonical quoted-column expression for a generated length bound
+ * @param kind ordinary exact expression or a generated binary/text length bound
+ * @param boundColumn bounded column, or empty for an ordinary exact expression
+ * @param maximumLength byte/code-point bound, or zero for an ordinary exact expression
  */
-public record PgCheck(String name, String expression, String binaryColumn, int maximumBytes) {
+public record PgCheck(String name, String expression, Kind kind, String boundColumn, int maximumLength) {
     /** Maximum number of declared checks on one entity. */
     public static final int MAXIMUM_PER_ENTITY = 32;
     /** Maximum characters in one deparsed expression. */
@@ -24,7 +25,7 @@ public record PgCheck(String name, String expression, String binaryColumn, int m
      * @param expression exact deparsed definition
      */
     public PgCheck(String name, String expression) {
-        this(name, expression, "", 0);
+        this(name, expression, Kind.EXACT, "", 0);
     }
 
     /**
@@ -36,16 +37,29 @@ public record PgCheck(String name, String expression, String binaryColumn, int m
      * @return bound metadata whose identifier quoting is verified with PostgreSQL's own formatter
      */
     public static PgCheck binaryMaximum(String name, String column, int maximumBytes) {
-        return new PgCheck(name, binaryExpression(column, maximumBytes), column, maximumBytes);
+        return new PgCheck(name, boundExpression(Kind.BINARY_MAXIMUM, column, maximumBytes), Kind.BINARY_MAXIMUM, column, maximumBytes);
+    }
+
+    /**
+     * Creates the required generated code-point constraint for one text column.
+     *
+     * @param name explicit migration-installed constraint name
+     * @param column exact text column identifier
+     * @param maximumCodePoints maximum stored Unicode code-point count
+     * @return generated text length metadata
+     */
+    public static PgCheck textMaximum(String name, String column, int maximumCodePoints) {
+        return new PgCheck(name, boundExpression(Kind.TEXT_MAXIMUM, column, maximumCodePoints), Kind.TEXT_MAXIMUM, column, maximumCodePoints);
     }
 
     /**
      * Captures bounded, exact schema metadata.
      *
      * @param name safe unquoted identifier
-     * @param expression exact deparsed ordinary expression, or the canonical generated binary expression
-     * @param binaryColumn bounded binary column, or empty for an ordinary expression
-     * @param maximumBytes binary byte bound, or zero for an ordinary expression
+     * @param expression exact deparsed ordinary expression, or the canonical generated bound expression
+     * @param kind ordinary exact expression or generated length bound
+     * @param boundColumn bounded column, or empty for an ordinary expression
+     * @param maximumLength byte/code-point bound, or zero for an ordinary expression
      */
     public PgCheck {
         if (name == null || !name.matches("[a-z][a-z0-9_]{0,62}")) {
@@ -55,16 +69,43 @@ public record PgCheck(String name, String expression, String binaryColumn, int m
                 || expression.indexOf('\0') >= 0 || !wellFormedUnicode(expression)) {
             throw new IllegalArgumentException("Check expression must be bounded, nonempty Unicode schema metadata");
         }
-        if (binaryColumn == null || (binaryColumn.isEmpty() ? maximumBytes != 0
-                : !binaryColumn.matches("[a-z][a-z0-9_]{0,62}") || maximumBytes < 1
-                    || maximumBytes > no.beint.vev.Binary.MAXIMUM_LENGTH
-                    || !expression.equals(binaryExpression(binaryColumn, maximumBytes)))) {
-            throw new IllegalArgumentException("Binary check must declare one exact bounded column expression");
+        if (kind == null || boundColumn == null || (kind == Kind.EXACT ? !boundColumn.isEmpty() || maximumLength != 0
+                : !boundColumn.matches("[a-z][a-z0-9_]{0,62}") || maximumLength < 1
+                    || maximumLength > (kind == Kind.BINARY_MAXIMUM ? no.beint.vev.Binary.MAXIMUM_LENGTH : no.beint.vev.VevText.MAXIMUM_LENGTH)
+                    || !expression.equals(boundExpression(kind, boundColumn, maximumLength)))) {
+            throw new IllegalArgumentException("Length check must declare one exact bounded column expression");
         }
     }
 
-    private static String binaryExpression(String column, int maximumBytes) {
-        return "(octet_length(\"" + column + "\") <= " + maximumBytes + ')';
+    private static String boundExpression(Kind kind, String column, int maximumLength) {
+        return "(" + (kind == Kind.BINARY_MAXIMUM ? "octet_length" : "char_length") + "(\"" + column + "\") <= " + maximumLength + ')';
+    }
+
+    String boundFormat() {
+        return switch (kind) {
+            case EXACT -> "";
+            case BINARY_MAXIMUM -> "(octet_length(%I) <= %s)";
+            case TEXT_MAXIMUM -> "(char_length(%I) <= %s)";
+        };
+    }
+
+    boolean bounds(PgColumn column) {
+        return boundColumn.equals(column.name()) && maximumLength == column.maximumLength()
+                && switch (kind) {
+                    case EXACT -> false;
+                    case BINARY_MAXIMUM -> column.codec() == PgCodecs.BINARY;
+                    case TEXT_MAXIMUM -> column.codec() == PgCodecs.TEXT;
+                };
+    }
+
+    /** Closed set of check-expression contracts. */
+    public enum Kind {
+        /** Exact declared PostgreSQL deparsed expression. */
+        EXACT,
+        /** Generated octet-length bound for immutable binary values. */
+        BINARY_MAXIMUM,
+        /** Generated code-point-length bound for text values. */
+        TEXT_MAXIMUM
     }
 
     private static boolean wellFormedUnicode(String value) {

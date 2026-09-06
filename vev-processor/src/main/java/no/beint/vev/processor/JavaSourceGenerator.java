@@ -139,10 +139,12 @@ final class JavaSourceGenerator {
         source.append("    private static final java.util.List<no.beint.vev.pg.PgCheck> __VEV_CHECKS = java.util.List.of(");
         for (int index = 0; index < entity.checkConstraints().size(); index++) {
             CheckMapping check = entity.checkConstraints().get(index);
-            if (!check.binaryColumn().isEmpty()) {
+            if (check.kind() != CheckMapping.Kind.EXACT) {
                 source.append(index == 0 ? "\n" : ",\n")
-                        .append("            no.beint.vev.pg.PgCheck.binaryMaximum(\"").append(escape(check.name()))
-                        .append("\", \"").append(escape(check.binaryColumn())).append("\", ").append(check.maximumBytes()).append(')');
+                        .append("            no.beint.vev.pg.PgCheck.")
+                        .append(check.kind() == CheckMapping.Kind.BINARY_MAXIMUM ? "binaryMaximum" : "textMaximum")
+                        .append("(\"").append(escape(check.name()))
+                        .append("\", \"").append(escape(check.boundColumn())).append("\", ").append(check.maximumLength()).append(')');
                 continue;
             }
             source.append(index == 0 ? "\n" : ",\n")

@@ -33,6 +33,7 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 - `insertMultiple` and `updateMultiple` each use one fixed typed-array/ordinality statement and verify returned rows in input order. Batch update first requires every tenant, identifier, and expected version to match; a stale or missing member causes no row update and poisons the complete lexical transaction. This safety preflight has a real database cost and has not yet been benchmarked across representative batch sizes.
 - A closed model is limited to 512 entities, each entity to 64 columns, one batch or bounded scan result to its declared `@VevRows` limit (at most 1,000 application values), and one generated materialized-result estimate to 64 MiB including a paging sentinel. See [row limits](row-limits.md).
 - Binary values use immutable `Binary`, explicit byte bounds, and validated database length checks. Raw arrays and LOB streaming are unsupported; large payloads require smaller row limits and cannot be indexed beyond the B-tree key budget. See [binary values](binary-values.md).
+- PostgreSQL `text` requires `@VevText`, an explicit code-point limit, and a verified database length check. Unbounded text and DDL snippets remain rejected. See [text values](text-values.md).
 
 ## Operations
 

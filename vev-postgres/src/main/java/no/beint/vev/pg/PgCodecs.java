@@ -30,6 +30,9 @@ public final class PgCodecs {
     /** Java {@link String} mapped to bounded PostgreSQL {@code character varying}. */
     public static final PgCodec<String> STRING = codec(
             String.class, "character varying", ResultSet::getString, PreparedStatement::setString);
+    /** Code-point-bounded String mapped to PostgreSQL text with a required verified length constraint. */
+    public static final PgCodec<String> TEXT = codec(
+            String.class, "text", ResultSet::getString, PreparedStatement::setString);
     /** Immutable {@link no.beint.vev.Binary} mapped to byte-length-bounded PostgreSQL {@code bytea}. */
     public static final PgCodec<no.beint.vev.Binary> BINARY = codec(
             no.beint.vev.Binary.class, "bytea",
@@ -59,7 +62,7 @@ public final class PgCodecs {
             (statement, index, value) -> statement.setObject(index, value.atOffset(java.time.ZoneOffset.UTC)),
             value -> value.atOffset(java.time.ZoneOffset.UTC));
     private static final Set<PgCodec<?>> STANDARD = Set.of(
-            BOOLEAN, INTEGER, LONG, SHORT, STRING, BINARY, UUID, BIG_DECIMAL,
+            BOOLEAN, INTEGER, LONG, SHORT, STRING, TEXT, BINARY, UUID, BIG_DECIMAL,
             LOCAL_DATE, LOCAL_DATE_TIME, INSTANT);
 
     private PgCodecs() {

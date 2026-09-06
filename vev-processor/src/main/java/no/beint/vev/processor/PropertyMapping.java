@@ -25,7 +25,7 @@ record PropertyMapping(
         String referenceTarget,
         boolean identity,
         boolean referenceTenantFirst,
-        String binaryCheckName) {
+        String lengthCheckName) {
     String quotedColumn() {
         return '"' + columnName + '"';
     }

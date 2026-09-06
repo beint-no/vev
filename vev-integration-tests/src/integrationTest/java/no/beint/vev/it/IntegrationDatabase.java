@@ -71,6 +71,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : textSchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -83,7 +88,7 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text");
         }
     }
 
@@ -144,6 +149,46 @@ final class IntegrationDatabase {
                 statement.execute("ALTER TABLE vev_it.binary_sample ADD CONSTRAINT " + name + " CHECK (" + expression + ")" + suffix);
                 if (variant.equals("extra")) statement.execute("ALTER TABLE vev_it.binary_sample ADD CONSTRAINT extra_binary_bound CHECK (octet_length(\"user\") >= 0)");
             }
+        }
+    }
+
+    void textDocumentBound(String variant) throws SQLException {
+        String expression = switch (variant) {
+            case "valid", "renamed", "unvalidated", "unenforced", "noinherit", "extra" -> "char_length(\"user\") <= 1048576";
+            case "weakened" -> "char_length(\"user\") <= 1048577";
+            case "tightened" -> "char_length(\"user\") <= 1048575";
+            case "wrongcolumn" -> "char_length(label) <= 1048576";
+            case "wrongunits" -> "octet_length(\"user\") <= 1048576";
+            case "missing" -> null;
+            default -> throw new IllegalArgumentException(variant);
+        };
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            for (String name : List.of("text_document_user_max", "renamed_text_bound", "extra_text_bound")) {
+                statement.execute("ALTER TABLE vev_it.text_document DROP CONSTRAINT IF EXISTS " + name);
+            }
+            if (expression != null) {
+                String name = variant.equals("renamed") ? "renamed_text_bound" : "text_document_user_max";
+                String suffix = switch (variant) {
+                    case "unvalidated" -> " NOT VALID";
+                    case "unenforced" -> " NOT ENFORCED";
+                    case "noinherit" -> " NO INHERIT";
+                    default -> "";
+                };
+                statement.execute("ALTER TABLE vev_it.text_document ADD CONSTRAINT " + name + " CHECK (" + expression + ")" + suffix);
+                if (variant.equals("extra")) statement.execute("ALTER TABLE vev_it.text_document ADD CONSTRAINT extra_text_bound CHECK (char_length(\"user\") >= 0)");
+            }
+        }
+    }
+
+    void textDocumentUsesVarchar(boolean varchar) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE vev_it.text_document ALTER COLUMN \"user\" TYPE " + (varchar ? "varchar(1048576)" : "text"));
+        }
+    }
+
+    void insertTextBeyondDatabaseBound() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO vev_it.text_document(id, tenant_id, version, label) VALUES (999, 7, 0, repeat('🙂', 129))");
         }
     }
 
@@ -994,6 +1039,31 @@ final class IntegrationDatabase {
                 }
             }
         }
+    }
+
+    private static List<String> textSchemaStatements() {
+        var statements = new java.util.ArrayList<String>();
+        for (String table : List.of("text_document", "kotlin_text")) {
+            boolean generated = table.equals("kotlin_text");
+            String values = generated ? ", payload text, CONSTRAINT kotlin_text_payload_max CHECK (char_length(payload) <= 64)"
+                    : ", \"user\" text, label text, CONSTRAINT text_document_user_max CHECK (char_length(\"user\") <= 1048576),"
+                    + " CONSTRAINT text_document_label_max CHECK (char_length(label) <= 128), CONSTRAINT text_document_label_key UNIQUE (tenant_id, label)";
+            String writable = "version, " + (generated ? "payload" : "\"user\", label");
+            statements.add("CREATE TABLE vev_it." + table + " (id integer" + (generated ? " GENERATED ALWAYS AS IDENTITY" : " NOT NULL")
+                    + ", tenant_id integer NOT NULL, version integer NOT NULL" + values + ", PRIMARY KEY (tenant_id, id))");
+            statements.add("ALTER TABLE vev_it." + table + " OWNER TO " + OWNER_ROLE);
+            statements.add("ALTER TABLE vev_it." + table + " ENABLE ROW LEVEL SECURITY");
+            statements.add("ALTER TABLE vev_it." + table + " FORCE ROW LEVEL SECURITY");
+            statements.add("CREATE POLICY " + table + "_tenant ON vev_it." + table
+                    + " FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer)"
+                    + " WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)");
+            statements.add("GRANT SELECT ON vev_it." + table + " TO " + APPLICATION_USER);
+            statements.add("GRANT INSERT (id, tenant_id, " + writable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
+            statements.add("GRANT UPDATE (" + writable + ") ON vev_it." + table + " TO " + APPLICATION_USER);
+            if (generated) statements.add("GRANT USAGE ON SEQUENCE vev_it." + table + "_id_seq TO " + APPLICATION_USER);
+        }
+        statements.add("CREATE INDEX text_document_label_idx ON vev_it.text_document (tenant_id, label, id)");
+        return statements;
     }
 
     private static List<String> binarySchemaStatements() {
