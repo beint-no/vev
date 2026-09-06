@@ -25,4 +25,8 @@ record EntityMapping(
         boolean deletable,
         String primaryKeyShape,
         int maximumRows) {
+    PropertyMapping orderingProperty(PropertyMapping index) {
+        return index.indexOrderBy().isEmpty() ? null : properties.stream()
+                .filter(property -> property.columnName().equals(index.indexOrderBy())).findFirst().orElseThrow();
+    }
 }

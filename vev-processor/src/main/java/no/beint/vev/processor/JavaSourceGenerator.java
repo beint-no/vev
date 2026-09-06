@@ -52,7 +52,7 @@ final class JavaSourceGenerator {
         appendUniqueConstraints(source, entity);
         appendCheckConstraints(source, entity);
         // Embed this generator's contract, never a runtime version lookup in generated output.
-        method(source, "public int generatedPlanAbi()", "return 2;");
+        method(source, "public int generatedPlanAbi()", "return 3;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -69,7 +69,7 @@ final class JavaSourceGenerator {
         method(source, "public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape()",
                 "return no.beint.vev.VevPrimaryKey.Shape." + entity.primaryKeyShape() + ";");
         method(source, "public java.util.List<no.beint.vev.pg.PgColumn> columns()", "return COLUMNS;");
-        method(source, "public java.util.List<no.beint.vev.pg.PgIndex<" + modelMarker + ", "
+        method(source, "public java.util.List<no.beint.vev.pg.PgQueryIndex<" + modelMarker + ", "
                         + entity.qualifiedName() + ", " + entity.id().boxedType() + ", ?>> indexes()",
                 "return INDEXES;");
         source.append("    @Override\n")
@@ -215,24 +215,28 @@ final class JavaSourceGenerator {
             if (!property.indexed()) {
                 continue;
             }
-            String indexType = property.nullable() ? "PgNullableIndex" : "PgRequiredIndex";
+            PropertyMapping order = entity.orderingProperty(property);
+            String indexType = order == null ? (property.nullable() ? "PgNullableIndex" : "PgRequiredIndex")
+                    : (property.nullable() ? "PgNullableOrderedIndex" : "PgRequiredOrderedIndex");
             source.append("    /** Compile-time query token for PostgreSQL index ")
                     .append(escape(property.indexName())).append(". */\n")
                     .append("    public static final no.beint.vev.pg.").append(indexType).append('<')
                     .append(modelMarker).append(", ")
                     .append(entity.qualifiedName()).append(", ")
                     .append(entity.id().boxedType()).append(", ")
-                    .append(property.boxedType()).append("> ")
+                    .append(property.boxedType()).append(order == null ? "" : ", " + order.boxedType()).append("> ")
                     .append(property.indexFieldName()).append(" = new no.beint.vev.pg.")
                     .append(indexType).append("<>(INSTANCE, \"")
                     .append(escape(property.indexName())).append("\", ")
                     .append(columnIndex).append(", ")
-                    .append(property.boxedType()).append(".class);\n\n");
+                    .append(property.boxedType()).append(".class")
+                    .append(order == null ? "" : ", " + entity.properties().indexOf(order) + ", " + order.boxedType() + ".class, no.beint.vev.VevIndex.Direction." + property.indexDirection())
+                    .append(");\n\n");
         }
     }
 
     private void appendIndexList(StringBuilder source, EntityMapping entity, String modelMarker) {
-        source.append("    private static final java.util.List<no.beint.vev.pg.PgIndex<")
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgQueryIndex<")
                 .append(modelMarker).append(", ")
                 .append(entity.qualifiedName()).append(", ")
                 .append(entity.id().boxedType()).append(", ?>> INDEXES = java.util.List.of(");

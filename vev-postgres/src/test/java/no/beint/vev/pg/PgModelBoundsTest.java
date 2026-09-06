@@ -80,6 +80,59 @@ final class PgModelBoundsTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void orderedIndexMetadataRejectsUnsafePositionsTypesRolesAndIndexBudgets() {
+        for (String variant : List.of("valid", "descending", "negative", "outside", "sameColumn", "tenant", "idFilter", "nullableOrder", "wrongType", "wrongNullability", "longString", "keyBudget")) {
+            var filter = new PgColumn("filter", PgCodecs.STRING, true, PgColumn.Role.VALUE, variant.equals("keyBudget") ? 256 : 64, 0, 0);
+            var order = new PgColumn("ordering", PgCodecs.STRING, variant.equals("nullableOrder"), PgColumn.Role.VALUE,
+                    variant.equals("longString") ? 257 : variant.equals("keyBudget") ? 256 : 64, 0, 0);
+            var source = plan(List.of(ID, TENANT, filter, order));
+            var indexes = new java.util.concurrent.atomic.AtomicReference<List<PgQueryIndex<TestModel, TestEntity, Integer, ?>>>();
+            var capturedSource = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class},
+                    (proxy, method, arguments) -> method.getName().equals("indexes") ? indexes.get() : method.invoke(source, arguments));
+            int orderPosition = switch (variant) {
+                case "negative" -> -1;
+                case "outside" -> 4;
+                case "sameColumn" -> 2;
+                case "tenant" -> 1;
+                default -> 3;
+            };
+            var direction = variant.equals("descending") ? no.beint.vev.VevIndex.Direction.DESC : no.beint.vev.VevIndex.Direction.ASC;
+            Class<?> orderType = variant.equals("wrongType") ? Object.class : String.class;
+            if (variant.equals("idFilter")) {
+                indexes.set(List.of(new PgRequiredOrderedIndex<>(capturedSource, "ordered_idx", 0, Integer.class, 3, String.class, no.beint.vev.VevIndex.Direction.ASC)));
+            } else if (variant.equals("wrongNullability")) {
+                indexes.set(List.of(new PgRequiredOrderedIndex<>(capturedSource, "ordered_idx", 2, String.class, 3, String.class, no.beint.vev.VevIndex.Direction.ASC)));
+            } else {
+                indexes.set(List.of(new PgNullableOrderedIndex<>(capturedSource, "ordered_idx", 2, String.class,
+                        orderPosition, orderType, direction)));
+            }
+            if (!variant.equals("valid") && !variant.equals("descending")) {
+                assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(capturedSource)), variant);
+            } else {
+                var model = new PgModel<>(IDENTITY, List.of(capturedSource));
+                var sql = model.frozenPlan(capturedSource).indexSql(indexes.get().getFirst());
+                org.junit.jupiter.api.Assertions.assertTrue(sql.equalAfter().contains("(\"ordering\", \"id\") " + (variant.equals("descending") ? "<" : ">") + " (?, ?)"));
+                org.junit.jupiter.api.Assertions.assertTrue(sql.isNullAfter().contains(variant.equals("descending") ? "ORDER BY \"ordering\" DESC, \"id\" DESC LIMIT ?" : "ORDER BY \"ordering\", \"id\" LIMIT ?"));
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void orderedCursorRejectsErasedWrongTypesAndKeysFromAnotherPlan() {
+        var source = plan(List.of(ID, TENANT));
+        var other = plan(List.of(ID, TENANT));
+        var index = new PgRequiredOrderedIndex<>(source, "ordered_idx", 0, Integer.class, 1, String.class, no.beint.vev.VevIndex.Direction.ASC);
+        assertThrows(IllegalArgumentException.class, () -> index.cursor("a", other.key(1)));
+        assertThrows(IllegalArgumentException.class, () -> new PgOrderedCursor((PgOrderedIndex) index, 1, source.key(1)));
+        assertThrows(NullPointerException.class, () -> index.cursor(null, source.key(1)));
+        assertThrows(NullPointerException.class, () -> new PgRequiredOrderedIndex<>(source,
+                "ordered_idx", 0, Integer.class, 1, String.class, null));
+    }
+
+    @Test
     void uniqueMetadataCapturesPositionsAndEnforcesDatabaseAndTenantBounds() {
         var positions = new java.util.ArrayList<>(List.of(1, 2));
         var unique = new PgUnique("test_entity_code_key", positions);
@@ -277,7 +330,7 @@ final class PgModelBoundsTest {
 
     @Test
     void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
-        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
             var source = plan(null, null, null, null, () -> {
                 throw new AssertionError("Incompatible plans must fail before metadata access");
             }, abi == null ? null : () -> abi);
@@ -495,7 +548,7 @@ final class PgModelBoundsTest {
             }
 
             @Override
-            public List<PgIndex<TestModel, TestEntity, Integer, ?>> indexes() {
+            public List<PgQueryIndex<TestModel, TestEntity, Integer, ?>> indexes() {
                 return List.of();
             }
 

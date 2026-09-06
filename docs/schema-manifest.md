@@ -20,7 +20,7 @@ Consumers must reject unknown format versions or profiles. The resource includes
 - entity Java types, schema/table identifiers, append-only semantics, explicit `readOnly: true` where declared, and maximum row counts;
 - ordered columns with boxed Java type, PostgreSQL type, nullability, structural
   role, string code-point or binary byte length, decimal precision, scale, and sorted enum names;
-- ordered primary-key and secondary-index columns, plus named scoped or explicitly shared unique constraints with distinct-null and immediate enforcement semantics;
+- ordered primary-key and secondary-index columns, an explicit per-key `directions` array for descending ordered queries (absence means all ASC with default null placement), plus named scoped or explicitly shared unique constraints with distinct-null and immediate enforcement semantics;
 - explicit scalar references with composite source/target columns, exact target relation, and immediate non-cascading enforcement;
 - named exact check expressions and generated length bounds: `BINARY_MAXIMUM` with `maximumBytes`, or `TEXT_MAXIMUM` with `maximumCodePoints`, plus the column and canonical expression;
 - assigned/identity identifier strategy and the required owned-sequence contract for identity creation;
@@ -40,4 +40,4 @@ Keep constraints which protect business correctness. If a required foreign key,
 check, unique constraint, or identity generator is outside the accepted profile,
 expand and verify Vev's contract before migrating that table.
 
-Explicit [shared mappings](shared-reference-mappings.md) add `shared: true` and `readOnly: true`, omit tenant metadata from row security, and record ID-only primary keys, global index/unique columns, and scalar reference columns for shared targets. Their fingerprint differs from tenant-owned mappings.
+Explicit [shared mappings](shared-reference-mappings.md) add `shared: true` and `readOnly: true`, omit tenant metadata from row security, and record ID-only primary keys, global index/unique columns, and scalar reference columns for shared targets. Their fingerprint differs from tenant-owned mappings. [Ordered index queries](ordered-index-queries.md) record their additional ordering column and fixed direction; either changes the mapping fingerprint.

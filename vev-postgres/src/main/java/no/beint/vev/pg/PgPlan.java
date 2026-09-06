@@ -27,13 +27,13 @@ class PgPlan<M, E, K, T> {
     private final String schemaName;
     private final String tableName;
     private final List<PgColumn> columns;
-    private final List<PgIndex<M, E, K, ?>> indexes;
+    private final List<PgQueryIndex<M, E, K, ?>> indexes;
     private final List<PgReference> references;
     private final List<PgUnique> uniqueConstraints;
     private final List<PgCheck> checkConstraints;
     private final Class<?> creationType;
     private final no.beint.vev.VevPrimaryKey.Shape primaryKeyShape;
-    private final Map<PgIndex<M, E, K, ?>, PgIndexSql> indexSql;
+    private final Map<PgQueryIndex<M, E, K, ?>, PgIndexSql> indexSql;
     private PgSql sql;
     private String creationSql;
     private PgDeletionSql deletionSql;
@@ -89,8 +89,8 @@ class PgPlan<M, E, K, T> {
             boundedColumns.add(Objects.requireNonNull(column, "column"));
         }
         this.columns = List.copyOf(boundedColumns);
-        List<PgIndex<M, E, K, ?>> boundedIndexes = new ArrayList<>(VevIndex.MAXIMUM_INDEXES_PER_ENTITY);
-        for (PgIndex<M, E, K, ?> index : Objects.requireNonNull(source.indexes(), "indexes")) {
+        List<PgQueryIndex<M, E, K, ?>> boundedIndexes = new ArrayList<>(VevIndex.MAXIMUM_INDEXES_PER_ENTITY);
+        for (PgQueryIndex<M, E, K, ?> index : Objects.requireNonNull(source.indexes(), "indexes")) {
             if (boundedIndexes.size() == VevIndex.MAXIMUM_INDEXES_PER_ENTITY) {
                 throw new IllegalArgumentException("Entity plan exceeds Vev's "
                         + VevIndex.MAXIMUM_INDEXES_PER_ENTITY + "-index safety bound");
@@ -279,7 +279,7 @@ class PgPlan<M, E, K, T> {
         return columns;
     }
 
-    List<PgIndex<M, E, K, ?>> indexes() {
+    List<PgQueryIndex<M, E, K, ?>> indexes() {
         return indexes;
     }
 
@@ -310,7 +310,7 @@ class PgPlan<M, E, K, T> {
         sql = Objects.requireNonNull(compiledSql, "compiledSql");
         creationSql = creationType != null ? PgCreationSql.compile(this) : null;
         deletionSql = deletable ? PgDeletionSql.compile(this) : null;
-        for (PgIndex<M, E, K, ?> index : indexes) {
+        for (PgQueryIndex<M, E, K, ?> index : indexes) {
             indexSql.put(index, compiledSql.index(index));
         }
     }
@@ -323,7 +323,7 @@ class PgPlan<M, E, K, T> {
         return Objects.requireNonNull(creationSql, "creationSql");
     }
 
-    PgIndexSql indexSql(PgIndex<M, E, K, ?> index) {
+    PgIndexSql indexSql(PgQueryIndex<M, E, K, ?> index) {
         PgIndexSql statements = indexSql.get(Objects.requireNonNull(index, "index"));
         if (statements == null) {
             throw new IllegalArgumentException("Index token is not from this generated Vev model");

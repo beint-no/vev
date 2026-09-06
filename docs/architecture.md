@@ -15,7 +15,7 @@ One generated entity plan represents one accepted entity mapping and contains im
 - exact table and column identifiers;
 - typed JDBC binders and row readers;
 - identifier and tenant-key access where applicable;
-- identity-stable typed tokens for generated scalar equality indexes;
+- identity-stable typed tokens for generated scalar equality indexes, including explicit ASC/DESC value/ID ordering and typed composite cursors;
 - schema expectations needed to detect drift.
 
 The PostgreSQL runtime constructs and caches fixed statement shapes from that validated metadata. Raw SQL is not an entity-plan SPI, so a hand-written plan cannot replace a point read with an arbitrary statement.
@@ -86,7 +86,7 @@ Benchmark modules stay outside the runtime graph. In particular, the Hibernate b
 The target runtime contract is:
 
 1. A caller presents an opaque `TenantScope<Model,T>` minted by the generated, single-use authority permanently claimed by that verified `PgVev`, then enters an explicit lexical read or write transaction callback.
-2. A caller selects a generated entity operation, ID-ordered bounded scan, or generated-index equality/nullable page, optionally continuing after a generated type-bound key, and supplies typed inputs. Multiple pages share one database snapshot only when executed in the same lexical transaction; a continuation resumed in another transaction has normal keyset-pagination visibility of intervening writes.
+2. A caller selects a generated entity operation, ID-ordered bounded scan, or generated-index equality/nullable page, optionally continuing after a generated type-bound key or an ordered index's typed value/ID cursor, and supplies typed inputs. Multiple pages share one database snapshot only when executed in the same lexical transaction; a continuation resumed in another transaction has normal keyset-pagination visibility of intervening writes.
 3. The PostgreSQL runtime obtains a pgjdbc connection to the one pinned TCP primary, requires its dedicated pool baseline to already be exact `pg_catalog`/UTF-8 with no retained temporary schema, and configures a bounded `SERIALIZABLE` transaction with synchronous commit, UTC, verified tenant/RLS state, and database/network deadlines.
 4. The runtime verifies that the entity plan belongs to the closed generated model and that a query is a runtime-created safe query, then executes the internally compiled and cached SQL shape with validated bound values.
 5. Immediately before commit the runtime re-attests endpoint, database, role, tenant, encoding, isolation, deadline, and read/write state; it then closes JDBC resources deterministically and translates failures without retrying implicitly.

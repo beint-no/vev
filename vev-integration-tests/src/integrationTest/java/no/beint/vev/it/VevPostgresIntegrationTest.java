@@ -48,6 +48,7 @@ import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.ResultSet;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -92,6 +93,189 @@ final class VevPostgresIntegrationTest {
     @BeforeEach
     void truncate() throws SQLException {
         database.truncateAccounts();
+    }
+
+    @Test
+    void orderedIndexPagesTraverseTiesByValueThenIdentifierAcrossBothWireModes() throws SQLException {
+        database.seedOrderedRows();
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var count = new AtomicInteger();
+            var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(binary), count), IntegrationModelVev.POSTGRES, authority);
+            runtime.read(authority.scope(7), tx -> {
+                int before = count.get();
+                var first = tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(2)));
+                assertEquals(before + 1, count.get());
+                assertEquals(List.of(2, 3), first.values().stream().map(RankedItem::id).toList());
+                assertTrue(first.hasMore());
+                var last = first.values().getLast();
+                var second = tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(last.rank(), RankedItemVev.INSTANCE.key(last.id())), new QueryLimit(2)));
+                assertEquals(List.of(1, 4), second.values().stream().map(RankedItem::id).toList());
+                assertFalse(second.hasMore());
+                assertTrue(tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(20, RankedItemVev.INSTANCE.key(4)), new QueryLimit(2))).values().isEmpty());
+                assertEquals(List.of(3, 1, 4), tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(2)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(1, 4), tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(15, RankedItemVev.INSTANCE.key(999)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                var nulls = tx.entities().many(PgQueries.isNull(RankedItemVev.CATEGORY, new QueryLimit(1)));
+                assertEquals(List.of(6), nulls.values().stream().map(RankedItem::id).toList());
+                assertTrue(nulls.hasMore());
+                assertEquals(List.of(8, 5), tx.entities().many(PgQueries.isNullAfter(RankedItemVev.CATEGORY,
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(6)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(1, 8, 7, 5, 4, 2), tx.entities().many(PgQueries.equal(RankedItemVev.ENABLED, true, new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(2), tx.entities().many(PgQueries.equalAfter(RankedItemVev.ENABLED, true,
+                        RankedItemVev.ENABLED.cursor("delta", RankedItemVev.INSTANCE.key(4)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertTrue(tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "missing", new QueryLimit(8))).values().isEmpty());
+                return null;
+            });
+            runtime.read(authority.scope(8), tx -> {
+                assertEquals(List.of(2, 1), tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(1), tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(3)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void sharedKotlinOrderedPagesKeepDecimalScaleAndIdentifierTieBreakers() throws SQLException {
+        database.seedOrderedRows();
+        var index = no.beint.vev.fixtures.KotlinRankedVev.CATEGORY;
+        var plan = no.beint.vev.fixtures.KotlinRankedVev.INSTANCE;
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                runtime.read(authority.scope(tenant), tx -> {
+                    var first = tx.entities().many(PgQueries.equal(index, "g", new QueryLimit(1)));
+                    assertEquals(6, first.values().getFirst().id());
+                    assertTrue(first.hasMore());
+                    var rest = tx.entities().many(PgQueries.equalAfter(index, "g", index.cursor(new BigDecimal("3.00"), plan.key(6)), new QueryLimit(8)));
+                    assertEquals(List.of(1, 3, 2), rest.values().stream().map(no.beint.vev.fixtures.KotlinRanked::id).toList());
+                    assertFalse(rest.hasMore());
+                    assertEquals(List.of(2), tx.entities().many(PgQueries.equalAfter(index, "g",
+                            index.cursor(new BigDecimal("1.00"), plan.key(3)), new QueryLimit(8))).values().stream().map(no.beint.vev.fixtures.KotlinRanked::id).toList());
+                    assertTrue(tx.entities().many(PgQueries.equalAfter(index, "g",
+                            index.cursor(new BigDecimal("1.00"), plan.key(2)), new QueryLimit(8))).values().isEmpty());
+                    assertEquals(5, tx.entities().many(PgQueries.isNull(index, new QueryLimit(1))).values().getFirst().id());
+                    assertEquals(List.of(4), tx.entities().many(PgQueries.isNullAfter(index, index.cursor(new BigDecimal("0.00"), plan.key(5)), new QueryLimit(8))).values().stream().map(no.beint.vev.fixtures.KotlinRanked::id).toList());
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
+    void orderedQueriesRejectForeignTokensAndInvalidBoundsBeforePreparingSql() {
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var count = new AtomicInteger();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count), IntegrationModelVev.POSTGRES, authority);
+        runtime.read(authority.scope(7), tx -> {
+            int before = count.get();
+            var fake = new no.beint.vev.pg.PgNullableOrderedIndex<>(RankedItemVev.INSTANCE,
+                    "ranked_item_category_idx", 3, String.class, 5, Integer.class, no.beint.vev.VevIndex.Direction.ASC);
+            var fakeCursor = fake.cursor(10, RankedItemVev.INSTANCE.key(1));
+            assertThrows(IllegalArgumentException.class, () -> PgQueries.equalAfter(RankedItemVev.CATEGORY, "a", fakeCursor, new QueryLimit(1)));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equal(fake, "a", new QueryLimit(1))));
+            assertThrows(NullPointerException.class, () -> RankedItemVev.CATEGORY.cursor(null, RankedItemVev.INSTANCE.key(1)));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(9))));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a".repeat(65), new QueryLimit(1))));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.ENABLED, true,
+                    RankedItemVev.ENABLED.cursor("x".repeat(65), RankedItemVev.INSTANCE.key(1)), new QueryLimit(1))));
+            var decimal = no.beint.vev.fixtures.KotlinRankedVev.CATEGORY;
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equalAfter(decimal, "g",
+                    decimal.cursor(new BigDecimal("1.0"), no.beint.vev.fixtures.KotlinRankedVev.INSTANCE.key(1)), new QueryLimit(1))));
+            assertEquals(before, count.get());
+            assertTrue(tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(1))).values().isEmpty());
+            return null;
+        });
+    }
+
+    @Test
+    void orderedIndexCatalogAttestationRejectsAlteredOrderingAndIndexShapes() throws SQLException {
+        try {
+            for (String variant : List.of("wrongOrder", "descending", "nullsFirst", "missingTieBreaker", "expression", "included", "partial", "sharedOrder", "descendingAsAscending", "descendingMixed", "descendingNullsLast", "descendingPrefix")) {
+                database.orderedVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.orderedVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void invalidOrderedResultRollsBackEarlierWritesEvenWhenTheFailureIsCaught() throws SQLException {
+        database.seedOrderedRows();
+        database.orderedVariant("negativeVersion");
+        UUID earlier = id("ordered-read-failure");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "ordered@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(1))));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+    }
+
+    @Test
+    void orderedContinuationUsesItsDeclaredIndexWithoutASeparateSortOnTheSyntheticFixture() throws SQLException, java.io.IOException {
+        database.seedOrderedExplainRows();
+        var captured = new AtomicReference<String>();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var source = observingOrderedDataSource(database.applicationDataSource(), captured, "none");
+        var runtime = new PgVev<>(source, IntegrationModelVev.POSTGRES, authority);
+        var rows = runtime.read(authority.scope(7), tx -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "group",
+                RankedItemVev.CATEGORY.cursor(50, RankedItemVev.INSTANCE.key(10000)), new QueryLimit(8))));
+        assertEquals(8, rows.values().size());
+        assertTrue(rows.hasMore());
+        String explain = database.explainOrderedQuery(captured.get(), false);
+        java.nio.file.Path output = java.nio.file.Path.of("build", "reports", "ordered-index-explain.json");
+        java.nio.file.Files.createDirectories(output.getParent());
+        java.nio.file.Files.writeString(output, explain);
+        java.nio.file.Files.writeString(output.resolveSibling("ordered-index-query.sql"), captured.get() + ";\n");
+        assertTrue(explain.contains("\"Index Name\": \"ranked_item_category_idx\""), explain);
+        assertTrue(explain.contains("ROW(rank_value, id) > ROW(50, 10000)"), explain);
+        assertFalse(explain.contains("\"Node Type\": \"Sort\""), explain);
+    }
+
+    @Test
+    void descendingOrderedContinuationUsesItsDeclaredIndexWithoutASeparateSort() throws SQLException, java.io.IOException {
+        database.seedOrderedExplainRows();
+        var captured = new AtomicReference<String>();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(observingOrderedDataSource(database.applicationDataSource(), captured, "none"), IntegrationModelVev.POSTGRES, authority);
+        var rows = runtime.read(authority.scope(7), tx -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.ENABLED, true,
+                RankedItemVev.ENABLED.cursor("15000", RankedItemVev.INSTANCE.key(10000)), new QueryLimit(8))));
+        assertEquals(8, rows.values().size());
+        assertTrue(rows.hasMore());
+        String explain = database.explainOrderedQuery(captured.get(), true);
+        java.nio.file.Path output = java.nio.file.Path.of("build", "reports", "descending-ordered-index-explain.json");
+        java.nio.file.Files.createDirectories(output.getParent());
+        java.nio.file.Files.writeString(output, explain);
+        java.nio.file.Files.writeString(output.resolveSibling("descending-ordered-index-query.sql"), captured.get() + ";\n");
+        assertTrue(explain.contains("\"Index Name\": \"ranked_item_enabled_idx\""), explain);
+        assertTrue(explain.contains(" < ROW("), explain);
+        assertFalse(explain.contains("\"Node Type\": \"Sort\""), explain);
+    }
+
+    @Test
+    void orderedResultAndStatementCleanupFailuresPoisonAndRollBackTheTransaction() throws SQLException {
+        database.seedOrderedRows();
+        for (String fault : List.of("resultClose", "statementClose")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(observingOrderedDataSource(database.applicationDataSource(), new AtomicReference<>(), fault), IntegrationModelVev.POSTGRES, authority);
+            UUID earlier = id("ordered-" + fault);
+            assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "ordered-" + fault + "@example.test", "1.0000"));
+                assertThrows(IllegalStateException.class, () -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(2)), new QueryLimit(1))));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        }
     }
 
     @Test
@@ -3018,6 +3202,34 @@ final class VevPostgresIntegrationTest {
         } catch (InvocationTargetException failure) {
             throw failure.getCause();
         }
+    }
+
+    private static DataSource observingOrderedDataSource(DataSource source, AtomicReference<String> captured, String fault) {
+        return (DataSource) Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(source, method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, operation, parameters) -> {
+                                Object prepared = invokeTarget(connection, operation, parameters);
+                                if (!operation.getName().equals("prepareStatement") || !(parameters[0] instanceof String sql)
+                                        || !sql.contains("\"vev_it\".\"ranked_item\"")) return prepared;
+                                captured.set(sql);
+                                var statement = (PreparedStatement) prepared;
+                                return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                                        (statementProxy, statementMethod, statementArguments) -> {
+                                            Object answer = invokeTarget(statement, statementMethod, statementArguments);
+                                            if (fault.equals("statementClose") && statementMethod.getName().equals("close")) throw new SQLException("Synthetic ordered statement cleanup failure");
+                                            if (!(answer instanceof ResultSet rows) || !fault.equals("resultClose")) return answer;
+                                            return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{ResultSet.class},
+                                                    (resultProxy, resultMethod, resultArguments) -> {
+                                                        Object value = invokeTarget(rows, resultMethod, resultArguments);
+                                                        if (resultMethod.getName().equals("close")) throw new SQLException("Synthetic ordered result cleanup failure");
+                                                        return value;
+                                                    });
+                                        });
+                            });
+                });
     }
 
     private static DataSource entityStatementCountingDataSource(DataSource source, AtomicInteger count) {

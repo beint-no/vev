@@ -16,7 +16,7 @@ Start with a flat aggregate that has:
 - explicit columns using accepted basic types, with `nullable = true` or `nullable = false` written on every `@Column`;
 - no relationship persistence, inheritance, converter, callback, or lazy field;
 - explicit transaction ownership;
-- a small, measurable query surface expressible as point/batch ID access, bounded ID traversal, or generated scalar equality/`IS NULL` pages;
+- a small, measurable query surface expressible as point/batch ID access, bounded ID traversal, or generated scalar equality/`IS NULL` pages with ID or explicit value/ID ordering;
 - synthetic integration fixtures that represent nullability and constraint edges.
 
 Declare every [supported check constraint](check-constraints.md) by its exact name and PostgreSQL 18 deparsed definition; unsupported expressions must be addressed explicitly without weakening business invariants. Named `@UniqueConstraint` declarations preserve immediate tenant-scoped uniqueness with PostgreSQL distinct-null semantics; global uniqueness for tenant-owned VALUE columns, deferred/partial uniqueness, and standalone unique indexes are unsupported. Explicit shared reference mappings use declared global VALUE constraints. Scalar `@VevReference` components can preserve exact immediate foreign keys within the closed model, tenant-composite for scoped targets and scalar for shared targets; they do not imply loading or cascades. Each supported lookup index must be declared with `@VevIndex` and installed by the migration with the exact declared non-unique B-tree shape, omitting the tenant prefix only for explicitly shared records. If removing those database constraints would weaken an aggregate, it is not a migration candidate yet.
@@ -43,7 +43,7 @@ Do not dual-write two persistence implementations inside one request unless atom
 | Managed identity and dirty checking | Explicit stateless reads, insert, and version-qualified update |
 | Lazy proxies | Explicit follow-up queries or application composition |
 | Cascade and orphan removal | Explicit service operations; scalar tenant-composite references are supported, while cascade actions and other business constraints require further implementation |
-| JPQL/HQL/Criteria | Generated point/batch operations, ID-ordered bounded scans, and generated scalar equality/`IS NULL` pages with typed exclusive-key continuation; no arbitrary DSL, projection, join, `OFFSET`, or unbounded query |
+| JPQL/HQL/Criteria | Generated point/batch operations, ID-ordered bounded scans, and generated scalar equality/`IS NULL` pages with typed exclusive-key or declared ordering-value/ID continuation; no arbitrary DSL, projection, join, `OFFSET`, or unbounded query |
 | Spring Data repository proxy | Explicit agent integration; no current registrar promise |
 | Lifecycle callbacks | Explicit application behavior |
 | Provider tenant filters | An explicitly injected tenant authority, opaque per-tenant scopes, structurally generated tenant predicates, and forced database row security |

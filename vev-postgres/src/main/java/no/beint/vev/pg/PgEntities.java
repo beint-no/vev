@@ -143,6 +143,13 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             PgIndexScan<M, R, Object, Object> scan = (PgIndexScan<M, R, Object, Object>) rawScan;
             return executeIndexScan(scan);
         }
+        if (query instanceof PgOrderedIndexScan<?, ?, ?, ?, ?> rawScan) {
+            @SuppressWarnings("unchecked")
+            PgOrderedIndexScan<M, R, Object, Object, Object> scan = (PgOrderedIndexScan<M, R, Object, Object, Object>) rawScan;
+            return executeIndexScan(scan.index(), scan.predicate(), scan.value(),
+                    scan.cursor() == null ? null : scan.cursor().key().value(),
+                    scan.cursor() == null ? null : scan.cursor().orderValue(), scan.limit());
+        }
         throw new IllegalArgumentException("Only structurally generated PostgreSQL queries are executable");
     }
 
@@ -182,45 +189,56 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     }
 
     private <R, K, V> Rows<R> executeIndexScan(PgIndexScan<M, R, K, V> scan) {
-        PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.index().entityPlan());
-        PgIndexSql statements = entityPlan.indexSql(scan.index());
-        int limit = scan.limit().value();
+        return executeIndexScan(scan.index(), scan.predicate(),
+                scan.predicate() == PgIndexScan.Predicate.EQUAL ? scan.value() : null,
+                scan.hasAfterExclusive() ? scan.afterExclusive() : null, null, scan.limit());
+    }
+
+    private <R, K, V> Rows<R> executeIndexScan(PgQueryIndex<M, R, K, V> index,
+            PgIndexScan.Predicate predicate, V value, K afterExclusive, Object afterOrder, no.beint.vev.QueryLimit queryLimit) {
+        PgPlan<M, R, K, T> entityPlan = model.frozenPlan(index.entityPlan());
+        PgIndexSql statements = entityPlan.indexSql(index);
+        int limit = queryLimit.value();
         entityPlan.requireRowCount(limit);
         List<R> values = new ArrayList<>(limit);
-        boolean equality = scan.predicate() == PgIndexScan.Predicate.EQUAL;
+        boolean equality = predicate == PgIndexScan.Predicate.EQUAL;
         String sql;
         if (equality) {
-            sql = scan.hasAfterExclusive() ? statements.equalAfter() : statements.equal();
+            sql = afterExclusive != null ? statements.equalAfter() : statements.equal();
         } else {
-            sql = scan.hasAfterExclusive() ? statements.isNullAfter() : statements.isNull();
+            sql = afterExclusive != null ? statements.isNullAfter() : statements.isNull();
             if (sql == null) {
                 throw new IllegalArgumentException("IS NULL requires a generated nullable-index token");
             }
         }
-        PgColumn indexedColumn = entityPlan.columns().get(scan.index().columnIndex());
+        PgColumn indexedColumn = entityPlan.columns().get(index.columnIndex());
         if (equality) {
-            indexedColumn.validateValue(scan.value());
+            indexedColumn.validateValue(value);
         }
+        PgColumn orderColumn = index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered
+                ? entityPlan.columns().get(ordered.orderColumnIndex()) : null;
+        if (afterExclusive != null && orderColumn != null) orderColumn.validateValue(afterOrder);
         try (PreparedStatement statement = prepare(sql)) {
             int parameter = 1;
             if (!entityPlan.shared()) bindTenant(entityPlan, statement, parameter++);
             if (equality) {
-                bindUnknown(indexedColumn.codec(), statement, parameter++, scan.value());
+                bindUnknown(indexedColumn.codec(), statement, parameter++, value);
             }
-            if (scan.hasAfterExclusive()) {
-                bindUnknown(entityPlan.keyCodec(), statement, parameter++, scan.afterExclusive());
+            if (afterExclusive != null) {
+                if (orderColumn != null) bindUnknown(orderColumn.codec(), statement, parameter++, afterOrder);
+                bindUnknown(entityPlan.keyCodec(), statement, parameter++, afterExclusive);
             }
             statement.setInt(parameter, Math.addExact(limit, 1));
             statement.setFetchSize(Math.addExact(limit, 1));
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (values.size() < limit && resultSet.next()) {
-                    R value = readEntity(entityPlan, resultSet, 1);
-                    verifyReturnedEntity(entityPlan, value);
-                    verifyIndexPredicate(entityPlan, value, scan, indexedColumn);
-                    values.add(value);
+                    R entity = readEntity(entityPlan, resultSet, 1);
+                    verifyReturnedEntity(entityPlan, entity);
+                    verifyIndexPredicate(entityPlan, entity, index.columnIndex(), predicate, value, indexedColumn);
+                    values.add(entity);
                 }
                 boolean hasMore = resultSet.next();
-                return new Rows<>(values, scan.limit(), hasMore);
+                return new Rows<>(values, queryLimit, hasMore);
             }
         } catch (SQLException failure) {
             throw PgVev.databaseFailure(guard, failure);
@@ -799,19 +817,21 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         }
     }
 
-    private <E, K, V> void verifyIndexPredicate(
+    private <E, K> void verifyIndexPredicate(
             PgPlan<M, E, K, T> plan,
             E entity,
-            PgIndexScan<M, E, K, V> scan,
+            int columnIndex,
+            PgIndexScan.Predicate predicate,
+            Object expected,
             PgColumn indexedColumn) {
         try {
-            Object actual = plan.columnValue(entity, scan.index().columnIndex());
+            Object actual = plan.columnValue(entity, columnIndex);
             indexedColumn.validateValue(actual);
-            if (scan.predicate() == PgIndexScan.Predicate.IS_NULL) {
+            if (predicate == PgIndexScan.Predicate.IS_NULL) {
                 if (actual != null) {
                     throw new IllegalStateException("IS NULL index query returned a non-null value");
                 }
-            } else if (actual == null || !actual.equals(scan.value())) {
+            } else if (actual == null || !actual.equals(expected)) {
                 throw new IllegalStateException("Equality index query returned a different value");
             }
         } catch (RuntimeException failure) {

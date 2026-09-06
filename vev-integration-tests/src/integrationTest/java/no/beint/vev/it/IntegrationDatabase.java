@@ -91,6 +91,11 @@ final class IntegrationDatabase {
                     statement.execute(sql);
                 }
             }
+            for (String sql : orderedSchemaStatements()) {
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute(sql);
+                }
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "INSERT INTO public.vev_schema_fingerprint(model_name, fingerprint) VALUES (?, ?)")) {
                 statement.setString(1, modelName);
@@ -103,8 +108,98 @@ final class IntegrationDatabase {
     void truncateAccounts() throws SQLException {
         try (Connection connection = adminConnection();
              Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared");
+            statement.execute("TRUNCATE TABLE vev_it.account, vev_it.audit_event, vev_it.work_item, vev_it.snapshot_probe, vev_it.kotlin_entry, vev_it.identity_entry, vev_it.identity_counter, vev_it.identity_event, vev_it.kotlin_identity, vev_it.large_text, vev_it.binary_asset, vev_it.binary_sample, vev_it.kotlin_binary, vev_it.text_document, vev_it.kotlin_text, vev_it.kotlin_clock, vev_it.readonly_snapshot, vev_it.readonly_identity, vev_it.kotlin_readonly, vev_it.shared_catalog, vev_it.catalog_selection, vev_it.kotlin_shared, vev_it.ranked_item, vev_it.kotlin_ranked");
         }
+    }
+
+    void seedOrderedRows() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO vev_it.ranked_item VALUES (1,7,0,'a',true,20,'zulu'), (2,7,0,'a',true,10,'alpha'), (3,7,0,'a',false,10,'beta'), (4,7,0,'a',true,20,'delta'), (5,7,0,NULL,true,20,'echo'), (6,7,0,NULL,false,10,'foxtrot'), (7,7,0,'b',true,0,'gamma'), (8,7,0,NULL,true,10,'hotel'), (1,8,0,'a',true,30,'foreign'), (2,8,0,'a',true,-1,'foreign')");
+            statement.execute("INSERT INTO vev_it.kotlin_ranked(id, category, position) OVERRIDING SYSTEM VALUE VALUES (1,'g',2.00), (2,'g',1.00), (3,'g',1.00), (4,NULL,0.00), (5,NULL,0.00), (6,'g',3.00)");
+        }
+    }
+
+    void orderedVariant(String variant) throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("DROP INDEX IF EXISTS vev_it.ranked_item_category_idx");
+            statement.execute("DROP INDEX IF EXISTS vev_it.ranked_item_enabled_idx");
+            statement.execute("DROP INDEX IF EXISTS vev_it.kotlin_ranked_category_idx");
+            String keys = switch (variant) {
+                case "wrongOrder" -> "tenant_id, category, id, rank_value";
+                case "descending" -> "tenant_id, category, rank_value DESC, id";
+                case "nullsFirst" -> "tenant_id, category, rank_value NULLS FIRST, id";
+                case "missingTieBreaker" -> "tenant_id, category, rank_value";
+                case "expression" -> "tenant_id, category, (rank_value + 1), id";
+                default -> "tenant_id, category, rank_value, id";
+            };
+            statement.execute("CREATE INDEX ranked_item_category_idx ON vev_it.ranked_item (" + keys + ")"
+                    + (variant.equals("included") ? " INCLUDE (version)" : "")
+                    + (variant.equals("partial") ? " WHERE enabled" : ""));
+            statement.execute("CREATE INDEX kotlin_ranked_category_idx ON vev_it.kotlin_ranked ("
+                    + (variant.equals("sharedOrder") ? "category, id DESC, position DESC" : "category, position DESC, id DESC") + ")");
+            String descendingKeys = switch (variant) {
+                case "descendingAsAscending" -> "tenant_id, enabled, \"order\", id";
+                case "descendingMixed" -> "tenant_id, enabled, \"order\" DESC, id";
+                case "descendingNullsLast" -> "tenant_id, enabled, \"order\" DESC NULLS LAST, id DESC";
+                case "descendingPrefix" -> "tenant_id DESC, enabled, \"order\" DESC, id DESC";
+                default -> "tenant_id, enabled, \"order\" DESC, id DESC";
+            };
+            statement.execute("CREATE INDEX ranked_item_enabled_idx ON vev_it.ranked_item (" + descendingKeys + ")");
+            if (variant.equals("negativeVersion")) statement.execute("UPDATE vev_it.ranked_item SET version = -1 WHERE tenant_id = 7 AND id = 2");
+        }
+    }
+
+    void seedOrderedExplainRows() throws SQLException {
+        try (Connection connection = adminConnection(); Statement statement = connection.createStatement()) {
+            statement.execute("INSERT INTO vev_it.ranked_item SELECT value, 7, 0, 'group', true, value % 100, value::text FROM pg_catalog.generate_series(1, 20000) value");
+            statement.execute("ANALYZE vev_it.ranked_item");
+        }
+    }
+
+    String explainOrderedQuery(String sql, boolean descending) throws SQLException {
+        try (Connection connection = applicationDataSource().getConnection()) {
+            connection.setAutoCommit(false);
+            connection.setReadOnly(true);
+            connection.setTransactionIsolation(Connection.TRANSACTION_SERIALIZABLE);
+            try (Statement setting = connection.createStatement()) {
+                setting.execute("SET LOCAL vev.tenant_id = '7'");
+            }
+            try (PreparedStatement statement = connection.prepareStatement("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql)) {
+                statement.setInt(1, 7);
+                if (descending) {
+                    statement.setBoolean(2, true);
+                    statement.setString(3, "15000");
+                } else {
+                    statement.setString(2, "group");
+                    statement.setInt(3, 50);
+                }
+                statement.setInt(4, 10000);
+                statement.setInt(5, 9);
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next()) throw new IllegalStateException("Missing synthetic EXPLAIN result");
+                    String result = rows.getString(1);
+                    if (rows.next()) throw new IllegalStateException("Unexpected second EXPLAIN result");
+                    connection.rollback();
+                    return result;
+                }
+            }
+        }
+    }
+
+    private static List<String> orderedSchemaStatements() {
+        return List.of(
+                "CREATE TABLE vev_it.ranked_item (id integer NOT NULL, tenant_id integer NOT NULL, version integer NOT NULL, category varchar(64), enabled boolean NOT NULL, rank_value integer NOT NULL, \"order\" varchar(64) NOT NULL, PRIMARY KEY(tenant_id,id))",
+                "ALTER TABLE vev_it.ranked_item OWNER TO vev_it_owner",
+                "ALTER TABLE vev_it.ranked_item ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE vev_it.ranked_item FORCE ROW LEVEL SECURITY",
+                "CREATE POLICY ranked_item_tenant ON vev_it.ranked_item FOR ALL TO vev_it_app USING (tenant_id = current_setting('vev.tenant_id', true)::integer) WITH CHECK (tenant_id = current_setting('vev.tenant_id', true)::integer)",
+                "CREATE INDEX ranked_item_category_idx ON vev_it.ranked_item(tenant_id,category,rank_value,id)",
+                "CREATE INDEX ranked_item_enabled_idx ON vev_it.ranked_item(tenant_id,enabled,\"order\" DESC,id DESC)",
+                "GRANT SELECT, INSERT(id,tenant_id,version,category,enabled,rank_value,\"order\"), UPDATE(version,category,enabled,rank_value,\"order\") ON vev_it.ranked_item TO vev_it_app",
+                "CREATE TABLE vev_it.kotlin_ranked (id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY, category varchar(64), position numeric(19,2) NOT NULL)",
+                "ALTER TABLE vev_it.kotlin_ranked OWNER TO vev_it_owner",
+                "CREATE INDEX kotlin_ranked_category_idx ON vev_it.kotlin_ranked(category,position DESC,id DESC)",
+                "GRANT SELECT ON vev_it.kotlin_ranked TO vev_it_app");
     }
 
     void seedSharedRows() throws SQLException {

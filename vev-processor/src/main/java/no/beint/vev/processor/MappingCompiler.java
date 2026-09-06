@@ -121,7 +121,7 @@ final class MappingCompiler {
             GENERATED_VALUE, Set.of("strategy", "generator"),
             TENANT_KEY, Set.of(),
             APPEND_ONLY, Set.of(),
-            VEV_INDEX, Set.of("name"));
+            VEV_INDEX, Set.of("name", "orderBy", "direction"));
 
     private final ProcessingEnvironment processingEnvironment;
     private final Messager messager;
@@ -530,9 +530,14 @@ final class MappingCompiler {
             }
         }
         String indexName = index == null ? "" : stringValue(index, "name");
+        String indexOrderBy = index == null ? "" : stringValue(index, "orderBy");
+        String indexDirection = index == null ? "ASC" : enumValue(index, "direction");
         String indexFieldName = "";
         if (index != null) {
             validateIdentifier(component, indexName, "index");
+            if (!Set.of("ASC", "DESC").contains(indexDirection) || indexOrderBy.isEmpty() && !indexDirection.equals("ASC")) {
+                error(component, "@VevIndex.direction must be ASC or DESC; DESC requires an explicit orderBy column");
+            }
             if (tenant || version) {
                 error(component, "@VevIndex may map an ID or VALUE component, not @TenantKey or @Version");
             }
@@ -675,6 +680,8 @@ final class MappingCompiler {
                 version,
                 indexName,
                 indexFieldName,
+                indexOrderBy,
+                indexDirection,
                 enumConstants,
                 referenceName,
                 referenceTarget,
@@ -808,6 +815,16 @@ final class MappingCompiler {
         Map<String, PropertyMapping> indexNames = new HashMap<>();
         Map<String, PropertyMapping> fieldNames = new HashMap<>();
         for (PropertyMapping property : indexed) {
+            if (!property.indexOrderBy().isEmpty()) {
+                validateIdentifier(property.declaration(), property.indexOrderBy(), "ordering column");
+                PropertyMapping order = properties.stream().filter(candidate -> candidate.columnName().equals(property.indexOrderBy()))
+                        .findFirst().orElse(null);
+                if (property.id() || order == null || order == property || order.id() || order.tenant() || order.version() || order.nullable()) {
+                    error(property.declaration(), "@VevIndex.orderBy requires a distinct non-null VALUE column and a VALUE filter");
+                } else if (Set.of("character varying", "text").contains(order.arrayElementType()) && order.maximumLength() > 256) {
+                    error(property.declaration(), "Index ordering String columns must not exceed 256 code points");
+                }
+            }
             PropertyMapping duplicateName = indexNames.putIfAbsent(property.indexName(), property);
             if (duplicateName != null) {
                 error(property.declaration(), "Duplicate explicit index name \"" + property.indexName() + "\"");
@@ -826,7 +843,10 @@ final class MappingCompiler {
             if (!property.indexed()) {
                 continue;
             }
-            int maximumBytes = Math.addExact(identityBytes, property.id() ? 0 : maximumIndexBytes(property));
+            PropertyMapping order = properties.stream().filter(candidate -> candidate.columnName().equals(property.indexOrderBy()))
+                    .findFirst().orElse(null);
+            int maximumBytes = Math.addExact(Math.addExact(identityBytes, property.id() ? 0 : maximumIndexBytes(property)),
+                    order == null ? 0 : maximumIndexBytes(order));
             if (maximumBytes > MAXIMUM_INDEX_KEY_BYTES) {
                 error(property.declaration(), "PostgreSQL index " + property.indexName()
                         + " can exceed Vev's " + MAXIMUM_INDEX_KEY_BYTES
@@ -1277,6 +1297,8 @@ final class MappingCompiler {
                         .append(property.tenant()).append('|')
                         .append(property.version()).append('|')
                         .append(property.indexName()).append('\n');
+                if (!property.indexOrderBy().isEmpty()) canonical.append("indexOrder|").append(property.indexOrderBy()).append('\n');
+                if (property.indexDirection().equals("DESC")) canonical.append("indexDirection|DESC\n");
                 if (property.identity()) {
                     canonical.append("identity|POSTGRESQL IDENTITY|START 1|INCREMENT 1|NO CYCLE\n");
                 }

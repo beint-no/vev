@@ -28,11 +28,14 @@ final class SchemaManifestGenerator {
     private String entity(CompiledModel model, EntityMapping entity) {
         String indexes = entity.properties().stream().filter(PropertyMapping::indexed)
                 .map(property -> """
-                            {"name": %s, "method": "btree", "unique": false, "columns": [%s]}"""
+                            {"name": %s, "method": "btree", "unique": false, "columns": [%s]%s}"""
                         .formatted(quote(property.indexName()),
                                 (entity.shared() ? "" : quote(entity.tenant().columnName()) + ", ")
                                         + (property.id() ? "" : quote(property.columnName()) + ", ")
-                                        + quote(entity.id().columnName())))
+                                        + (property.indexOrderBy().isEmpty() ? "" : quote(property.indexOrderBy()) + ", ")
+                                        + quote(entity.id().columnName()),
+                                property.indexDirection().equals("DESC") ? ", \"directions\": ["
+                                        + (entity.shared() ? "" : "\"ASC\", ") + "\"ASC\", \"DESC\", \"DESC\"]" : ""))
                 .collect(Collectors.joining(",\n")).indent(8).stripTrailing();
         String updates = entity.properties().stream()
                 .filter(property -> !entity.readOnly() && !entity.appendOnly() && !property.id() && !property.tenant())

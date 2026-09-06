@@ -145,6 +145,80 @@ public final class PgQueries {
                 generated, PgIndexScan.Predicate.IS_NULL, null, key, Objects.requireNonNull(limit, "limit"));
     }
 
+    /**
+     * Creates an equality page ordered by the declared scalar value and identifier tie-breaker.
+     * @param index generated ordered index
+     * @param value non-null equality value
+     * @param limit maximum returned rows
+     * @param <M> model marker
+     * @param <E> snapshot type
+     * @param <K> identifier type
+     * @param <V> equality value type
+     * @param <S> ordering value type
+     * @return opaque bounded ordered query
+     */
+    public static <M, E, K, V, S> BoundedQuery<M, E> equal(
+            PgOrderedIndex<M, E, K, V, S> index, V value, QueryLimit limit) {
+        Objects.requireNonNull(index, "index");
+        requireValue(index, value);
+        return new PgOrderedIndexScan<>(index, PgIndexScan.Predicate.EQUAL, value, null, limit);
+    }
+
+    /**
+     * Continues an ordered equality page after an exact index-bound value/identifier cursor.
+     * @param index generated ordered index
+     * @param value non-null equality value
+     * @param afterExclusive index-bound cursor
+     * @param limit maximum returned rows
+     * @param <M> model marker
+     * @param <E> snapshot type
+     * @param <K> identifier type
+     * @param <V> equality value type
+     * @param <S> ordering value type
+     * @return opaque bounded continuation query
+     */
+    public static <M, E, K, V, S> BoundedQuery<M, E> equalAfter(
+            PgOrderedIndex<M, E, K, V, S> index, V value, PgOrderedCursor<M, E, K, V, S> afterExclusive, QueryLimit limit) {
+        Objects.requireNonNull(index, "index");
+        requireValue(index, value);
+        return new PgOrderedIndexScan<>(index, PgIndexScan.Predicate.EQUAL, value,
+                Objects.requireNonNull(afterExclusive, "afterExclusive"), limit);
+    }
+
+    /**
+     * Creates an ordered page for a nullable filter whose value is SQL NULL.
+     * @param index generated nullable ordered index
+     * @param limit maximum returned rows
+     * @param <M> model marker
+     * @param <E> snapshot type
+     * @param <K> identifier type
+     * @param <V> equality value type
+     * @param <S> ordering value type
+     * @return opaque bounded null-filter query
+     */
+    public static <M, E, K, V, S> BoundedQuery<M, E> isNull(
+            PgNullableOrderedIndex<M, E, K, V, S> index, QueryLimit limit) {
+        return new PgOrderedIndexScan<>(index, PgIndexScan.Predicate.IS_NULL, null, null, limit);
+    }
+
+    /**
+     * Continues a nullable ordered index page after an exact value/identifier cursor.
+     * @param index generated nullable ordered index
+     * @param afterExclusive index-bound cursor
+     * @param limit maximum returned rows
+     * @param <M> model marker
+     * @param <E> snapshot type
+     * @param <K> identifier type
+     * @param <V> equality value type
+     * @param <S> ordering value type
+     * @return opaque bounded null-filter continuation
+     */
+    public static <M, E, K, V, S> BoundedQuery<M, E> isNullAfter(
+            PgNullableOrderedIndex<M, E, K, V, S> index, PgOrderedCursor<M, E, K, V, S> afterExclusive, QueryLimit limit) {
+        return new PgOrderedIndexScan<>(index, PgIndexScan.Predicate.IS_NULL, null,
+                Objects.requireNonNull(afterExclusive, "afterExclusive"), limit);
+    }
+
     private static <M, E, K> PgEntityPlan<M, E, K, ?> generatedPlan(EntityType<M, E, K> entityType) {
         Objects.requireNonNull(entityType, "entityType");
         if (!(entityType instanceof PgEntityPlan<?, ?, ?, ?> rawPlan)) {
@@ -164,7 +238,7 @@ public final class PgQueries {
         return Objects.requireNonNull(index, "index");
     }
 
-    private static <M, E, K, V> void requireValue(PgIndex<M, E, K, V> index, V value) {
+    private static <M, E, K, V> void requireValue(PgQueryIndex<M, E, K, V> index, V value) {
         Objects.requireNonNull(value, "value");
         if (value.getClass() != index.valueType()
                 && !(value instanceof Enum<?> constant && constant.getDeclaringClass() == index.valueType())) {

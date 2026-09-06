@@ -35,8 +35,8 @@
 
 ## Phase 3 — query and aggregate breadth
 
-- extend the closed typed query compiler from scalar equality/null pages to typed projections and explicitly costed predicates without exposing raw SQL or a runtime AST escape hatch;
-- replace tenant-relative `EntityKey` pagination with opaque model/entity/tenant/predicate-bound continuation cursors;
+- extend the closed typed query compiler from scalar equality/null pages with explicit ASC/DESC value/ID ordering to typed projections and explicitly costed predicates without exposing raw SQL or a runtime AST escape hatch;
+- replace tenant-relative `EntityKey` and index-bound value/ID pagination with opaque model/entity/tenant/predicate-bound continuation cursors;
 - evaluate embeddables and composite keys without weakening equality guarantees;
 - define explicit aggregate write plans before accepting relationships or cascades;
 - introduce converters only with deterministic AOT and JDBC contracts;

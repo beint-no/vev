@@ -3,7 +3,7 @@ package no.beint.vev.pg.spi;
 import no.beint.vev.EntityType;
 import no.beint.vev.pg.PgCodec;
 import no.beint.vev.pg.PgColumn;
-import no.beint.vev.pg.PgIndex;
+import no.beint.vev.pg.PgQueryIndex;
 import no.beint.vev.pg.PgReference;
 import no.beint.vev.pg.PgUnique;
 
@@ -31,7 +31,7 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * Generated-plan binary contract accepted by this runtime. Incompatible SPI changes increment this value.
      * This version is independent of the database schema fingerprint and the library release version.
      */
-    int ABI_VERSION = 2;
+    int ABI_VERSION = 3;
 
     /**
      * Returns the binary contract embedded by the processor that generated this plan.
@@ -88,7 +88,7 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      *
      * @return stable immutable index-token list
      */
-    List<PgIndex<M, E, K, ?>> indexes();
+    List<PgQueryIndex<M, E, K, ?>> indexes();
 
     /**
      * Returns the complete generated outgoing foreign-key requirements.

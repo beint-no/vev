@@ -37,18 +37,20 @@ final class PgPlanAbiTest {
     }
 
     @Test
-    void binaryFromBeforeExplicitTenantOwnershipIsRejectedBeforeMetadataAccess() throws ReflectiveOperationException {
-        byte[] bytes = ClassFile.of().build(ClassDesc.of("fixture.LegacyPlan"), builder -> builder
-                .withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL)
-                .withInterfaceSymbols(ClassDesc.of("no.beint.vev.pg.spi.PgEntityPlan"))
-                .withMethodBody(INIT_NAME, MTD_void, ClassFile.ACC_PUBLIC, code -> code
-                        .aload(0).invokespecial(CD_Object, INIT_NAME, MTD_void).return_())
-                .withMethodBody("generatedPlanAbi", MethodTypeDesc.of(java.lang.constant.ConstantDescs.CD_int),
-                        ClassFile.ACC_PUBLIC, code -> code.iconst_1().ireturn()));
-        var plan = (PgEntityPlan<?, ?, ?, ?>) new FixtureLoader().define(bytes).getConstructor().newInstance();
-        assertEquals(1, plan.generatedPlanAbi());
-        var failure = assertThrows(IllegalArgumentException.class, () -> capture(plan));
-        assertTrue(failure.getMessage().contains("plan declares 1; recompile mappings"));
+    void incompatibleVersionedBinariesAreRejectedBeforeMetadataAccess() throws ReflectiveOperationException {
+        for (int abi : List.of(1, 2)) {
+            byte[] bytes = ClassFile.of().build(ClassDesc.of("fixture.LegacyPlan"), builder -> builder
+                    .withFlags(ClassFile.ACC_PUBLIC | ClassFile.ACC_FINAL)
+                    .withInterfaceSymbols(ClassDesc.of("no.beint.vev.pg.spi.PgEntityPlan"))
+                    .withMethodBody(INIT_NAME, MTD_void, ClassFile.ACC_PUBLIC, code -> code
+                            .aload(0).invokespecial(CD_Object, INIT_NAME, MTD_void).return_())
+                    .withMethodBody("generatedPlanAbi", MethodTypeDesc.of(java.lang.constant.ConstantDescs.CD_int),
+                            ClassFile.ACC_PUBLIC, code -> code.loadConstant(abi).ireturn()));
+            var plan = (PgEntityPlan<?, ?, ?, ?>) new FixtureLoader().define(bytes).getConstructor().newInstance();
+            assertEquals(abi, plan.generatedPlanAbi());
+            var failure = assertThrows(IllegalArgumentException.class, () -> capture(plan));
+            assertTrue(failure.getMessage().contains("plan declares " + abi + "; recompile mappings"));
+        }
     }
 
     private static <M, E, K, T> void capture(PgEntityPlan<M, E, K, T> plan) {

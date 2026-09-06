@@ -20,6 +20,8 @@ record PropertyMapping(
         boolean version,
         String indexName,
         String indexFieldName,
+        String indexOrderBy,
+        String indexDirection,
         List<String> enumConstants,
         String referenceName,
         String referenceTarget,

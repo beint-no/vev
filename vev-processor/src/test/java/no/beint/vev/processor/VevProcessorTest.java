@@ -45,9 +45,9 @@ final class VevProcessorTest {
         String registry = first.generated("example/BillingModelVev.java");
         assertEquals(accountPlan, second.generated("example/AccountVev.java"));
         assertEquals(registry, second.generated("example/BillingModelVev.java"));
-        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 2;\n    }"));
-        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 2;\n    }"));
-        assertEquals(2, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
+        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 3;\n    }"));
+        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 3;\n    }"));
+        assertEquals(3, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
@@ -55,7 +55,7 @@ final class VevProcessorTest {
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgRequiredIndex<>(INSTANCE, \"account_display_name_idx\", 3, java.lang.String.class)"));
         assertTrue(accountPlan.contains("public static final no.beint.vev.pg.PgNullableIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, java.lang.String> ALIAS"));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgNullableIndex<>(INSTANCE, \"account_alias_idx\", 5, java.lang.String.class)"));
-        assertTrue(accountPlan.contains("public java.util.List<no.beint.vev.pg.PgIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, ?>> indexes()"));
+        assertTrue(accountPlan.contains("public java.util.List<no.beint.vev.pg.PgQueryIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, ?>> indexes()"));
         assertTrue(accountPlan.contains("return INDEXES;"));
         assertTrue(accountPlan.contains("public Object columnValue(example.Account entity, int columnIndex)"));
         assertTrue(accountPlan.contains("public example.Account readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException"));
@@ -917,6 +917,171 @@ final class VevProcessorTest {
         assertTrue(compilation.diagnostics().contains(
                 "PostgreSQL index ledger.shared_value_idx collides with a mapped relation"),
                 compilation.diagnostics());
+    }
+
+    @Test
+    void orderedIndexesGenerateTypedCursorsAndIdenticalSourceAndBinaryContracts() throws IOException, ReflectiveOperationException {
+        var sources = orderedSources();
+        Compilation source = compile(sources);
+        assertTrue(source.success(), source.diagnostics());
+        String plan = source.generated("example/AccountVev.java");
+        assertTrue(plan.contains("PgRequiredOrderedIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, java.lang.String, java.math.BigDecimal> DISPLAY_NAME"));
+        assertTrue(plan.contains("PgNullableOrderedIndex<example.BillingModelVev.Model, example.Account, java.lang.Long, java.lang.String, java.math.BigDecimal> ALIAS"));
+        assertTrue(source.manifest("example.BillingModel").contains("\"columns\": [\"tenant_id\", \"display_name\", \"balance\", \"id\"]"));
+        String model = sources.remove("example/BillingModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(plan, binary.generated("example/AccountVev.java"));
+        assertEquals(source.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+        try (var loader = new java.net.URLClassLoader(new java.net.URL[]{source.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+            var compiled = (no.beint.vev.pg.PgModel<?, ?>) loader.loadClass("example.BillingModelVev").getField("POSTGRES").get(null);
+            assertEquals(java.util.UUID.class, compiled.tenantType());
+        }
+        var defaults = positiveSources();
+        Compilation implicit = compile(defaults);
+        defaults.computeIfPresent("example/Account.java", (path, text) -> text.replace("@VevIndex(name =", "@VevIndex(orderBy = \"\", direction = VevIndex.Direction.ASC, name ="));
+        Compilation explicit = compile(defaults);
+        assertTrue(implicit.success(), implicit.diagnostics());
+        assertTrue(explicit.success(), explicit.diagnostics());
+        assertEquals(implicit.manifest("example.BillingModel"), explicit.manifest("example.BillingModel"));
+        assertEquals(implicit.generated("example/AccountVev.java"), explicit.generated("example/AccountVev.java"));
+        assertNotEquals(implicit.manifest("example.BillingModel"), source.manifest("example.BillingModel"));
+    }
+
+    @Test
+    void orderedDirectionsAreExplicitAndSurviveSeparateCompilation() throws IOException {
+        var sources = orderedSources();
+        Compilation ascending = compile(sources);
+        assertTrue(ascending.success(), ascending.diagnostics());
+        sources.computeIfPresent("example/Account.java", (path, text) -> text.replace("@VevIndex(orderBy =", "@VevIndex(direction = VevIndex.Direction.ASC, orderBy ="));
+        Compilation explicit = compile(sources);
+        assertTrue(explicit.success(), explicit.diagnostics());
+        assertEquals(ascending.manifest("example.BillingModel"), explicit.manifest("example.BillingModel"));
+        assertEquals(ascending.generated("example/AccountVev.java"), explicit.generated("example/AccountVev.java"));
+        sources.computeIfPresent("example/Account.java", (path, text) -> text.replace("VevIndex.Direction.ASC", "VevIndex.Direction.DESC"));
+        Compilation descending = compile(sources);
+        assertTrue(descending.success(), descending.diagnostics());
+        assertTrue(descending.manifest("example.BillingModel").contains("\"directions\": [\"ASC\", \"ASC\", \"DESC\", \"DESC\"]"));
+        assertTrue(descending.generated("example/AccountVev.java").contains("no.beint.vev.VevIndex.Direction.DESC"));
+        assertNotEquals(ascending.manifest("example.BillingModel"), descending.manifest("example.BillingModel"));
+        String model = sources.remove("example/BillingModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(descending.manifest("example.BillingModel"), binary.manifest("example.BillingModel"));
+        assertEquals(descending.generated("example/AccountVev.java"), binary.generated("example/AccountVev.java"));
+        var invalid = positiveSources();
+        invalid.computeIfPresent("example/Account.java", (path, text) -> text.replace("@VevIndex(name =", "@VevIndex(direction = VevIndex.Direction.DESC, name ="));
+        Compilation invalidSource = compile(invalid);
+        assertFalse(invalidSource.success());
+        assertTrue(invalidSource.diagnostics().contains("DESC requires an explicit orderBy column"), invalidSource.diagnostics());
+        String invalidModel = invalid.remove("example/BillingModel.java");
+        Compilation invalidDependency = compile(invalid, "", false);
+        assertTrue(invalidDependency.success(), invalidDependency.diagnostics());
+        Compilation invalidBinary = compile(Map.of("example/BillingModel.java", invalidModel), invalidDependency.classesDirectory().toString(), true);
+        assertFalse(invalidBinary.success());
+        assertTrue(invalidBinary.diagnostics().contains("DESC requires an explicit orderBy column"), invalidBinary.diagnostics());
+    }
+
+    @Test
+    void orderedIndexesAcceptBoundedBuiltInScalarOrderingCodecs() throws IOException, ReflectiveOperationException {
+        var codecs = new LinkedHashMap<String, String>();
+        for (String type : List.of("Boolean", "Short", "Integer", "Long", "java.util.UUID", "java.time.LocalDate", "java.time.LocalDateTime", "java.time.LocalTime", "java.time.Instant")) {
+            codecs.put(type, "@jakarta.persistence.Column(name = \"ordering\", nullable = false)");
+        }
+        codecs.put("String", "@jakarta.persistence.Column(name = \"ordering\", nullable = false, length = 64)");
+        codecs.put("java.math.BigDecimal", "@jakarta.persistence.Column(name = \"ordering\", nullable = false, precision = 19, scale = 4)");
+        codecs.put("no.beint.vev.Binary", "@no.beint.vev.VevBinary(maximumBytes = 32, check = \"ordering_bound\") @jakarta.persistence.Column(name = \"ordering\", nullable = false)");
+        codecs.put("Rank", "@jakarta.persistence.Enumerated(jakarta.persistence.EnumType.STRING) @jakarta.persistence.Column(name = \"ordering\", nullable = false, length = 64)");
+        for (var codec : codecs.entrySet()) {
+            var sources = new LinkedHashMap<String, String>();
+            sources.put("example/Rank.java", "package example; public enum Rank { FIRST, SECOND }");
+            sources.put("example/Ordered.java", """
+                    package example;
+                    import jakarta.persistence.*;
+                    import no.beint.vev.*;
+                    @Entity @AppendOnly @Table(name = "ordered", schema = "ledger")
+                    public record Ordered(
+                        @Id @Column(name = "id", nullable = false) Integer id,
+                        @TenantKey @Column(name = "tenant_id", nullable = false) Integer tenant,
+                        @VevIndex(name = "ordered_filter_idx", orderBy = "ordering") @Column(name = "filter", nullable = false) Boolean filter,
+                        %s %s ordering) {}
+                    """.formatted(codec.getValue(), codec.getKey()));
+            sources.put("example/OrderedModel.java", "package example; @no.beint.vev.VevModel(entities = Ordered.class) public class OrderedModel {}");
+            Compilation compilation = compile(sources);
+            assertTrue(compilation.success(), codec.getKey() + ": " + compilation.diagnostics());
+            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{compilation.classesDirectory().toUri().toURL()}, getClass().getClassLoader())) {
+                var model = (no.beint.vev.pg.PgModel<?, ?>) loader.loadClass("example.OrderedModelVev").getField("POSTGRES").get(null);
+                assertEquals(1, model.plans().size());
+            }
+        }
+    }
+
+    @Test
+    void orderedIndexMetadataRejectsUnsafeRolesNamesNullabilityAndRetainedKeyBounds() throws IOException {
+        for (String order : List.of("unknown", "balance DESC", "tenant_id", "id", "version", "display_name", "alias")) {
+            var sources = positiveSources();
+            sources.computeIfPresent("example/Account.java", (path, text) -> text.replace("name = \"account_display_name_idx\"", "name = \"account_display_name_idx\", orderBy = \"" + order + "\""));
+            Compilation source = compile(sources);
+            assertFalse(source.success(), order);
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertFalse(binary.success(), order);
+        }
+        var longOrdering = positiveSources();
+        longOrdering.computeIfPresent("example/Account.java", (path, text) -> text
+                .replace("name = \"account_alias_idx\"", "name = \"account_alias_idx\", orderBy = \"display_name\"")
+                .replace("@VevIndex(name = \"account_display_name_idx\")", "")
+                .replace("length = 255", "length = 257"));
+        Compilation longSource = compile(longOrdering);
+        assertFalse(longSource.success());
+        assertTrue(longSource.diagnostics().contains("ordering String columns must not exceed 256"), longSource.diagnostics());
+        longOrdering.computeIfPresent("example/Account.java", (path, text) -> text.replace("length = 257", "length = 256").replace("length = 64", "length = 256"));
+        Compilation oversized = compile(longOrdering);
+        assertFalse(oversized.success());
+        assertTrue(oversized.diagnostics().contains("1536-byte retained-key budget"), oversized.diagnostics());
+    }
+
+    @Test
+    void orderedQueryCallSitesRequireTheOrderingTypeAndIndexBoundCursor() throws IOException {
+        String valid = """
+                package example;
+                class OrderedCalls {
+                    void run() {
+                        var index = AccountVev.DISPLAY_NAME;
+                        var cursor = index.cursor(new java.math.BigDecimal("1.00"), AccountVev.INSTANCE.key(1L));
+                        no.beint.vev.pg.PgQueries.equal(index, "A", new no.beint.vev.QueryLimit(10));
+                        no.beint.vev.pg.PgQueries.equalAfter(index, "A", cursor, new no.beint.vev.QueryLimit(10));
+                        no.beint.vev.pg.PgQueries.isNull(AccountVev.ALIAS, new no.beint.vev.QueryLimit(10));
+                        no.beint.vev.pg.PgQueries.isNullAfter(AccountVev.ALIAS, AccountVev.ALIAS.cursor(new java.math.BigDecimal("1.00"), AccountVev.INSTANCE.key(1L)), new no.beint.vev.QueryLimit(10));
+                    }
+                }
+                """;
+        var sources = orderedSources();
+        sources.put("example/OrderedCalls.java", valid);
+        Compilation success = compile(sources);
+        assertTrue(success.success(), success.diagnostics());
+        for (String operation : List.of(
+                "AccountVev.DISPLAY_NAME.cursor(1L, AccountVev.INSTANCE.key(1L))",
+                "AccountVev.DISPLAY_NAME.cursor(new java.math.BigDecimal(1), AuditEventVev.INSTANCE.key(java.util.UUID.randomUUID()))",
+                "no.beint.vev.pg.PgQueries.equalAfter(AccountVev.DISPLAY_NAME, \"A\", AccountVev.INSTANCE.key(1L), new no.beint.vev.QueryLimit(1))",
+                "no.beint.vev.pg.PgQueries.isNull(AccountVev.DISPLAY_NAME, new no.beint.vev.QueryLimit(1))",
+                "no.beint.vev.pg.PgQueries.equal(AccountVev.DISPLAY_NAME, 1L, new no.beint.vev.QueryLimit(1))")) {
+            sources.put("example/OrderedCalls.java", "package example; class OrderedCalls { void run() { " + operation + "; } }");
+            Compilation failure = compile(sources);
+            assertFalse(failure.success(), operation);
+        }
+    }
+
+    private static Map<String, String> orderedSources() {
+        var sources = new LinkedHashMap<>(positiveSources());
+        sources.computeIfPresent("example/Account.java", (path, text) -> text.replace("@VevIndex(name =", "@VevIndex(orderBy = \"balance\", name ="));
+        return sources;
     }
 
     @Test

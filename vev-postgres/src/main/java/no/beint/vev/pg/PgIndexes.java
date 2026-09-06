@@ -11,7 +11,7 @@ final class PgIndexes {
     private PgIndexes() {
     }
 
-    private record ExpectedIndex(String name, boolean unique, List<String> columns) {
+    private record ExpectedIndex(String name, boolean unique, List<String> columns, boolean descendingTail) {
     }
 
     static void verify(Connection connection, PgPlan<?, ?, ?, ?> plan) throws SQLException {
@@ -67,18 +67,23 @@ final class PgIndexes {
         List<ExpectedIndex> expected = new ArrayList<>();
         String idColumn = plan.columns().stream().filter(column -> column.role() == PgColumn.Role.ID)
                 .findFirst().orElseThrow().name();
-        for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
+        for (PgQueryIndex<?, ?, ?, ?> index : plan.indexes()) {
             List<String> indexColumns = new ArrayList<>();
             if (!plan.shared()) indexColumns.add(plan.tenantColumn());
             if (plan.columns().get(index.columnIndex()).role() != PgColumn.Role.ID) {
                 indexColumns.add(plan.columns().get(index.columnIndex()).name());
             }
+            if (index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered) {
+                indexColumns.add(plan.columns().get(ordered.orderColumnIndex()).name());
+            }
             indexColumns.add(idColumn);
-            expected.add(new ExpectedIndex(index.indexName(), false, List.copyOf(indexColumns)));
+            expected.add(new ExpectedIndex(index.indexName(), false, List.copyOf(indexColumns),
+                    index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered
+                            && ordered.direction() == no.beint.vev.VevIndex.Direction.DESC));
         }
         for (PgUnique unique : plan.uniqueConstraints()) {
             expected.add(new ExpectedIndex(unique.name(), true,
-                    unique.columnIndexes().stream().map(position -> plan.columns().get(position).name()).toList()));
+                    unique.columnIndexes().stream().map(position -> plan.columns().get(position).name()).toList(), false));
         }
         expected.sort(java.util.Comparator.comparing(ExpectedIndex::name));
         try (PreparedStatement statement = connection.prepareStatement(shapeSql)) {
@@ -122,7 +127,7 @@ final class PgIndexes {
                        operator_class.opcdefault,
                        (mapped_index.indcollation::pg_catalog.oid[])[key_position.position]
                            = attribute.attcollation,
-                       (mapped_index.indoption::pg_catalog.int2[])[key_position.position] = 0
+                       (mapped_index.indoption::pg_catalog.int2[])[key_position.position]
                   FROM pg_catalog.pg_index mapped_index
                   JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
                   JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
@@ -149,13 +154,16 @@ final class PgIndexes {
             statement.setString(3, plan.schemaName());
             statement.setString(4, index.name());
             try (ResultSet resultSet = statement.executeQuery()) {
-                for (String expectedColumn : index.columns()) {
+                for (int position = 0; position < index.columns().size(); position++) {
+                    String expectedColumn = index.columns().get(position);
+                    // PostgreSQL's DESC (1) plus default NULLS FIRST (2); equality prefix stays ASC (0).
+                    int expectedOptions = index.descendingTail() && position >= index.columns().size() - 2 ? 3 : 0;
                     if (!resultSet.next()
                             || !expectedColumn.equals(resultSet.getString(1))
                             || !resultSet.getBoolean(2)
                             || !resultSet.getBoolean(3)
                             || !resultSet.getBoolean(4)
-                            || !resultSet.getBoolean(5)) {
+                            || resultSet.getInt(5) != expectedOptions || resultSet.wasNull()) {
                         throw new IllegalStateException("Mapped PostgreSQL index keys do not match generated query: "
                                 + plan.schemaName() + '.' + index.name());
                     }

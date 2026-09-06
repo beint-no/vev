@@ -100,7 +100,7 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException("Multiple entity plans map the same PostgreSQL table: "
                         + plan.schemaName() + '.' + plan.tableName());
             }
-            for (PgIndex<M, ?, ?, ?> index : plan.indexes()) {
+            for (PgQueryIndex<M, ?, ?, ?> index : plan.indexes()) {
                 String qualifiedIndex = plan.schemaName() + '.' + index.indexName();
                 if (!mappedIndexes.add(qualifiedIndex)) {
                     throw new IllegalArgumentException(
@@ -333,7 +333,7 @@ public final class PgModel<M, T> {
     private static void validateIndexes(PgPlan<?, ?, ?, ?> plan, PgColumn id, PgColumn tenant) {
         Set<String> names = new HashSet<>();
         Set<Integer> indexedColumns = new HashSet<>();
-        for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
+        for (PgQueryIndex<?, ?, ?, ?> index : plan.indexes()) {
             requireIdentifier(index.indexName(), "index", plan.logicalName());
             if (!names.add(index.indexName())) {
                 throw new IllegalArgumentException(
@@ -357,7 +357,7 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException(
                         "Generated index value type does not match its PostgreSQL codec: " + index.indexName());
             }
-            boolean nullableToken = index instanceof PgNullableIndex<?, ?, ?, ?>;
+            boolean nullableToken = index instanceof PgNullableIndex<?, ?, ?, ?> || index instanceof PgNullableOrderedIndex<?, ?, ?, ?, ?>;
             if (nullableToken != value.nullable()) {
                 throw new IllegalArgumentException(
                         "Generated index nullability does not match its mapped column: " + index.indexName());
@@ -371,6 +371,22 @@ public final class PgModel<M, T> {
             long maximumKeyBytes = Math.addExact(
                     Math.addExact(maximumIndexKeyBytes(id), tenant == null ? 0 : maximumIndexKeyBytes(tenant)),
                     value.role() == PgColumn.Role.ID ? 0 : maximumIndexKeyBytes(value));
+            if (index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered) {
+                int orderPosition = ordered.orderColumnIndex();
+                if (orderPosition < 0 || orderPosition >= plan.columns().size() || orderPosition == columnIndex
+                        || value.role() != PgColumn.Role.VALUE) {
+                    throw new IllegalArgumentException("Ordered index requires a distinct mapped ordering column and VALUE filter");
+                }
+                PgColumn order = plan.columns().get(orderPosition);
+                if (order.role() != PgColumn.Role.VALUE || order.nullable() || order.codec().javaType() != ordered.orderType()) {
+                    throw new IllegalArgumentException("Index ordering requires a non-null VALUE column with the exact generated codec type");
+                }
+                if ((order.codec().usesCharacterVarying() || order.codec() == PgCodecs.TEXT)
+                        && order.maximumLength() > VevIndex.MAXIMUM_STRING_LENGTH) {
+                    throw new IllegalArgumentException("Index ordering String columns must not exceed 256 code points");
+                }
+                maximumKeyBytes = Math.addExact(maximumKeyBytes, maximumIndexKeyBytes(order));
+            }
             if (maximumKeyBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
                 throw new IllegalArgumentException(
                         "Generated index can exceed Vev's conservative B-tree key budget: " + index.indexName());
