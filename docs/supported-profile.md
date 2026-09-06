@@ -32,7 +32,7 @@ contract through exact constructor, accessor, and initialization checks; see the
 and require exact Kotlin/database nullability. Named-module dependency records
 remain unsupported. No application class is loaded during verification.
 
-A closed model has at most 128 entities and an entity has at most 64 columns. The compiler and runtime enforce both limits without trusting user-supplied collection sizes. The generated maximum row shape multiplied by the 1,001-row internal page bound must fit a 64 MiB materialized-result budget. Strings reject U+0000 and malformed UTF-16 before JDBC binding. Numeric and temporal limits, tenant equality, assigned-ID presence, initial version zero, and version overflow are checked before SQL.
+A closed model has at most 512 entities and an entity has at most 64 columns. The compiler and runtime enforce both limits without trusting user-supplied collection sizes. The generated maximum row shape multiplied by the 1,001-row internal page bound must fit a 64 MiB materialized-result budget. Strings reject U+0000 and malformed UTF-16 before JDBC binding. Numeric and temporal limits, tenant equality, assigned-ID presence, initial version zero, and version overflow are checked before SQL.
 
 The current experiment treats ID non-reuse within a tenant as an application/schema invariant but cannot attest it. Vev therefore exposes neither physical delete nor create-capable upsert, and its verified application role must have no `DELETE` privilege. This removes the library's previous delete/reinsert ABA path, but privileged out-of-band changes can still violate the invariant.
 

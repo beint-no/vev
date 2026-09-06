@@ -806,8 +806,42 @@ final class VevProcessorTest {
     }
 
     @Test
+    void compilesAndInitializesTheMaximumClosedModelFromSourceAndCompiledDependencies() throws Exception {
+        int count = no.beint.vev.VevModel.MAXIMUM_ENTITIES;
+        var sources = new LinkedHashMap<String, String>();
+        var entities = new ArrayList<String>();
+        for (int index = 0; index < count; index++) {
+            String name = "ScaleEntity" + index;
+            sources.put("example/" + name + ".java", appendOnlyEntitySource(name, "scale_entity_" + index));
+            entities.add(name + ".class");
+        }
+        String modelSource = "package example; @no.beint.vev.VevModel(entities = {"
+                + String.join(", ", entities) + "}) public final class ScaleModel {}";
+        sources.put("example/ScaleModel.java", modelSource);
+        Compilation source = compile(sources);
+        assertTrue(source.success(), source.diagnostics());
+        sources.remove("example/ScaleModel.java");
+        Compilation dependency = compile(sources, "", false);
+        assertTrue(dependency.success(), dependency.diagnostics());
+        Compilation binary = compile(Map.of("example/ScaleModel.java", modelSource), dependency.classesDirectory().toString(), true);
+        assertTrue(binary.success(), binary.diagnostics());
+        assertEquals(source.manifest("example.ScaleModel"), binary.manifest("example.ScaleModel"));
+        assertEquals(source.generated("example/ScaleModelVev.java"), binary.generated("example/ScaleModelVev.java"));
+        for (Compilation compilation : List.of(source, binary)) {
+            try (var loader = new java.net.URLClassLoader(new java.net.URL[]{
+                    compilation.classesDirectory().toUri().toURL(), dependency.classesDirectory().toUri().toURL()},
+                    getClass().getClassLoader())) {
+                Class<?> registry = Class.forName("example.ScaleModelVev", true, loader);
+                var model = (no.beint.vev.pg.PgModel<?, ?>) registry.getField("POSTGRES").get(null);
+                assertEquals(count, model.plans().size());
+                assertEquals(java.util.UUID.class, model.tenantType());
+            }
+        }
+    }
+
+    @Test
     void rejectsOversizedClosedModelsBeforeGeneratingEntityPlans() throws IOException {
-        String entities = String.join(", ", java.util.Collections.nCopies(129, "Broken.class"));
+        String entities = String.join(", ", java.util.Collections.nCopies(no.beint.vev.VevModel.MAXIMUM_ENTITIES + 1, "Broken.class"));
         String model = """
                 package example;
 
@@ -825,7 +859,7 @@ final class VevProcessorTest {
                 "example/BrokenModel.java", model));
 
         assertFalse(compilation.success(), "Oversized model unexpectedly compiled");
-        assertTrue(compilation.diagnostics().contains("@VevModel must not exceed 128 entities"),
+        assertTrue(compilation.diagnostics().contains("@VevModel must not exceed " + no.beint.vev.VevModel.MAXIMUM_ENTITIES + " entities"),
                 compilation.diagnostics());
     }
 

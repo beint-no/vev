@@ -12,7 +12,7 @@ import java.lang.annotation.Target;
 @Target(ElementType.TYPE)
 public @interface VevModel {
     /** Largest closed entity set accepted by Vev's compiler and runtime. */
-    int MAXIMUM_ENTITIES = 128;
+    int MAXIMUM_ENTITIES = 512;
 
     /** Largest mapped record shape accepted by Vev's compiler and runtime. */
     int MAXIMUM_COLUMNS = 64;

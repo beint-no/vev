@@ -45,7 +45,7 @@ import javax.tools.JavaFileObject;
 import javax.tools.StandardLocation;
 
 final class MappingCompiler {
-    private static final int MAXIMUM_ENTITIES = 128;
+    private static final int MAXIMUM_ENTITIES = 512;
     private static final int MAXIMUM_COLUMNS = 64;
     private static final int MAXIMUM_INDEXES = 16;
     private static final int MAXIMUM_UNIQUE_KEY_COLUMNS = 32;
