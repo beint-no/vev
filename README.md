@@ -1,11 +1,13 @@
 # Vev
 
-> [!CAUTION]
-> **EXPERIMENTAL** — Vev is a pre-1.0 research project. It is not production-ready, API-stable, or Jakarta Persistence TCK compliant.
+Vev 1.0.0 is the first stable release of the documented native persistence API.
+It targets JDK 27 and PostgreSQL 18. The optional Jakarta 4 facade remains
+nonconforming; full Hibernate replacement in ReAI is ongoing. See the
+[release scope and evidence](docs/1.0-release-gates.md) and [installation instructions](docs/releases.md).
 
-Vev explores an ahead-of-time, PostgreSQL-first persistence model for modern JVM applications. It is deliberately not a general ORM or a drop-in Hibernate implementation. Instead of recreating a stateful ORM session, Vev interprets a small selection of Jakarta Persistence annotations as source metadata and compiles them into immutable mapping metadata, closed typed query tokens, and direct bind/read plans used by a stateless persistence API. Unsupported mappings are intended to fail compilation rather than acquire approximate runtime behavior.
+Vev provides an ahead-of-time, PostgreSQL-first persistence model for modern JVM applications. It is deliberately not a general ORM or a drop-in Hibernate implementation. Instead of recreating a stateful ORM session, Vev interprets a small selection of Jakarta Persistence annotations as source metadata and compiles them into immutable mapping metadata, closed typed query tokens, and direct bind/read plans used by a stateless persistence API. Unsupported mappings are intended to fail compilation rather than acquire approximate runtime behavior.
 
-Safety and performance are design goals, not established product claims. The repository currently demonstrates a narrow implementation and synthetic test/benchmark fixtures; it does not establish that Vev is safer, faster, or otherwise superior to Hibernate or another persistence implementation.
+The native API is stable within its documented profile. Safety and performance claims remain limited to the published evidence; this release does not establish a general advantage over Hibernate or another persistence implementation.
 
 The current baseline is:
 
@@ -20,7 +22,7 @@ The Jakarta Persistence 4 [`@Entity` contract](https://jakarta.ee/specifications
 
 ## Design direction
 
-The Jakarta-facing experiment is shaped like the preview [`EntityAgent`](https://jakarta.ee/specifications/persistence/4.0/apidocs/jakarta.persistence/jakarta/persistence/entityagent), which performs operations without a persistence context and returns detached entities. The current `vev-jakarta4` adapter is deliberately nonconforming: it implements only selected operations and does not yet honor every inherited option, property, lifecycle, or exception contract. It must not be treated as a Jakarta provider implementation. Its selected surface maps onto the native `TransactionExecutor`, lexical `ReadTx`/`WriteTx`, and explicit `ReadEntities`/`WriteEntities` contracts. Generated per-entity plans contain binders, row readers, and mapping metadata; the PostgreSQL runtime constructs and caches the only permitted SQL shapes from that validated metadata.
+The optional Jakarta-facing facade is shaped like the preview [`EntityAgent`](https://jakarta.ee/specifications/persistence/4.0/apidocs/jakarta.persistence/jakarta/persistence/entityagent), which performs operations without a persistence context and returns detached entities. The current `vev-jakarta4` adapter is deliberately nonconforming: it implements only selected operations and does not yet honor every inherited option, property, lifecycle, or exception contract. It must not be treated as a Jakarta provider implementation. Its selected surface maps onto the native `TransactionExecutor`, lexical `ReadTx`/`WriteTx`, and explicit `ReadEntities`/`WriteEntities` contracts. Generated per-entity plans contain binders, row readers, and mapping metadata; the PostgreSQL runtime constructs and caches the only permitted SQL shapes from that validated metadata.
 
 The current immutable-record facade supports detached `find`/`get`, ordered multiple lookups, assigned-value insert, and homogeneous insert batches. Jakarta's `void` update and refresh operations are rejected before SQL because an immutable snapshot cannot be synchronized in place. The native API supports assigned insertion, generated identity creation, optimistic updates, and opt-in [version-checked physical deletion](docs/physical-deletion.md) for generated identities. The facade continues to reject delete; create-capable upsert remains unavailable.
 
@@ -58,6 +60,8 @@ var page = vev.read(tenant, tx -> tx.entities().many(
 
 Explicit [read-only mappings](docs/read-only-mappings.md) expose no mutation capabilities and require SELECT-only table access, even inside write transactions. Stored identity/version metadata remains verifiable without granting writes. An explicit [external incoming reference option](docs/read-only-mappings.md#external-incoming-references) permits unmapped tables to reference a SELECT-only target while retaining exact outgoing and within-model attestation. Explicit [shared reference mappings](docs/shared-reference-mappings.md) combine `@VevShared` with read-only access for rows intentionally visible to every tenant. Models containing only shared records declare `@VevModel(tenantType = ...)` and retain real tenant scopes and the same verified authority.
 
+[Tenant-registry references](docs/tenant-registry-references.md) attach to the actual tenant key and preserve its database foreign key without exposing registry data or administration through Vev.
+
 [Declared database defaults](docs/column-defaults.md) use `@Column(options = "DEFAULT …")` as exact bootstrap metadata on VALUE columns. Vev never evaluates these expressions or substitutes them for explicit application values; reads and mutation SQL retain their typed behavior.
 
 Every mapped component must spell out `@Column(nullable = true)` or `@Column(nullable = false)`; Vev never inherits Jakarta's nullable default. For tenant-owned mappings, the migration must provide the matching schema-qualified table, declared [physical primary key](docs/primary-keys.md), every declared non-unique B-tree index in its exact generated key order and direction, forced row-level security policy, exact column-level `INSERT`/`UPDATE` grants and table-level `DELETE` only for `@VevDelete` entities, and a fingerprint row matching the generated model identity. Named tenant-scoped `@Table(uniqueConstraints = @UniqueConstraint(...))` constraints are verified with immediate `NULLS DISTINCT` enforcement; named [check constraints](docs/check-constraints.md) require exact definitions and approved builtin expression dependencies; undeclared unique indexes remain outside the profile. Explicit `@VevReference` components require verified foreign keys within the closed model, with immediate non-cascading enforcement: tenant-composite keys for tenant-owned targets, scalar keys for explicitly shared targets. The processor packages a deterministic [schema manifest](docs/schema-manifest.md) with each compiled model; Vev does not generate or apply migrations.
@@ -70,7 +74,7 @@ Larger bounded snapshots can declare a smaller batch/page ceiling with [`@VevRow
 
 [`@VevText`](docs/text-values.md) maps bounded String values to PostgreSQL `text`, using explicit Jakarta column lengths and verified character-length checks.
 
-Compilation proves the closed mapping model, not a live database. `PgVev` performs catalog and privilege attestation at startup. It requires a dedicated pgjdbc `DataSource` whose connections already report the exact `pg_catalog` search path, UTF-8, `DateStyle = ISO, MDY`, and `IntervalStyle = postgres` baseline; Vev rejects retained temporary schemas instead of repairing pooled state. Avoiding per-transaction `search_path` changes also preserves pgjdbc's prepared-query cache. This is illustrative source, not a compatibility or production-safety promise.
+Compilation proves the closed mapping model, not a live database. `PgVev` performs catalog and privilege attestation at startup. It requires a dedicated pgjdbc `DataSource` whose connections already report the exact `pg_catalog` search path, UTF-8, `DateStyle = ISO, MDY`, and `IntervalStyle = postgres` baseline; Vev rejects retained temporary schemas instead of repairing pooled state. Avoiding per-transaction `search_path` changes also preserves pgjdbc's prepared-query cache. Applications must preserve this connection and schema contract during deployment and upgrades.
 
 ## Repository layout
 
@@ -94,13 +98,13 @@ Integration verification requires an administrator connection to disposable Post
 
 The [current reviewed A–B–B–A evidence bundle](benchmark-results/final-b0b026d19959b4ca848174e8f2ab4c909363d208/report.md) covers generated indexed reads and the guarded 32-row update against prerelease Hibernate ORM 8.0.0.Beta1. Its latency comparison is explicitly rejected: post-A2 telemetry showed severe unrelated CPU and storage activity, and without comparable pre-run or in-run telemetry host interference cannot be excluded. The unfiltered raw results remain public; only the narrowly scoped, repeatable normalized-allocation observations are retained. An [earlier read-only bundle](benchmark-results/final-4b2b23f10d4352d86834c4f43993d1288ba82020/report.md) is also preserved. Neither campaign is a general performance claim.
 
-Verification runs locally with the checked-in wrapper; this repository has no GitHub Actions CI. The JDK 27 baseline is currently verified on Oracle OpenJDK release candidate `27+35-2325` with PostgreSQL 18.6. JDK 27 general availability is scheduled for September 15, 2026; the 1.0 release gate includes rerunning verification on the final distribution. Preview APIs are permitted only where measured performance or a simpler, safer implementation justifies their use.
+Verification runs locally with the checked-in wrapper; this repository has no GitHub Actions CI. The JDK 27 baseline is currently verified on Oracle OpenJDK release candidate `27+35-2325` with PostgreSQL 18.6. JDK 27 general availability is scheduled for September 15, 2026; final-distribution verification remains a follow-up before the ReAI production rollout. Preview APIs are permitted only where measured performance or a simpler, safer implementation justifies their use.
 
 ## Safety boundary
 
 Vev is not a drop-in Hibernate replacement. Some annotation spellings are reusable, but a Hibernate/Jakarta entity class is not: the current Vev profile requires a separate immutable record that no Jakarta provider may manage as an entity. Annotation reuse does not imply entity-model, lifecycle, transaction, query, locking, or caching compatibility. Hibernate-specific annotations are not part of the initial public profile unless a document names them explicitly.
 
-Read the boundaries before experimenting:
+Read the supported contract and migration boundaries:
 
 - [Architecture](docs/architecture.md)
 - [Supported profile and rejection matrix](docs/supported-profile.md)

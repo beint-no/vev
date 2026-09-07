@@ -893,6 +893,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyTenantIsolation(Connection connection) throws SQLException {
+        PgTenantReferences.verify(connection, model);
         PgCheckCatalog checkCatalog = new PgCheckCatalog(connection);
         String sql = """
                 SELECT c.relkind,

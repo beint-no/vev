@@ -128,6 +128,7 @@ public final class PgModel<M, T> {
         for (PgPlan<M, ?, ?, T> plan : snapshots) {
             validateReferences(plan, byJavaType);
         }
+        validateTenantRegistry(snapshots, mappedTables);
         for (String mappedIndex : mappedIndexes) {
             if (mappedTables.contains(mappedIndex)) {
                 throw new IllegalArgumentException(
@@ -149,6 +150,26 @@ public final class PgModel<M, T> {
         this.orderedSources = List.copyOf(sources);
     }
 
+    private static void validateTenantRegistry(List<? extends PgPlan<?, ?, ?, ?>> plans, Set<String> mappedTables) {
+        String registry = null;
+        PgColumn shape = null;
+        for (PgPlan<?, ?, ?, ?> plan : plans) {
+            for (PgTenantReference reference : plan.tenantReferences()) {
+                if (plan.shared()) throw new IllegalArgumentException("Shared mappings have no tenant-registry reference");
+                String table = reference.schemaName() + '.' + reference.tableName();
+                if (mappedTables.contains(table)) throw new IllegalArgumentException("A tenant registry must remain outside the entity model");
+                String key = table + '.' + reference.columnName();
+                PgColumn tenant = plan.columns().stream().filter(column -> column.role() == PgColumn.Role.TENANT).findFirst().orElseThrow();
+                if (registry != null && (!registry.equals(key) || shape.codec() != tenant.codec()
+                        || shape.expectedTypeModifier() != tenant.expectedTypeModifier())) {
+                    throw new IllegalArgumentException("One model must use one tenant registry and exact tenant-key bounds");
+                }
+                registry = key;
+                shape = tenant;
+            }
+        }
+    }
+
     private static void validateReferences(PgPlan<?, ?, ?, ?> source, Map<Class<?>, ? extends PgPlan<?, ?, ?, ?>> plans) {
         Set<String> names = new HashSet<>();
         source.uniqueConstraints().forEach(unique -> names.add(unique.name()));
@@ -156,6 +177,9 @@ public final class PgModel<M, T> {
             if (!names.add(check.name())) {
                 throw new IllegalArgumentException("Duplicate generated constraint name: " + source.logicalName());
             }
+        }
+        for (PgTenantReference reference : source.tenantReferences()) {
+            if (!names.add(reference.name())) throw new IllegalArgumentException("Duplicate generated tenant-registry constraint name");
         }
         Set<Integer> columns = new HashSet<>();
         for (PgReference reference : source.references()) {

@@ -96,6 +96,109 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void tenantRegistryReferencesPreserveScopeAndAtomicWritesWithoutRegistryDataAccess() throws SQLException {
+        database.seedTenantRegistry();
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var created = runtime.write(scope, tx -> tx.entities().createMultiple(RegistryEntryVev.INSTANCE,
+                        Batch.copyOf(List.of(new RegistryEntryVev.New("first"), new RegistryEntryVev.New(null)))));
+                assertEquals(tenant, created.get(0).tenantId());
+                assertNull(created.get(1).label());
+                assertEquals(0L, created.get(0).version());
+                assertTrue(runtime.read(authority.scope(tenant == 7 ? 8 : 7), tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(created.get(0).id()))).isEmpty());
+                var updated = runtime.write(scope, tx -> tx.entities().updateMultiple(RegistryEntryVev.INSTANCE, Batch.one(
+                        new RegistryEntry(created.get(0).id(), tenant, 0L, "changed")))).get(0).entity();
+                assertEquals(new RegistryEntry(created.get(0).id(), tenant, 1L, "changed"), updated);
+                var kotlinType = no.beint.vev.fixtures.KotlinRegistryEntryVev.INSTANCE;
+                var kotlin = runtime.write(scope, tx -> tx.entities().create(kotlinType, new no.beint.vev.fixtures.KotlinRegistryEntryVev.New("kotlin")));
+                assertEquals(new no.beint.vev.fixtures.KotlinRegistryEntry(kotlin.id(), tenant, 0L, "kotlin"), kotlin);
+                assertEquals(kotlin, runtime.read(scope, tx -> tx.entities().find(kotlinType.key(kotlin.id()))).orElseThrow());
+            }
+            try (var connection = database.applicationDataSource(binary).getConnection(); var statement = connection.createStatement()) {
+                for (String sql : List.of("SELECT id FROM vev_it.tenant_registry", "SELECT private_payload FROM vev_it.tenant_registry",
+                        "INSERT INTO vev_it.tenant_registry(id) VALUES (9)", "UPDATE vev_it.tenant_registry SET id=9 WHERE id=7",
+                        "DELETE FROM vev_it.tenant_registry WHERE id=7")) {
+                    assertEquals("42501", assertThrows(SQLException.class, () -> statement.execute(sql)).getSQLState());
+                }
+            }
+            var before = id("registry-missing-" + binary);
+            var missing = authority.scope(9);
+            assertThrows(IllegalStateException.class, () -> runtime.write(missing, tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, new Account(before, 9, 0L, null, new BigDecimal("1.0000")));
+                assertThrows(RuntimeException.class, () -> tx.entities().createMultiple(RegistryEntryVev.INSTANCE,
+                        Batch.copyOf(List.of(new RegistryEntryVev.New("one"), new RegistryEntryVev.New("two")))));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)));
+                return null;
+            }));
+            assertTrue(runtime.read(missing, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty());
+        }
+    }
+
+    @Test
+    void tenantRegistryBootstrapRejectsDataPrivilegesAndStorageDriftAndRecovers() throws SQLException {
+        for (String privilege : List.of("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN", "SELECT(private_payload)", "UPDATE(private_payload)")) {
+            try {
+                database.alterTenantRegistry("GRANT " + privilege + " ON vev_it.tenant_registry TO vev_it_app");
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), privilege);
+            } finally {
+                database.alterTenantRegistry("REVOKE " + privilege + " ON vev_it.tenant_registry FROM vev_it_app");
+            }
+        }
+        for (var mutation : List.of(
+                List.of("RENAME TO missing_registry", "ALTER TABLE vev_it.missing_registry RENAME TO tenant_registry"),
+                List.of("RENAME COLUMN id TO wrong_key", "ALTER TABLE vev_it.tenant_registry RENAME COLUMN wrong_key TO id"),
+                List.of("OWNER TO vev_it_app", "ALTER TABLE vev_it.tenant_registry OWNER TO vev_it_owner"))) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.alterTenantRegistry("ALTER TABLE vev_it.tenant_registry " + mutation.get(0));
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority));
+            } finally {
+                database.alterTenantRegistry(mutation.get(1));
+            }
+            assertDoesNotThrow(() -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority));
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void tenantRegistryBootstrapRequiresExactImmediateBuiltinForeignKey() throws SQLException {
+        String drop = "ALTER TABLE vev_it.registry_entry DROP CONSTRAINT IF EXISTS registry_entry_tenant_fk";
+        String add = "ALTER TABLE vev_it.registry_entry ADD CONSTRAINT registry_entry_tenant_fk FOREIGN KEY (tenant_id) REFERENCES vev_it.tenant_registry(id) ";
+        for (String clause : List.of("missing", "", "ON DELETE SET NULL", "ON DELETE CASCADE ON UPDATE CASCADE",
+                "ON DELETE CASCADE DEFERRABLE", "ON DELETE CASCADE NOT VALID", "MATCH FULL ON DELETE CASCADE", "disabledTrigger")) {
+            try {
+                database.alterTenantRegistry(drop);
+                if (!clause.equals("missing")) database.alterTenantRegistry(add + (clause.equals("disabledTrigger") ? "ON DELETE CASCADE" : clause));
+                if (clause.equals("disabledTrigger")) database.alterTenantRegistry("ALTER TABLE vev_it.registry_entry DISABLE TRIGGER ALL");
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), clause);
+            } finally {
+                database.alterTenantRegistry(drop);
+                database.alterTenantRegistry(add + "ON DELETE CASCADE");
+            }
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void registryAdministrationHonorsDeclaredCascadeAndNoActionWithoutPartialDeletion() throws SQLException {
+        database.seedTenantRegistry();
+        var first = vev.write(TENANT_7, tx -> tx.entities().create(RegistryEntryVev.INSTANCE, new RegistryEntryVev.New("first")));
+        var other = vev.write(TENANT_8, tx -> tx.entities().create(RegistryEntryVev.INSTANCE, new RegistryEntryVev.New("other")));
+        var kotlin = vev.write(TENANT_7, tx -> tx.entities().create(no.beint.vev.fixtures.KotlinRegistryEntryVev.INSTANCE,
+                new no.beint.vev.fixtures.KotlinRegistryEntryVev.New("blocks registry deletion")));
+        assertEquals("23503", assertThrows(SQLException.class, () -> database.deleteRegistryTenant(7)).getSQLState());
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(first.id()))).orElseThrow());
+        assertEquals(kotlin, vev.read(TENANT_7, tx -> tx.entities().find(no.beint.vev.fixtures.KotlinRegistryEntryVev.INSTANCE.key(kotlin.id()))).orElseThrow());
+        database.clearRegistryNoActionRows();
+        database.deleteRegistryTenant(7);
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(first.id()))).isEmpty());
+        assertEquals(other, vev.read(TENANT_8, tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(other.id()))).orElseThrow());
+    }
+
+    @Test
     void transactionClockDefaultsPreserveExternalValuesAndExplicitJavaKotlinWrites() throws SQLException {
         var reference = database.seedClockDefaults();
         assertEquals(reference.moment(), reference.nowValue());

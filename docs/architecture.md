@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status: experimental design contract.** This document describes the direction of Vev 0.2, not a stable public API.
+> **Status: Vev 1.0 native architecture.** Stability covers the documented native API; the generated SPI and optional Jakarta milestone facade have separate compatibility rules.
 
 ## Native stateless kernel
 

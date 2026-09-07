@@ -45,9 +45,9 @@ final class VevProcessorTest {
         String registry = first.generated("example/BillingModelVev.java");
         assertEquals(accountPlan, second.generated("example/AccountVev.java"));
         assertEquals(registry, second.generated("example/BillingModelVev.java"));
-        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 6;\n    }"));
-        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 6;\n    }"));
-        assertEquals(6, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
+        assertTrue(accountPlan.contains("public int generatedPlanAbi() {\n        return 7;\n    }"));
+        assertTrue(auditPlan.contains("public int generatedPlanAbi() {\n        return 7;\n    }"));
+        assertEquals(7, no.beint.vev.pg.spi.PgEntityPlan.ABI_VERSION);
         assertTrue(accountPlan.contains("implements no.beint.vev.pg.spi.PgVersionedEntityPlan<example.BillingModelVev.Model, example.Account, java.lang.Long, java.util.UUID, java.lang.Integer>"));
         assertTrue(accountPlan.contains("return new example.Account("));
         assertTrue(accountPlan.contains("new no.beint.vev.pg.PgColumn(\"id\""));
@@ -222,6 +222,52 @@ final class VevProcessorTest {
                 .replace("target = AuditEvent.class", "target = Account.class").replace("UUID alias", "Long alias"));
         Compilation self = compile(selfReference);
         assertTrue(self.success(), self.diagnostics());
+    }
+
+    @Test
+    void tenantRegistryContractMatchesSourceAndBinaryMetadataAndFingerprintsActions() throws IOException {
+        String annotation = "@no.beint.vev.VevTenantReference(name = \"account_tenant_fk\", schema = \"registry\", table = \"tenant\", column = \"id\"%s) ";
+        String previous = null;
+        for (String action : List.of("", ", onDelete = no.beint.vev.VevTenantReference.OnDelete.CASCADE")) {
+            var sources = positiveSources();
+            sources.computeIfPresent("example/Account.java", (path, source) -> source.replace("@TenantKey", annotation.formatted(action) + "@TenantKey"));
+            Compilation result = compile(sources);
+            assertTrue(result.success(), result.diagnostics());
+            String manifest = result.manifest("example.BillingModel");
+            assertTrue(manifest.contains("\"targetKind\": \"TENANT_REGISTRY\""));
+            assertTrue(manifest.contains("\"registryDataPrivileges\": false"));
+            assertTrue(manifest.contains("\"onDelete\": \"" + (action.isEmpty() ? "NO ACTION" : "CASCADE") + "\""));
+            if (previous != null) assertNotEquals(previous, manifest);
+            previous = manifest;
+            String model = sources.remove("example/BillingModel.java");
+            Compilation dependency = compile(sources, "", false);
+            assertTrue(dependency.success(), dependency.diagnostics());
+            Compilation binary = compile(Map.of("example/BillingModel.java", model), dependency.classesDirectory().toString(), true);
+            assertTrue(binary.success(), binary.diagnostics());
+            assertEquals(result.generated("example/AccountVev.java"), binary.generated("example/AccountVev.java"));
+            assertEquals(manifest, binary.manifest("example.BillingModel"));
+        }
+    }
+
+    @Test
+    void tenantRegistryRejectsOtherRolesUnsafeNamesMappedRootsAndMultipleRegistries() throws IOException {
+        String annotation = "@no.beint.vev.VevTenantReference(name = \"account_tenant_fk\", schema = \"registry\", table = \"tenant\", column = \"id\") ";
+        for (String variant : List.of("id", "version", "value", "nullable", "unsafeName", "mappedRoot", "differentRegistry")) {
+            var sources = positiveSources();
+            sources.computeIfPresent("example/Account.java", (path, source) -> switch (variant) {
+                case "id" -> source.replace("@Id", annotation + "@Id");
+                case "version" -> source.replace("@Version", annotation + "@Version");
+                case "value" -> source.replace("@Column(name = \"alias\"", annotation + "@Column(name = \"alias\"");
+                case "nullable" -> source.replace("@TenantKey", annotation + "@TenantKey").replace("name = \"tenant_id\", nullable = false", "name = \"tenant_id\", nullable = true");
+                case "unsafeName" -> source.replace("@TenantKey", annotation.replace("account_tenant_fk", "unsafe;name") + "@TenantKey");
+                case "mappedRoot" -> source.replace("@TenantKey", annotation.replace("\"registry\"", "\"ledger\"").replace("\"tenant\"", "\"audit_event\"") + "@TenantKey");
+                default -> source.replace("@TenantKey", annotation + "@TenantKey");
+            });
+            if (variant.equals("differentRegistry")) sources.computeIfPresent("example/AuditEvent.java", (path, source) ->
+                    source.replace("@TenantKey", annotation.replace("account_tenant_fk", "audit_tenant_fk").replace("\"tenant\"", "\"other_tenant\"") + "@TenantKey"));
+            Compilation result = compile(sources);
+            assertFalse(result.success(), variant + ": " + result.diagnostics());
+        }
     }
 
     @Test

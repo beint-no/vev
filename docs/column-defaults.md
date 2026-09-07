@@ -48,7 +48,7 @@ of UTF-16 characters at both compiler and runtime boundaries.
 
 A declared default changes the mapping fingerprint and adds `defaultExpression`
 to that column's schema manifest. Columns without defaults retain their previous
-manifest and fingerprint representation. Generated-plan ABI 6 includes default
+manifest and fingerprint representation. Default metadata was introduced in ABI 6; current ABI 7 includes default
 metadata; mappings compiled against earlier ABIs require regeneration with a
 matching processor and runtime. No production dependency is added.
 

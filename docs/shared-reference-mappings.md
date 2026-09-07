@@ -112,7 +112,7 @@ table. Models containing only shared records additionally record the boxed
 that type changes the scope contract even when physical tables stay the same.
 Migrations must install the matching schema and fingerprint.
 
-The generated-plan ABI is 6. Recompile all mappings with matching processor and
+The generated-plan ABI is 7. Recompile all mappings with matching processor and
 runtime versions; older binaries fail before reading new scope or reference
 boundary metadata. The schema fingerprint and generated-plan ABI serve different contracts.
 

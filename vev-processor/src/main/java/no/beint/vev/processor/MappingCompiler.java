@@ -63,6 +63,7 @@ final class MappingCompiler {
     private static final String APPEND_ONLY = "no.beint.vev.AppendOnly";
     private static final String VEV_INDEX = "no.beint.vev.VevIndex";
     private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
+    private static final String VEV_TENANT_REFERENCE = "no.beint.vev.VevTenantReference";
     private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
     private static final String VEV_ROWS = "no.beint.vev.VevRows";
     private static final String VEV_DELETE = "no.beint.vev.VevDelete";
@@ -168,6 +169,7 @@ final class MappingCompiler {
         validateUniqueTables(modelDeclaration, entities);
         validateUniqueIndexes(modelDeclaration, entities);
         validateReferences(entities);
+        validateTenantRegistry(entities);
         if (invalid) {
             return;
         }
@@ -193,6 +195,7 @@ final class MappingCompiler {
         entities.forEach(entity -> byType.put(entity.qualifiedName(), entity));
         for (EntityMapping entity : entities) {
             Set<String> names = new HashSet<>();
+            if (entity.tenant() != null && entity.tenant().tenantReference() != null) names.add(entity.tenant().tenantReference().name());
             entity.uniqueConstraints().forEach(unique -> names.add(unique.name()));
             for (CheckMapping check : entity.checkConstraints()) {
                 if (!names.add(check.name())) {
@@ -222,6 +225,32 @@ final class MappingCompiler {
                 if (target != null && !target.shared() && target.primaryKeyShape().equals("ID")
                         && target.uniqueConstraints().stream().noneMatch(unique -> tenantIdentityUnique(unique.columns()))) {
                     error(property.declaration(), "@VevReference target with an ID-only primary key requires a tenant-qualified @UniqueConstraint");
+                }
+            }
+        }
+    }
+
+    private void validateTenantRegistry(List<EntityMapping> entities) {
+        String registry = null;
+        String shape = null;
+        for (EntityMapping entity : entities) {
+            for (PropertyMapping property : entity.properties()) {
+                TenantReferenceMapping reference = property.tenantReference();
+                if (reference == null) continue;
+                if (entity.shared() || !property.tenant()) {
+                    error(property.declaration(), "@VevTenantReference requires the mandatory @TenantKey of a tenant-owned entity");
+                }
+                String actualShape = property.boxedType() + "|" + property.maximumLength();
+                if (registry != null && (!registry.equals(reference.registry()) || !shape.equals(actualShape))) {
+                    error(property.declaration(), "One model must use one tenant registry and exact tenant-key bounds");
+                }
+                registry = reference.registry();
+                shape = actualShape;
+                if (entities.stream().anyMatch(mapped -> mapped.schemaName().equals(reference.schema()) && mapped.tableName().equals(reference.table()))) {
+                    error(property.declaration(), "A tenant registry must remain outside the entity model");
+                }
+                if (entity.uniqueConstraints().stream().anyMatch(unique -> unique.name().equals(reference.name()))) {
+                    error(property.declaration(), "Tenant-registry foreign-key name collides with another constraint");
                 }
             }
         }
@@ -535,6 +564,21 @@ final class MappingCompiler {
                 error(component, "@VevReference target must resolve to a declared entity type");
             }
         }
+        AnnotationMirror tenantReferenceAnnotation = consistentAnnotation(component, annotationSources, VEV_TENANT_REFERENCE);
+        TenantReferenceMapping tenantReference = null;
+        if (tenantReferenceAnnotation != null) {
+            if (!tenant || roles != 1 || reference != null) {
+                error(component, "@VevTenantReference may only annotate the mandatory @TenantKey, without @VevReference");
+            }
+            for (String field : List.of("name", "schema", "table", "column")) {
+                validateIdentifier(component, stringValue(tenantReferenceAnnotation, field), "tenant-registry " + field);
+            }
+            String onDelete = enumValue(tenantReferenceAnnotation, "onDelete");
+            if (!Set.of("NO_ACTION", "CASCADE").contains(onDelete)) error(component, "Unsupported tenant-registry deletion action");
+            tenantReference = new TenantReferenceMapping(stringValue(tenantReferenceAnnotation, "name"),
+                    stringValue(tenantReferenceAnnotation, "schema"), stringValue(tenantReferenceAnnotation, "table"),
+                    stringValue(tenantReferenceAnnotation, "column"), onDelete);
+        }
         String indexName = index == null ? "" : stringValue(index, "name");
         String indexOrderBy = index == null ? "" : stringValue(index, "orderBy");
         String indexDirection = index == null ? "ASC" : enumValue(index, "direction");
@@ -694,7 +738,7 @@ final class MappingCompiler {
                 generatedValue != null,
                 reference == null || booleanValue(reference, "tenantFirst"),
                 lengthCheckName,
-                defaultExpression);
+                defaultExpression, tenantReference);
     }
 
     private String compileDefaultExpression(Element component, AnnotationMirror column) {
@@ -1006,7 +1050,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_TENANT_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
                     if (!componentElements.contains(member)) {
                         error(member, "Persistence mapping @" + simpleName(name)
                                 + " is forbidden on members unrelated to a record component");
@@ -1028,7 +1072,7 @@ final class MappingCompiler {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
                         || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
-                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_TENANT_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
                     validateAnnotationShape(component, annotation);
                     continue;
                 }
@@ -1217,6 +1261,7 @@ final class MappingCompiler {
             case ENUMERATED -> Set.of("value");
             case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
             case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
+            case VEV_TENANT_REFERENCE -> Set.of("name", "schema", "table", "column", "onDelete");
             case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
             case VEV_DELETE, VEV_SHARED -> Set.of();
             case VEV_READ_ONLY -> Set.of("externalIncomingReferences");
@@ -1356,6 +1401,11 @@ final class MappingCompiler {
                 }
                 if (!property.enumConstants().isEmpty()) {
                     canonical.append("enumNames|").append(String.join("|", property.enumConstants())).append('\n');
+                }
+                if (property.tenantReference() != null) {
+                    TenantReferenceMapping registryReference = property.tenantReference();
+                    canonical.append("tenantReference|").append(registryReference.name()).append('|')
+                            .append(registryReference.registry()).append('|').append(registryReference.onDelete()).append('\n');
                 }
                 if (property.reference()) {
                     canonical.append("reference|").append(property.referenceName()).append('|')

@@ -25,6 +25,32 @@ final class PgModelBoundsTest {
             "tenant_id", PgCodecs.INTEGER, false, PgColumn.Role.TENANT, 0, 0, 0);
 
     @Test
+    @SuppressWarnings("unchecked")
+    void tenantRegistryMetadataIsCapturedOnceAndRejectsUnboundedOrNullEntries() {
+        var reference = new PgTenantReference("tenant_fk", "registry", "tenant", "id", no.beint.vev.VevTenantReference.OnDelete.CASCADE);
+        var source = plan(List.of(ID, TENANT));
+        for (String variant : List.of("valid", "two", "null")) {
+            var references = new java.util.ArrayList<PgTenantReference>();
+            references.add(variant.equals("null") ? null : reference);
+            if (variant.equals("two")) references.add(reference);
+            var reads = new java.util.concurrent.atomic.AtomicInteger();
+            var decorated = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class}, (proxy, method, arguments) -> {
+                        if (method.getName().equals("tenantReferences")) { reads.incrementAndGet(); return references; }
+                        return method.invoke(source, arguments);
+                    });
+            if (variant.equals("valid")) {
+                var model = new PgModel<>(IDENTITY, List.of(decorated));
+                references.clear();
+                assertEquals(List.of(reference), model.frozenPlan(decorated).tenantReferences());
+                assertEquals(1, reads.get());
+            } else if (variant.equals("null")) {
+                assertThrows(NullPointerException.class, () -> new PgModel<>(IDENTITY, List.of(decorated)));
+            } else assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(decorated)), variant);
+        }
+    }
+
+    @Test
     void modelDoesNotTrustCollectionSizeBeforeApplyingItsEntityBound() {
         PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan = plan(List.of(ID, TENANT));
         Collection<PgEntityPlan<TestModel, ?, ?, Integer>> misleading = new AbstractCollection<>() {
@@ -373,7 +399,7 @@ final class PgModelBoundsTest {
 
     @Test
     void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
-        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, 5, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, 5, 6, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
             var source = plan(null, null, null, null, () -> {
                 throw new AssertionError("Incompatible plans must fail before metadata access");
             }, abi == null ? null : () -> abi);

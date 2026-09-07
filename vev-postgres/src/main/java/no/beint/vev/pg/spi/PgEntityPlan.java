@@ -31,7 +31,7 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * Generated-plan binary contract accepted by this runtime. Incompatible SPI changes increment this value.
      * This version is independent of the database schema fingerprint and the library release version.
      */
-    int ABI_VERSION = 6;
+    int ABI_VERSION = 7;
 
     /**
      * Returns the binary contract embedded by the processor that generated this plan.
@@ -96,6 +96,14 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      * @return immutable scalar references within this model; empty for a model without references
      */
     default List<PgReference> references() {
+        return List.of();
+    }
+
+    /**
+     * Returns the optional tenant-key reference to an external registry.
+     * @return an immutable list of zero or one registry reference; it grants no registry data capability
+     */
+    default List<no.beint.vev.pg.PgTenantReference> tenantReferences() {
         return List.of();
     }
 

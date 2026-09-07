@@ -104,7 +104,7 @@ final class SchemaManifestGenerator {
     }
 
     private String references(CompiledModel model, EntityMapping source) {
-        return source.properties().stream().filter(PropertyMapping::reference).map(property -> {
+        String ordinary = source.properties().stream().filter(PropertyMapping::reference).map(property -> {
             EntityMapping target = model.entities().stream()
                     .filter(candidate -> candidate.qualifiedName().equals(property.referenceTarget())).findFirst().orElseThrow();
             String sourceColumns = target.shared() ? quote(property.columnName())
@@ -118,6 +118,13 @@ final class SchemaManifestGenerator {
                     .formatted(quote(property.referenceName()), sourceColumns,
                             quote(target.schemaName()), quote(target.tableName()), targetColumns);
         }).collect(Collectors.joining(", "));
+        TenantReferenceMapping registry = source.tenant() == null ? null : source.tenant().tenantReference();
+        if (registry == null) return ordinary;
+        String tenant = """
+                {"name": %s, "columns": [%s], "targetKind": "TENANT_REGISTRY", "targetSchema": %s, "targetTable": %s, "targetColumns": [%s], "match": "SIMPLE", "onUpdate": "NO ACTION", "onDelete": %s, "deferrable": false, "registryDataPrivileges": false}"""
+                .formatted(quote(registry.name()), quote(source.tenant().columnName()), quote(registry.schema()),
+                        quote(registry.table()), quote(registry.column()), quote(registry.onDelete().equals("CASCADE") ? "CASCADE" : "NO ACTION"));
+        return ordinary.isEmpty() ? tenant : ordinary + ", " + tenant;
     }
 
     private String columns(List<PropertyMapping> properties) {

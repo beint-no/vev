@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "no.beint.vev"
-version = "0.2.0-SNAPSHOT"
+version = "1.0.0"
 
 val publicModules = setOf("vev-core", "vev-postgres", "vev-processor", "vev-jakarta4")
 
@@ -162,6 +162,20 @@ tasks.register("publishCompatibilityRepository") {
         ":vev-processor:publishMavenJavaPublicationToCompatibilityRepository",
         ":vev-jakarta4:publishMavenJavaPublicationToCompatibilityRepository"
     )
+}
+
+tasks.register<Zip>("releaseBundle") {
+    group = "publishing"
+    description = "Packages the versioned Maven repository for a GitHub release."
+    dependsOn("publishCompatibilityRepository")
+    archiveFileName.set("vev-${project.version}-maven.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+    from(layout.buildDirectory.dir("compatibility-repository")) {
+        include("no/beint/vev/*/${project.version}/*")
+    }
+    from("LICENSE")
 }
 
 tasks.register<GradleBuild>("publishedConsumerTest") {

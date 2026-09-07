@@ -53,7 +53,7 @@ final class JavaSourceGenerator {
         appendUniqueConstraints(source, entity);
         appendCheckConstraints(source, entity);
         // Embed this generator's contract, never a runtime version lookup in generated output.
-        method(source, "public int generatedPlanAbi()", "return 6;");
+        method(source, "public int generatedPlanAbi()", "return 7;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
@@ -213,6 +213,16 @@ final class JavaSourceGenerator {
         }
         source.append(");\n\n");
         method(source, "public java.util.List<no.beint.vev.pg.PgReference> references()", "return REFERENCES;");
+        TenantReferenceMapping tenantReference = entity.tenant() == null ? null : entity.tenant().tenantReference();
+        if (tenantReference != null) {
+            source.append("    private static final java.util.List<no.beint.vev.pg.PgTenantReference> TENANT_REFERENCES = java.util.List.of(\n")
+                    .append("            new no.beint.vev.pg.PgTenantReference(\"").append(escape(tenantReference.name()))
+                    .append("\", \"").append(escape(tenantReference.schema())).append("\", \"").append(escape(tenantReference.table()))
+                    .append("\", \"").append(escape(tenantReference.column()))
+                    .append("\", no.beint.vev.VevTenantReference.OnDelete.").append(tenantReference.onDelete()).append("));\n\n");
+            method(source, "public java.util.List<no.beint.vev.pg.PgTenantReference> tenantReferences()", "return TENANT_REFERENCES;");
+        }
+
     }
 
     private void appendIndexTokens(StringBuilder source, EntityMapping entity, String modelMarker) {

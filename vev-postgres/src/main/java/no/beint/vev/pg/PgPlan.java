@@ -30,6 +30,7 @@ class PgPlan<M, E, K, T> {
     private final List<PgColumn> columns;
     private final List<PgQueryIndex<M, E, K, ?>> indexes;
     private final List<PgReference> references;
+    private final List<PgTenantReference> tenantReferences;
     private final List<PgUnique> uniqueConstraints;
     private final List<PgCheck> checkConstraints;
     private final Class<?> creationType;
@@ -113,6 +114,13 @@ class PgPlan<M, E, K, T> {
             boundedReferences.add(Objects.requireNonNull(reference, "reference"));
         }
         this.references = List.copyOf(boundedReferences);
+        List<PgTenantReference> boundedTenantReferences = new ArrayList<>(1);
+        for (PgTenantReference reference : Objects.requireNonNull(source.tenantReferences(), "tenantReferences")) {
+            if (!boundedTenantReferences.isEmpty()) throw new IllegalArgumentException("An entity has at most one tenant-registry reference");
+            boundedTenantReferences.add(Objects.requireNonNull(reference, "tenantReference"));
+        }
+        this.tenantReferences = List.copyOf(boundedTenantReferences);
+
         List<PgUnique> boundedUnique = new ArrayList<>();
         for (PgUnique unique : Objects.requireNonNull(source.uniqueConstraints(), "uniqueConstraints")) {
             if (boundedUnique.size() + indexes.size() == VevIndex.MAXIMUM_INDEXES_PER_ENTITY) {
@@ -150,6 +158,10 @@ class PgPlan<M, E, K, T> {
 
     List<PgReference> references() {
         return references;
+    }
+
+    List<PgTenantReference> tenantReferences() {
+        return tenantReferences;
     }
 
     boolean generatedIdentity() {

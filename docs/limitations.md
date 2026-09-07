@@ -1,6 +1,6 @@
 # Limitations
 
-Vev is experimental, unpublished, and not production-ready.
+Vev 1.0 stabilizes the documented native API. The boundaries below remain part of its supported contract; version 1.0 does not imply complete Hibernate replacement or Jakarta provider conformance.
 
 It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hibernate replacement, or promise that every application persistence pattern will eventually be accepted.
 
@@ -47,7 +47,7 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 - Multi-tenancy is not certified for hostile production use.
 - Distributed transactions, JTA, savepoint recovery, and cross-database transactions are not supported unless a future release says otherwise.
 - Vev's lexical transaction and failure semantics differ from the milestone `EntityAgent` exception-recovery rules; this is one reason the current facade is deliberately nonconforming and Vev does not claim TCK compliance.
-- There is no long-term support policy, compatibility window, or production incident response SLA.
+- The latest 1.x patch receives fixes under the [compatibility policy](releases.md). There is no long-term support or production incident response SLA.
 
 ## Evidence
 
@@ -56,8 +56,10 @@ It is a narrow PostgreSQL persistence kernel, not a general ORM, drop-in Hiberna
 - No benchmark result is a capacity plan or production sizing recommendation.
 - Passing this repository's tests is not equivalent to passing the Jakarta Persistence TCK.
 
-Use the project to evaluate architecture and contribute narrowly scoped experiments. Do not use it to hold irreplaceable production data.
+Validate application workflows, migration and recovery procedures before production adoption; library verification does not establish application correctness.
 
 - [Shared reference rows](shared-reference-mappings.md) require explicit `@VevShared` plus `@VevReadOnly`. This grants every model tenant read visibility; it is not a global administrative, authentication, or cross-tenant business API. A model infers the tenant type from tenant-owned mappings or explicitly declares `@VevModel.tenantType` when it contains only shared records. Real tenant scopes remain mandatory. Complete declared reference closure is the default; the explicit [read-only external incoming option](read-only-mappings.md#external-incoming-references) excludes unmapped incoming sources from attestation without changing physical constraints or relaxing outgoing/within-model references.
 
 - [Database defaults](column-defaults.md) are exact schema metadata on VALUE columns. They use the bounded approved expression profile and never fill omitted application values; current structural-key defaults, arbitrary/volatile functions, and identity/session expressions remain unsupported. Precisely typed transaction-clock defaults are supported separately from CHECK expressions; they never generate omitted application values. Native `atthasmissing` storage is accepted as historical row data under the verified column type and normal hydration checks; it is independent of the current default declaration.
+
+- [Tenant-registry references](tenant-registry-references.md) permit an explicit foreign key on the actual tenant key to an external registry primary key. They grant no registry data access. CASCADE applies only when expressly declared and performed by a separate administrator; ordinary entity references remain immediate and non-cascading.

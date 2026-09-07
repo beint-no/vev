@@ -1,6 +1,6 @@
 # Supported profile and rejection matrix
 
-> **Status: experimental.** The implementation and its compile-failure fixtures are authoritative. Anything not explicitly accepted must be treated as unsupported.
+> **Status: Vev 1.0 supported profile.** The implementation and its compile-failure fixtures are authoritative. Anything not explicitly accepted must be treated as unsupported.
 
 Vev interprets a safe, closed selection of Jakarta Persistence 4.0.0-M6 annotations as nonconforming source metadata. Jakarta Persistence 4 forbids records as entities, while Vev requires records, so an accepted Vev mapping is not a Jakarta entity and cannot simultaneously be managed by Hibernate or another Jakarta provider. Vev is not a Jakarta Persistence provider and has not passed the Jakarta Persistence TCK.
 
@@ -153,3 +153,7 @@ This fail-early rule has an important boundary: source and generated-query error
 The exported PostgreSQL plan SPIs are a linker surface for generated application code, not a supported handwritten extension point. Only unmodified annotation-processor output is inside the generated-plan safety profile; custom executable plan behavior is fully trusted by the runtime.
 
 Compile-failure fixtures are part of the compatibility contract. Every newly accepted annotation attribute needs positive generation coverage, PostgreSQL integration coverage, and at least one nearby negative case.
+
+## Tenant registry
+
+`@VevTenantReference` on `@TenantKey` declares an immediate single-column foreign key to an external registry primary key, with exact scalar bounds and NO ACTION or explicitly selected CASCADE deletion. All declarations share one registry; it cannot also be a mapped entity. The application role has no registry data privileges. See the [full contract](tenant-registry-references.md).

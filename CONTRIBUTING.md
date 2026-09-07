@@ -1,6 +1,6 @@
 # Contributing
 
-Vev welcomes narrowly scoped experimental contributions. The project is not production-ready, and accepting a patch does not make its API or behavior stable.
+Vev welcomes focused contributions to its documented persistence profile. Changes must preserve the 1.x native API compatibility policy in [the release guide](docs/releases.md). The optional Jakarta milestone facade remains outside that stability promise.
 
 ## Before proposing a change
 

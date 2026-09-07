@@ -1,6 +1,6 @@
 # Tenant threat model
 
-> **Security status: not certified for hostile multi-tenant production use.** This document defines required controls and test gates; it does not assert that the experimental implementation satisfies all of them.
+> **Security status: not certified for hostile multi-tenant production use.** This document defines required controls and test gates; it does not assert that the implementation satisfies all of them.
 
 ## Protected property
 

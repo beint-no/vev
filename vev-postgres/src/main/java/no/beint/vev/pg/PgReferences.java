@@ -13,7 +13,7 @@ final class PgReferences {
     }
 
     static void verify(Connection connection, PgModel<?, ?> model, PgPlan<?, ?, ?, ?> plan) throws SQLException {
-        Map<ConstraintKey, ExpectedReference> expected = new HashMap<>();
+        Map<ConstraintKey, ExpectedForeignKey> expected = new HashMap<>();
         for (PgPlan<?, ?, ?, ?> source : model.frozenPlans()) {
             for (PgReference reference : source.references()) {
                 PgPlan<?, ?, ?, ?> target = model.frozenPlan(reference.targetType());
@@ -22,6 +22,10 @@ final class PgReferences {
                             new ExpectedReference(source, reference, target));
                 }
             }
+        }
+        for (PgTenantReference reference : plan.tenantReferences()) {
+            expected.put(new ConstraintKey(plan.schemaName(), plan.tableName(), reference.name()),
+                    new ExpectedTenantReference(plan, reference));
         }
         // Only SELECT-only targets may opt out of external incoming closure. Every mapped source still
         // participates, including self references and sources in another schema. Bound text never becomes SQL.
@@ -38,7 +42,7 @@ final class PgReferences {
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
                     ConstraintKey key = new ConstraintKey(rows.getString(1), rows.getString(2), rows.getString(3));
-                    ExpectedReference reference = expected.remove(key);
+                    ExpectedForeignKey reference = expected.remove(key);
                     if (reference == null) {
                         throw new IllegalStateException("Undeclared foreign key touches a mapped table: " + key);
                     }
@@ -54,8 +58,12 @@ final class PgReferences {
     private record ConstraintKey(String schema, String table, String name) {
     }
 
-    private record ExpectedReference(PgPlan<?, ?, ?, ?> source, PgReference reference, PgPlan<?, ?, ?, ?> target) {
-        void verify(ResultSet row) throws SQLException {
+    private sealed interface ExpectedForeignKey permits ExpectedReference, ExpectedTenantReference {
+        void verify(ResultSet row) throws SQLException;
+    }
+
+    private record ExpectedReference(PgPlan<?, ?, ?, ?> source, PgReference reference, PgPlan<?, ?, ?, ?> target) implements ExpectedForeignKey {
+        public void verify(ResultSet row) throws SQLException {
             String targetId = target.columns().stream().filter(column -> column.role() == PgColumn.Role.ID)
                     .findFirst().orElseThrow().name();
             String sourceId = source.columns().get(reference.columnIndex()).name();
@@ -70,7 +78,7 @@ final class PgReferences {
                     || !java.util.Objects.equals(sourceSecond, row.getString(7))
                     || !targetFirst.equals(row.getString(8))
                     || !java.util.Objects.equals(targetSecond, row.getString(9))
-                    || row.getInt(15) != (target.shared() ? 1 : 2)) {
+                    || row.getInt(15) != (target.shared() ? 1 : 2) || !"a".equals(row.getString(17))) {
                 throw new IllegalStateException("Foreign key does not match its generated reference columns: "
                         + source.logicalName() + '.' + reference.name());
             }
@@ -79,6 +87,21 @@ final class PgReferences {
                     throw new IllegalStateException("Foreign key has unsupported enforcement, actions, or operators: "
                             + source.logicalName() + '.' + reference.name());
                 }
+            }
+        }
+    }
+
+    private record ExpectedTenantReference(PgPlan<?, ?, ?, ?> source, PgTenantReference reference) implements ExpectedForeignKey {
+        public void verify(ResultSet row) throws SQLException {
+            if (!reference.schemaName().equals(row.getString(4)) || !reference.tableName().equals(row.getString(5))
+                    || !source.tenantColumn().equals(row.getString(6)) || row.getString(7) != null
+                    || !reference.columnName().equals(row.getString(8)) || row.getString(9) != null
+                    || row.getInt(15) != 1 || !row.getBoolean(16)
+                    || !(reference.onDelete() == no.beint.vev.VevTenantReference.OnDelete.CASCADE ? "c" : "a").equals(row.getString(17))) {
+                throw new IllegalStateException("Tenant-registry foreign key does not match its exact ownership-key contract");
+            }
+            for (int column = 10; column <= 14; column++) {
+                if (!row.getBoolean(column)) throw new IllegalStateException("Tenant-registry foreign key has unsupported enforcement or operators");
             }
         }
     }
@@ -93,7 +116,7 @@ final class PgReferences {
                        AND constraint_definition.conislocal AND constraint_definition.coninhcount = 0
                        AND constraint_definition.conparentid = 0 AND NOT constraint_definition.conperiod
                        AND constraint_definition.confmatchtype = 's'
-                       AND constraint_definition.confupdtype = 'a' AND constraint_definition.confdeltype = 'a'
+                       AND constraint_definition.confupdtype = 'a' AND constraint_definition.confdeltype IN ('a', 'c')
                        AND constraint_definition.confdelsetcols IS NULL
                        AND pg_catalog.cardinality(constraint_definition.conkey) IN (1, 2)
                        AND pg_catalog.cardinality(constraint_definition.confkey) = pg_catalog.cardinality(constraint_definition.conkey),
@@ -127,13 +150,17 @@ final class PgReferences {
                                            AND trigger.tgrelid = source_relation.oid AND trigger.tgconstrrelid = target_relation.oid
                                        WHEN 'RI_FKey_check_upd' THEN trigger.tgtype = 17
                                            AND trigger.tgrelid = source_relation.oid AND trigger.tgconstrrelid = target_relation.oid
-                                       WHEN 'RI_FKey_noaction_del' THEN trigger.tgtype = 9
+                                       WHEN 'RI_FKey_noaction_del' THEN trigger.tgtype = 9 AND constraint_definition.confdeltype = 'a'
+                                           AND trigger.tgrelid = target_relation.oid AND trigger.tgconstrrelid = source_relation.oid
+                                       WHEN 'RI_FKey_cascade_del' THEN trigger.tgtype = 9 AND constraint_definition.confdeltype = 'c'
                                            AND trigger.tgrelid = target_relation.oid AND trigger.tgconstrrelid = source_relation.oid
                                        WHEN 'RI_FKey_noaction_upd' THEN trigger.tgtype = 17
                                            AND trigger.tgrelid = target_relation.oid AND trigger.tgconstrrelid = source_relation.oid
                                        ELSE false END)
                                AND pg_catalog.string_agg(function.proname::pg_catalog.text, ',' ORDER BY function.proname::pg_catalog.text)
-                                   = 'RI_FKey_check_ins,RI_FKey_check_upd,RI_FKey_noaction_del,RI_FKey_noaction_upd'
+                                   = CASE constraint_definition.confdeltype
+                                       WHEN 'c' THEN 'RI_FKey_cascade_del,RI_FKey_check_ins,RI_FKey_check_upd,RI_FKey_noaction_upd'
+                                       ELSE 'RI_FKey_check_ins,RI_FKey_check_upd,RI_FKey_noaction_del,RI_FKey_noaction_upd' END
                         FROM pg_catalog.pg_trigger trigger
                         JOIN pg_catalog.pg_proc function ON function.oid = trigger.tgfoid
                         JOIN pg_catalog.pg_namespace function_namespace ON function_namespace.oid = function.pronamespace
@@ -147,7 +174,11 @@ final class PgReferences {
                                    WHERE unique_constraint.conrelid = target_relation.oid
                                      AND unique_constraint.conindid = target_index.indexrelid
                                      AND unique_constraint.contype = 'u'))),
-                   pg_catalog.cardinality(constraint_definition.conkey)
+                   pg_catalog.cardinality(constraint_definition.conkey),
+                   EXISTS (SELECT 1 FROM pg_catalog.pg_index registry_primary
+                            WHERE registry_primary.indrelid = target_relation.oid
+                              AND registry_primary.indexrelid = constraint_definition.conindid AND registry_primary.indisprimary),
+                   constraint_definition.confdeltype
               FROM pg_catalog.pg_constraint constraint_definition
               JOIN pg_catalog.pg_class source_relation ON source_relation.oid = constraint_definition.conrelid
               JOIN pg_catalog.pg_namespace source_namespace ON source_namespace.oid = source_relation.relnamespace

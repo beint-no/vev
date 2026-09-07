@@ -91,7 +91,7 @@ records a matching `directions` array. Its absence means every key is ASC with
 default null placement. Review and apply the matching migration before starting
 a new runtime.
 
-The current generated-plan SPI is ABI 6 (ordered query tokens were introduced in ABI 3). Recompile existing mappings with the matching
+The current generated-plan SPI is ABI 7 (ordered query tokens were introduced in ABI 3). Recompile existing mappings with the matching
 processor/runtime even when an ordinary ID-ordered index's schema is unchanged.
 Ordered tokens and ID-ordered tokens share metadata through `PgQueryIndex` but
 remain distinct query capabilities; casting one into the other is unsupported.
@@ -117,4 +117,4 @@ direction. The checked-in [query-plan evidence](query-plans/ordered/README.md)
 shows a tuple index condition without a separate sort for those fixtures.
 This is plan-shape evidence, not a latency benchmark, a general plan guarantee,
 or proof of application replacement. Representative comparison against the
-application's Hibernate version remains a release gate.
+application's Hibernate version remains follow-up work before making a performance claim.

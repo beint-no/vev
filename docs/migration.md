@@ -64,7 +64,7 @@ Assigned identifiers remain permanent logical identities. Vev forbids assigned-I
 
 A migration is reversible only if the old implementation can still read the schema and no Vev-only write changes have made that impossible. Define the rollback trigger, routing mechanism, data reconciliation method, and responsible operator before enabling writes.
 
-Compatibility work should proceed aggregate by aggregate. An application-wide switch is not a safe experimental rollout unit.
+Compatibility work should proceed aggregate by aggregate. An application-wide switch is not a safe initial rollout unit.
 
 ## Explicitly shared reference data
 
