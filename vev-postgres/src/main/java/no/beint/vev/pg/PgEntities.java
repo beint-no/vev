@@ -1,6 +1,11 @@
 package no.beint.vev.pg;
 
 import no.beint.vev.Batch;
+import no.beint.vev.AssignedEntityType;
+import no.beint.vev.GeneratedEntityType;
+import no.beint.vev.DeletableEntityType;
+import no.beint.vev.DeleteTarget;
+import no.beint.vev.DeleteResult;
 import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityKey;
 import no.beint.vev.EntityLookup;
@@ -32,6 +37,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private final TransactionGuard guard;
     private final PgSettings settings;
     private final boolean writeAllowed;
+    private final java.util.Map<PgPlan<?, ?, ?, ?>, Long> identitySequences;
 
     PgEntities(
             Connection connection,
@@ -39,13 +45,15 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             TenantScope<M, T> tenant,
             TransactionGuard guard,
             PgSettings settings,
-            boolean writeAllowed) {
+            boolean writeAllowed,
+            java.util.Map<PgPlan<?, ?, ?, ?>, Long> identitySequences) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.model = Objects.requireNonNull(model, "model");
         this.tenant = Objects.requireNonNull(tenant, "tenant");
         this.guard = Objects.requireNonNull(guard, "guard");
         this.settings = Objects.requireNonNull(settings, "settings");
         this.writeAllowed = writeAllowed;
+        this.identitySequences = Objects.requireNonNull(identitySequences, "identitySequences");
     }
 
     @Override
@@ -55,7 +63,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         PgPlan<M, E, K, T> plan = plan(key.entityType());
         try (PreparedStatement statement = prepare(plan.sql().find())) {
             bindUnknown(plan.keyCodec(), statement, 1, key.value());
-            bindTenant(plan, statement, 2);
+            if (!plan.shared()) bindTenant(plan, statement, 2);
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
                     return Optional.empty();
@@ -80,6 +88,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         guard.checkUsable();
         Objects.requireNonNull(keys, "keys");
         PgPlan<M, E, K, T> plan = plan(type);
+        plan.requireRowCount(keys.size());
         if (keys.isEmpty()) {
             return Batch.empty();
         }
@@ -92,7 +101,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         try (Array keyArray = connection.createArrayOf(plan.keyCodec().jdbcType(), keyValues);
              PreparedStatement statement = prepare(plan.sql().findMultiple())) {
             statement.setArray(1, keyArray);
-            bindTenant(plan, statement, 2);
+            if (!plan.shared()) bindTenant(plan, statement, 2);
             try (ResultSet resultSet = statement.executeQuery()) {
                 for (EntityKey<M, E, K> entityKey : entityKeys) {
                     if (!resultSet.next()) {
@@ -134,24 +143,31 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             PgIndexScan<M, R, Object, Object> scan = (PgIndexScan<M, R, Object, Object>) rawScan;
             return executeIndexScan(scan);
         }
+        if (query instanceof PgOrderedIndexScan<?, ?, ?, ?, ?> rawScan) {
+            @SuppressWarnings("unchecked")
+            PgOrderedIndexScan<M, R, Object, Object, Object> scan = (PgOrderedIndexScan<M, R, Object, Object, Object>) rawScan;
+            return executeIndexScan(scan.index(), scan.predicate(), scan.value(),
+                    scan.cursor() == null ? null : scan.cursor().key().value(),
+                    scan.cursor() == null ? null : scan.cursor().orderValue(), scan.limit());
+        }
         throw new IllegalArgumentException("Only structurally generated PostgreSQL queries are executable");
     }
 
     private <R, K> Rows<R> executeIdScan(PgIdScan<M, R, K> scan) {
         PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.plan());
         int limit = scan.limit().value();
+        entityPlan.requireRowCount(limit);
         List<R> values = new ArrayList<>(limit);
         String sql = scan.hasAfterExclusive()
                 ? entityPlan.sql().scanByIdAfter()
                 : entityPlan.sql().scanById();
         try (PreparedStatement statement = prepare(sql)) {
-            bindTenant(entityPlan, statement, 1);
-            int limitIndex = 2;
+            int parameter = 1;
+            if (!entityPlan.shared()) bindTenant(entityPlan, statement, parameter++);
             if (scan.hasAfterExclusive()) {
-                bindUnknown(entityPlan.keyCodec(), statement, 2, scan.afterExclusive());
-                limitIndex = 3;
+                bindUnknown(entityPlan.keyCodec(), statement, parameter++, scan.afterExclusive());
             }
-            statement.setInt(limitIndex, Math.addExact(limit, 1));
+            statement.setInt(parameter, Math.addExact(limit, 1));
             statement.setFetchSize(Math.addExact(limit, 1));
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (values.size() < limit && resultSet.next()) {
@@ -173,44 +189,56 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     }
 
     private <R, K, V> Rows<R> executeIndexScan(PgIndexScan<M, R, K, V> scan) {
-        PgPlan<M, R, K, T> entityPlan = model.frozenPlan(scan.index().entityPlan());
-        PgIndexSql statements = entityPlan.indexSql(scan.index());
-        int limit = scan.limit().value();
+        return executeIndexScan(scan.index(), scan.predicate(),
+                scan.predicate() == PgIndexScan.Predicate.EQUAL ? scan.value() : null,
+                scan.hasAfterExclusive() ? scan.afterExclusive() : null, null, scan.limit());
+    }
+
+    private <R, K, V> Rows<R> executeIndexScan(PgQueryIndex<M, R, K, V> index,
+            PgIndexScan.Predicate predicate, V value, K afterExclusive, Object afterOrder, no.beint.vev.QueryLimit queryLimit) {
+        PgPlan<M, R, K, T> entityPlan = model.frozenPlan(index.entityPlan());
+        PgIndexSql statements = entityPlan.indexSql(index);
+        int limit = queryLimit.value();
+        entityPlan.requireRowCount(limit);
         List<R> values = new ArrayList<>(limit);
-        boolean equality = scan.predicate() == PgIndexScan.Predicate.EQUAL;
+        boolean equality = predicate == PgIndexScan.Predicate.EQUAL;
         String sql;
         if (equality) {
-            sql = scan.hasAfterExclusive() ? statements.equalAfter() : statements.equal();
+            sql = afterExclusive != null ? statements.equalAfter() : statements.equal();
         } else {
-            sql = scan.hasAfterExclusive() ? statements.isNullAfter() : statements.isNull();
+            sql = afterExclusive != null ? statements.isNullAfter() : statements.isNull();
             if (sql == null) {
                 throw new IllegalArgumentException("IS NULL requires a generated nullable-index token");
             }
         }
-        PgColumn indexedColumn = entityPlan.columns().get(scan.index().columnIndex());
+        PgColumn indexedColumn = entityPlan.columns().get(index.columnIndex());
         if (equality) {
-            indexedColumn.validateValue(scan.value());
+            indexedColumn.validateValue(value);
         }
+        PgColumn orderColumn = index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered
+                ? entityPlan.columns().get(ordered.orderColumnIndex()) : null;
+        if (afterExclusive != null && orderColumn != null) orderColumn.validateValue(afterOrder);
         try (PreparedStatement statement = prepare(sql)) {
             int parameter = 1;
-            bindTenant(entityPlan, statement, parameter++);
+            if (!entityPlan.shared()) bindTenant(entityPlan, statement, parameter++);
             if (equality) {
-                bindUnknown(indexedColumn.codec(), statement, parameter++, scan.value());
+                bindUnknown(indexedColumn.codec(), statement, parameter++, value);
             }
-            if (scan.hasAfterExclusive()) {
-                bindUnknown(entityPlan.keyCodec(), statement, parameter++, scan.afterExclusive());
+            if (afterExclusive != null) {
+                if (orderColumn != null) bindUnknown(orderColumn.codec(), statement, parameter++, afterOrder);
+                bindUnknown(entityPlan.keyCodec(), statement, parameter++, afterExclusive);
             }
             statement.setInt(parameter, Math.addExact(limit, 1));
             statement.setFetchSize(Math.addExact(limit, 1));
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (values.size() < limit && resultSet.next()) {
-                    R value = readEntity(entityPlan, resultSet, 1);
-                    verifyReturnedEntity(entityPlan, value);
-                    verifyIndexPredicate(entityPlan, value, scan, indexedColumn);
-                    values.add(value);
+                    R entity = readEntity(entityPlan, resultSet, 1);
+                    verifyReturnedEntity(entityPlan, entity);
+                    verifyIndexPredicate(entityPlan, entity, index.columnIndex(), predicate, value, indexedColumn);
+                    values.add(entity);
                 }
                 boolean hasMore = resultSet.next();
-                return new Rows<>(values, scan.limit(), hasMore);
+                return new Rows<>(values, queryLimit, hasMore);
             }
         } catch (SQLException failure) {
             throw PgVev.databaseFailure(guard, failure);
@@ -223,7 +251,195 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     }
 
     @Override
-    public <E, K> E insert(EntityType<M, E, K> type, E entity) {
+    public <E, K, N> E create(GeneratedEntityType<M, E, K, N> type, N input) {
+        requireWrite();
+        return createMultiple(type, Batch.one(input)).get(0);
+    }
+
+    @Override
+    public <E, K, V> DeleteResult<M, E, K, V> delete(DeleteTarget<M, E, K, V> target) {
+        requireWrite();
+        Objects.requireNonNull(target, "target");
+        PgVersionPlan<M, E, K, T, V> plan = deletionPlan(target.entityType());
+        validateDeleteTarget(plan, target);
+        try (PreparedStatement statement = prepare(plan.deletionSql().single())) {
+            bindUnknown(plan.keyCodec(), statement, 1, target.value());
+            bindTenant(plan, statement, 2);
+            bindUnknown(plan.versionCodec(), statement, 3, target.expectedVersion());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) return new DeleteResult.Missing<>(target);
+                int outcome = resultSet.getInt(1);
+                if (resultSet.wasNull() || outcome < 0 || outcome > 1) {
+                    throw invariant("Delete returned an invalid outcome");
+                }
+                verifyDeleteResult(plan, target, resultSet, outcome == 0);
+                requireNoMore(resultSet, "Delete returned multiple rows");
+                return outcome == 0 ? new DeleteResult.Deleted<>(target) : new DeleteResult.Conflict<>(target);
+            }
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL deletion failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    @Override
+    public <E, K, V> Batch<DeleteResult.Deleted<M, E, K, V>> deleteMultiple(
+            DeletableEntityType<M, E, K, V> type, Batch<DeleteTarget<M, E, K, V>> targets) {
+        requireWrite();
+        Objects.requireNonNull(targets, "targets");
+        PgVersionPlan<M, E, K, T, V> plan = deletionPlan(type);
+        plan.requireRowCount(targets.size());
+        Set<K> uniqueKeys = new HashSet<>(Math.max(16, targets.size() * 2));
+        for (var target : targets) {
+            validateDeleteTarget(plan, target);
+            if (!uniqueKeys.add(target.value())) throw new IllegalArgumentException("Delete batch contains duplicate entity keys");
+        }
+        if (targets.isEmpty()) return Batch.empty();
+        Object[] keys = new Object[targets.size()];
+        Object[] versions = new Object[targets.size()];
+        for (int index = 0; index < targets.size(); index++) {
+            keys[index] = targets.get(index).value();
+            versions[index] = targets.get(index).expectedVersion();
+        }
+        try (JdbcArrays arrays = new JdbcArrays(connection);
+             PreparedStatement statement = prepare(plan.deletionSql().multiple())) {
+            arrays.bind(statement, 1, plan.keyCodec(), keys);
+            arrays.bind(statement, 2, plan.versionCodec(), versions);
+            bindTenant(plan, statement, 3);
+            statement.setInt(4, targets.size());
+            List<DeleteResult.Deleted<M, E, K, V>> results = new ArrayList<>(targets.size());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                for (int index = 0; index < targets.size(); index++) {
+                    if (!resultSet.next()) throw invariant("Delete batch was rejected atomically because one target was stale or missing");
+                    long ordinal = resultSet.getLong(1);
+                    if (resultSet.wasNull() || ordinal != index + 1L) throw invariant("Delete batch returned an invalid ordinal");
+                    var target = targets.get(index);
+                    verifyDeleteResult(plan, target, resultSet, true);
+                    results.add(new DeleteResult.Deleted<>(target));
+                }
+                requireNoMore(resultSet, "Delete batch returned extra rows");
+            }
+            return Batch.copyOf(results);
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL deletion failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    private <E, K, V> PgVersionPlan<M, E, K, T, V> deletionPlan(DeletableEntityType<M, E, K, V> type) {
+        PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
+        if (!plan.deletable()) throw new IllegalArgumentException("Entity has no generated deletion capability");
+        return plan;
+    }
+
+    private <E, K, V> void validateDeleteTarget(PgVersionPlan<M, E, K, T, V> plan, DeleteTarget<M, E, K, V> target) {
+        Objects.requireNonNull(target, "target");
+        if (target.entityType() != plan.source()) throw new IllegalArgumentException("Delete target belongs to a different generated mapping");
+        plan.deletionSql().id().validateValue(target.value());
+        plan.deletionSql().version().validateValue(target.expectedVersion());
+        requireNonNegativeVersion(plan, target.expectedVersion());
+    }
+
+    private <E, K, V> void verifyDeleteResult(PgVersionPlan<M, E, K, T, V> plan, DeleteTarget<M, E, K, V> target,
+            ResultSet resultSet, boolean deleted) throws SQLException {
+        PgDeletionSql sql = plan.deletionSql();
+        K key = plan.keyCodec().readChecked(resultSet, 2, sql.id());
+        T returnedTenant = plan.tenantCodec().readChecked(resultSet, 3, sql.tenant());
+        V version = plan.versionCodec().readChecked(resultSet, 4, sql.version());
+        requireNonNegativeVersion(plan, version);
+        if (!target.value().equals(key) || !tenant.tenantId().equals(returnedTenant)
+                || deleted != target.expectedVersion().equals(version)) {
+            throw invariant("Delete returned an unexpected identity, tenant, or version");
+        }
+    }
+
+    @Override
+    public <E, K, N> Batch<E> createMultiple(GeneratedEntityType<M, E, K, N> type, Batch<N> inputs) {
+        requireWrite();
+        Objects.requireNonNull(inputs, "inputs");
+        PgPlan<M, E, K, T> plan = plan(type);
+        plan.requireRowCount(inputs.size());
+        if (plan.creationType() == null || !identitySequences.containsKey(plan)) {
+            throw new IllegalArgumentException("Creation requires a verified generated-identity plan");
+        }
+        List<PgColumn> columns = plan.columns();
+        for (N input : inputs) {
+            if (!plan.creationType().isInstance(input)) {
+                throw new IllegalArgumentException("Creation input must be " + plan.creationType().getName());
+            }
+            for (int index = 0; index < columns.size(); index++) {
+                PgColumn column = columns.get(index);
+                if (column.role() == PgColumn.Role.VALUE) {
+                    column.validateValue(plan.creationColumnValue(input, index));
+                }
+            }
+        }
+        if (inputs.isEmpty()) return Batch.empty();
+        List<E> created = new ArrayList<>(inputs.size());
+        Set<K> keys = new HashSet<>(inputs.size() * 2);
+        try (JdbcArrays arrays = new JdbcArrays(connection);
+             PreparedStatement statement = prepare(plan.creationSql())) {
+            statement.setLong(1, identitySequences.get(plan));
+            bindTenant(plan, statement, 2);
+            statement.setInt(3, inputs.size());
+            int parameter = 4;
+            for (int index = 0; index < columns.size(); index++) {
+                PgColumn column = columns.get(index);
+                if (column.role() != PgColumn.Role.VALUE) continue;
+                Object[] values = new Object[inputs.size()];
+                for (int row = 0; row < inputs.size(); row++) {
+                    values[row] = column.codec().arrayElement(plan.creationColumnValue(inputs.get(row), index));
+                }
+                arrays.bind(statement, parameter++, column.codec(), values);
+            }
+            try (ResultSet rows = statement.executeQuery()) {
+                for (int index = 0; index < inputs.size(); index++) {
+                    if (!rows.next() || rows.getLong(1) != index + 1L || rows.wasNull()) {
+                        throw invariant("Identity creation returned an unexpected input ordinal");
+                    }
+                    K allocated = plan.keyCodec().read(rows, 2);
+                    if (!(allocated instanceof Number number) || number.longValue() < 1 || !keys.add(allocated)) {
+                        throw invariant("Identity creation returned an invalid or repeated allocated key");
+                    }
+                    E actual = readEntity(plan, rows, 3);
+                    validateDatabaseEntity(plan, actual);
+                    if (!allocated.equals(plan.keyOf(actual))) {
+                        throw invariant("Identity creation returned a different key from its allocated input key");
+                    }
+                    for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+                        PgColumn column = columns.get(columnIndex);
+                        Object value = plan.columnValue(actual, columnIndex);
+                        if (column.role() == PgColumn.Role.VERSION && ((Number) value).longValue() != 0L
+                                || column.role() == PgColumn.Role.VALUE
+                                && !Objects.equals(value, plan.creationColumnValue(inputs.get(index), columnIndex))) {
+                            throw invariant("Identity creation returned a snapshot differing from its input values");
+                        }
+                    }
+                    created.add(actual);
+                }
+                requireNoMore(rows, "Identity creation returned extra rows");
+            }
+            return Batch.copyOf(created);
+        } catch (SQLException failure) {
+            throw PgVev.databaseFailure(guard, failure);
+        } catch (RuntimeException failure) {
+            throw invariant("Vev PostgreSQL identity creation failed an internal invariant", failure);
+        } catch (Error failure) {
+            poison(failure);
+            throw failure;
+        }
+    }
+
+    @Override
+    public <E, K> E insert(AssignedEntityType<M, E, K> type, E entity) {
         requireWrite();
         PgPlan<M, E, K, T> plan = plan(type);
         validateInsert(plan, entity);
@@ -240,10 +456,11 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     }
 
     @Override
-    public <E, K> Batch<E> insertMultiple(EntityType<M, E, K> type, Batch<E> entities) {
+    public <E, K> Batch<E> insertMultiple(AssignedEntityType<M, E, K> type, Batch<E> entities) {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgPlan<M, E, K, T> plan = plan(type);
+        plan.requireRowCount(entities.size());
         Set<K> keys = new HashSet<>(Math.max(16, entities.size() * 2));
         for (E entity : entities) {
             validateInsert(plan, entity);
@@ -296,6 +513,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         requireWrite();
         Objects.requireNonNull(entities, "entities");
         PgVersionPlan<M, E, K, T, V> plan = versionedPlan(type);
+        plan.requireRowCount(entities.size());
         Set<K> keys = new HashSet<>(Math.max(16, entities.size() * 2));
         for (E entity : entities) {
             validateVersionedEntity(plan, entity);
@@ -366,7 +584,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private <E, K, V> PgVersionPlan<M, E, K, T, V> versionedPlan(EntityType<M, E, K> type) {
         PgPlan<M, E, K, T> plan = plan(type);
         if (!(plan instanceof PgVersionPlan<?, ?, ?, ?, ?> versionedPlan)) {
-            throw new IllegalArgumentException(plan.logicalName() + " is append-only and cannot be mutated");
+            throw new IllegalArgumentException(plan.logicalName() + " has no versioned mutation capability");
         }
         return (PgVersionPlan<M, E, K, T, V>) versionedPlan;
     }
@@ -454,8 +672,8 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         if (entityKey != null) {
             plan.key(entityKey);
         }
-        Object entityTenant = Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
-        if (!tenant.tenantId().equals(entityTenant)) {
+        Object entityTenant = plan.shared() ? null : Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
+        if (!plan.shared() && !tenant.tenantId().equals(entityTenant)) {
             throw new IllegalArgumentException("Entity tenant does not match the lexical transaction tenant");
         }
         List<PgColumn> columns = plan.columns();
@@ -464,7 +682,16 @@ final class PgEntities<M, T> implements WriteEntities<M> {
             Object value = switch (column.role()) {
                 case ID -> entityKey;
                 case TENANT -> entityTenant;
-                case VERSION -> versionOf((PgVersionPlan<M, ?, ?, T, ?>) plan, entity);
+                case VERSION -> {
+                    if (plan.readOnly()) {
+                        Object stored = plan.columnValue(entity, columnIndex);
+                        if (stored instanceof Number number && number.longValue() < 0) {
+                            throw new IllegalArgumentException("Stored version must be non-negative");
+                        }
+                        yield stored;
+                    }
+                    yield versionOf((PgVersionPlan<M, ?, ?, T, ?>) plan, entity);
+                }
                 case VALUE -> plan.columnValue(entity, columnIndex);
             };
             column.validateValue(value);
@@ -590,19 +817,21 @@ final class PgEntities<M, T> implements WriteEntities<M> {
         }
     }
 
-    private <E, K, V> void verifyIndexPredicate(
+    private <E, K> void verifyIndexPredicate(
             PgPlan<M, E, K, T> plan,
             E entity,
-            PgIndexScan<M, E, K, V> scan,
+            int columnIndex,
+            PgIndexScan.Predicate predicate,
+            Object expected,
             PgColumn indexedColumn) {
         try {
-            Object actual = plan.columnValue(entity, scan.index().columnIndex());
+            Object actual = plan.columnValue(entity, columnIndex);
             indexedColumn.validateValue(actual);
-            if (scan.predicate() == PgIndexScan.Predicate.IS_NULL) {
+            if (predicate == PgIndexScan.Predicate.IS_NULL) {
                 if (actual != null) {
                     throw new IllegalStateException("IS NULL index query returned a non-null value");
                 }
-            } else if (actual == null || !actual.equals(scan.value())) {
+            } else if (actual == null || !actual.equals(expected)) {
                 throw new IllegalStateException("Equality index query returned a different value");
             }
         } catch (RuntimeException failure) {
@@ -613,15 +842,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     private <E, K> E readEntity(PgPlan<M, E, K, T> plan, ResultSet resultSet, int firstColumn)
             throws SQLException {
         try {
-            List<PgColumn> columns = plan.columns();
-            Object[] columnValues = new Object[columns.size()];
-            for (int index = 0; index < columns.size(); index++) {
-                PgColumn column = columns.get(index);
-                Object value = column.codec().read(resultSet, firstColumn + index);
-                column.validateValue(value);
-                columnValues[index] = value;
-            }
-            return plan.instantiate(columnValues);
+            return plan.readRow(resultSet, firstColumn);
         } catch (RuntimeException failure) {
             throw invariant("Generated row hydration failed for " + plan.logicalName(), failure);
         }
@@ -736,7 +957,7 @@ final class PgEntities<M, T> implements WriteEntities<M> {
     @SuppressWarnings("unchecked")
     private static void bindUnknown(PgCodec<?> codec, PreparedStatement statement, int index, Object value)
             throws SQLException {
-        if (value != null && value.getClass() != codec.javaType()) {
+        if (value != null && !codec.accepts(value)) {
             throw new IllegalArgumentException("Value does not match the generated PostgreSQL codec");
         }
         ((PgCodec<Object>) codec).bind(statement, index, value);
@@ -781,7 +1002,9 @@ final class PgEntities<M, T> implements WriteEntities<M> {
                 int parameter,
                 PgCodec<?> codec,
                 Object[] values) throws SQLException {
-            Array array = connection.createArrayOf(codec.jdbcType(), values);
+            // pgjdbc treats byte[][] as one-dimensional bytea[] and rejects byte[] inside a generic Object[].
+            Object[] encoded = codec == PgCodecs.BINARY ? java.util.Arrays.copyOf(values, values.length, byte[][].class) : values;
+            Array array = connection.createArrayOf(codec.jdbcType(), encoded);
             arrays.add(array);
             statement.setArray(parameter, array);
         }

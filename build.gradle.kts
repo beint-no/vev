@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "no.beint.vev"
-version = "0.2.0-SNAPSHOT"
+version = "1.0.0"
 
 val publicModules = setOf("vev-core", "vev-postgres", "vev-processor", "vev-jakarta4")
 
@@ -30,7 +30,7 @@ subprojects {
     description = when (name) {
         "vev-core" -> "Compile-time-safe transaction and entity contracts for Vev"
         "vev-postgres" -> "PostgreSQL 18 runtime for Vev's closed AOT entity model"
-        "vev-processor" -> "JDK 26 annotation processor for Vev entity models"
+        "vev-processor" -> "JDK 27 annotation processor for Vev entity models"
         "vev-jakarta4" -> "Experimental nonconforming Jakarta Persistence 4 EntityAgent-shaped facade for Vev"
         "vev-integration-tests" -> "Synthetic PostgreSQL integration verification for Vev"
         "vev-benchmark-vev" -> "JMH benchmark lane for Vev"
@@ -40,7 +40,7 @@ subprojects {
 
     plugins.withId("java") {
         extensions.configure<JavaPluginExtension> {
-            toolchain.languageVersion = JavaLanguageVersion.of(26)
+            toolchain.languageVersion = JavaLanguageVersion.of(27)
             if (project.name in publicModules) {
                 withSourcesJar()
                 withJavadocJar()
@@ -48,7 +48,7 @@ subprojects {
         }
 
         tasks.withType<JavaCompile>().configureEach {
-            options.release = 26
+            options.release = 27
             options.encoding = "UTF-8"
             options.compilerArgs.addAll(listOf("-Xlint:all,-processing", "-Werror", "-parameters"))
         }
@@ -164,12 +164,26 @@ tasks.register("publishCompatibilityRepository") {
     )
 }
 
+tasks.register<Zip>("releaseBundle") {
+    group = "publishing"
+    description = "Packages the versioned Maven repository for a GitHub release."
+    dependsOn("publishCompatibilityRepository")
+    archiveFileName.set("vev-${project.version}-maven.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+    from(layout.buildDirectory.dir("compatibility-repository")) {
+        include("no/beint/vev/*/${project.version}/*")
+    }
+    from("LICENSE")
+}
+
 tasks.register<GradleBuild>("publishedConsumerTest") {
     group = LifecycleBasePlugin.VERIFICATION_GROUP
     description = "Compiles an isolated JPMS consumer against an isolated Vev repository."
     dependsOn("publishCompatibilityRepository")
     dir = file("compatibility/published-consumer")
-    tasks = listOf("clean", "compileJava")
+    tasks = listOf("clean", "check")
     startParameter.isOffline = true
     startParameter.isBuildCacheEnabled = false
     startParameter.isRerunTasks = true

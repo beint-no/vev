@@ -3,7 +3,9 @@ package no.beint.vev.pg.spi;
 import no.beint.vev.EntityType;
 import no.beint.vev.pg.PgCodec;
 import no.beint.vev.pg.PgColumn;
-import no.beint.vev.pg.PgIndex;
+import no.beint.vev.pg.PgQueryIndex;
+import no.beint.vev.pg.PgReference;
+import no.beint.vev.pg.PgUnique;
 
 import java.util.List;
 
@@ -22,9 +24,26 @@ import java.util.List;
  * @param <M> closed-model marker type
  * @param <E> entity snapshot type
  * @param <K> primary-key type
- * @param <T> tenant-key type
+ * @param <T> ambient model tenant-key type
  */
 public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
+    /**
+     * Generated-plan binary contract accepted by this runtime. Incompatible SPI changes increment this value.
+     * This version is independent of the database schema fingerprint and the library release version.
+     */
+    int ABI_VERSION = 7;
+
+    /**
+     * Returns the binary contract embedded by the processor that generated this plan.
+     * The default deliberately identifies older, unversioned output as incompatible. Generated implementations
+     * embed a literal; they must not read the current runtime's version dynamically.
+     *
+     * @return generated ABI version, or zero for an unversioned plan requiring recompilation
+     */
+    default int generatedPlanAbi() {
+        return 0;
+    }
+
     /**
      * Returns the standard codec for entity primary keys.
      *
@@ -32,12 +51,6 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      */
     PgCodec<K> keyCodec();
 
-    /**
-     * Returns the standard codec for tenant keys.
-     *
-     * @return tenant-key codec shared by the closed model
-     */
-    PgCodec<T> tenantCodec();
 
     /**
      * Returns the generated PostgreSQL schema identifier.
@@ -53,12 +66,15 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      */
     String tableName();
 
+
     /**
-     * Returns the generated tenant-isolation column identifier.
+     * Returns the exact physical primary-key role order.
      *
-     * @return name of the sole {@link PgColumn.Role#TENANT} column
+     * @return declared primary-key shape; tenant first when not explicitly overridden
      */
-    String tenantColumn();
+    default no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
+        return no.beint.vev.VevPrimaryKey.Shape.TENANT_ID;
+    }
 
     /**
      * Returns column metadata in entity-constructor and result-set order.
@@ -72,7 +88,42 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      *
      * @return stable immutable index-token list
      */
-    List<PgIndex<M, E, K, ?>> indexes();
+    List<PgQueryIndex<M, E, K, ?>> indexes();
+
+    /**
+     * Returns the complete generated outgoing foreign-key requirements.
+     *
+     * @return immutable scalar references within this model; empty for a model without references
+     */
+    default List<PgReference> references() {
+        return List.of();
+    }
+
+    /**
+     * Returns the optional tenant-key reference to an external registry.
+     * @return an immutable list of zero or one registry reference; it grants no registry data capability
+     */
+    default List<no.beint.vev.pg.PgTenantReference> tenantReferences() {
+        return List.of();
+    }
+
+    /**
+     * Returns the complete generated scoped or shared unique constraints.
+     *
+     * @return immutable immediate constraints using distinct-null semantics
+     */
+    default List<PgUnique> uniqueConstraints() {
+        return List.of();
+    }
+
+    /**
+     * Returns the complete set of declared PostgreSQL check constraints.
+     *
+     * @return immutable checks, verified without evaluating their expressions
+     */
+    default List<no.beint.vev.pg.PgCheck> checkConstraints() {
+        return List.of();
+    }
 
     /**
      * Reads one mapped value from a detached entity snapshot.
@@ -84,12 +135,16 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
     Object columnValue(E entity, int columnIndex);
 
     /**
-     * Creates a detached entity snapshot from values in {@link #columns()} order.
+     * Reads a detached snapshot directly from the current JDBC row in {@link #columns()} order.
+     * Generated readers validate every scalar before calling the verified pure canonical constructor.
+     * The result set must not be retained, advanced, closed, or exposed to entity code.
      *
-     * @param columnValues one value per mapped column
+     * @param resultSet current result row
+     * @param firstColumn one-based position of the first mapped column
      * @return newly constructed detached snapshot
+     * @throws java.sql.SQLException if a mapped value cannot be read
      */
-    E instantiate(Object[] columnValues);
+    E readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException;
 
     /**
      * Reads the primary key from an entity snapshot.
@@ -99,11 +154,4 @@ public interface PgEntityPlan<M, E, K, T> extends EntityType<M, E, K> {
      */
     K keyOf(E entity);
 
-    /**
-     * Reads the tenant key from an entity snapshot.
-     *
-     * @param entity entity snapshot of the exact generated type
-     * @return non-null tenant key
-     */
-    T tenantKeyOf(E entity);
 }

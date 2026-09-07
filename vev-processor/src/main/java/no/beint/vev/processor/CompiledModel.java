@@ -9,5 +9,9 @@ record CompiledModel(
         String simpleName,
         String qualifiedName,
         List<EntityMapping> entities,
-        String fingerprint) {
+        String fingerprint,
+        String tenantType) {
+    boolean sharedOnly() {
+        return entities.stream().allMatch(EntityMapping::shared);
+    }
 }

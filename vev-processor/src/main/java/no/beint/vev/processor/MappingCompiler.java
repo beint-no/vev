@@ -42,25 +42,38 @@ import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.ElementFilter;
 import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
 
 final class MappingCompiler {
-    private static final int MAXIMUM_ENTITIES = 128;
+    private static final int MAXIMUM_ENTITIES = 512;
     private static final int MAXIMUM_COLUMNS = 64;
     private static final int MAXIMUM_INDEXES = 16;
+    private static final int MAXIMUM_UNIQUE_KEY_COLUMNS = 32;
     private static final int MAXIMUM_INDEX_KEY_BYTES = 1_536;
     private static final long MAXIMUM_MATERIALIZED_RESULT_BYTES = 64L * 1_024L * 1_024L;
     private static final String ENTITY = "jakarta.persistence.Entity";
     private static final String TABLE = "jakarta.persistence.Table";
+    private static final String UNIQUE_CONSTRAINT = "jakarta.persistence.UniqueConstraint";
     private static final String ID = "jakarta.persistence.Id";
     private static final String COLUMN = "jakarta.persistence.Column";
     private static final String VERSION = "jakarta.persistence.Version";
     private static final String GENERATED_VALUE = "jakarta.persistence.GeneratedValue";
+    private static final String ENUMERATED = "jakarta.persistence.Enumerated";
     private static final String TENANT_KEY = "no.beint.vev.TenantKey";
     private static final String APPEND_ONLY = "no.beint.vev.AppendOnly";
     private static final String VEV_INDEX = "no.beint.vev.VevIndex";
+    private static final String VEV_REFERENCE = "no.beint.vev.VevReference";
+    private static final String VEV_TENANT_REFERENCE = "no.beint.vev.VevTenantReference";
+    private static final String VEV_PRIMARY_KEY = "no.beint.vev.VevPrimaryKey";
+    private static final String VEV_ROWS = "no.beint.vev.VevRows";
+    private static final String VEV_DELETE = "no.beint.vev.VevDelete";
+    private static final String VEV_SHARED = "no.beint.vev.VevShared";
+    private static final String VEV_READ_ONLY = "no.beint.vev.VevReadOnly";
+    private static final String VEV_BINARY = "no.beint.vev.VevBinary";
+    private static final String VEV_TEXT = "no.beint.vev.VevText";
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final Pattern INDEXED_COMPONENT = Pattern.compile("[a-z][A-Za-z0-9]*");
-    private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES");
+    private static final Set<String> RESERVED_INDEX_FIELDS = Set.of("INSTANCE", "COLUMNS", "INDEXES", "REFERENCES", "UNIQUE_CONSTRAINTS");
     private static final Set<String> ASSOCIATIONS = Set.of(
             "jakarta.persistence.OneToOne",
             "jakarta.persistence.OneToMany",
@@ -99,7 +112,7 @@ final class MappingCompiler {
     private static final Set<String> KEY_TYPES = Set.of(
             "java.lang.Integer", "java.lang.Long", "java.lang.Short", "java.lang.String", "java.util.UUID");
     private static final Map<String, Set<String>> ANNOTATION_MEMBERS = Map.of(
-            VevProcessor.VEV_MODEL, Set.of("entities"),
+            VevProcessor.VEV_MODEL, Set.of("entities", "tenantType"),
             ENTITY, Set.of("name"),
             TABLE, Set.of("name", "catalog", "schema", "uniqueConstraints", "indexes", "check", "comment", "type", "options"),
             ID, Set.of(),
@@ -109,13 +122,14 @@ final class MappingCompiler {
             GENERATED_VALUE, Set.of("strategy", "generator"),
             TENANT_KEY, Set.of(),
             APPEND_ONLY, Set.of(),
-            VEV_INDEX, Set.of("name"));
+            VEV_INDEX, Set.of("name", "orderBy", "direction"));
 
     private final ProcessingEnvironment processingEnvironment;
     private final Messager messager;
     private final Set<String> claimedEntities;
     private final Set<String> sourceTypes;
     private final Trees trees;
+    private final CompiledRecordVerifier compiledRecords;
     private boolean invalid;
 
     MappingCompiler(
@@ -127,6 +141,7 @@ final class MappingCompiler {
         this.claimedEntities = claimedEntities;
         this.sourceTypes = sourceTypes;
         this.trees = compilerTrees(processingEnvironment);
+        this.compiledRecords = new CompiledRecordVerifier(processingEnvironment);
     }
 
     void compile(TypeElement modelDeclaration) {
@@ -150,25 +165,111 @@ final class MappingCompiler {
             entities.add(compileEntity(entityDeclaration, modelQualifiedName));
         }
         entities.removeIf(Objects::isNull);
-        validateSingleTenantType(modelDeclaration, entities);
+        String tenantType = validateSingleTenantType(modelDeclaration, modelAnnotation, entities);
         validateUniqueTables(modelDeclaration, entities);
         validateUniqueIndexes(modelDeclaration, entities);
+        validateReferences(entities);
+        validateTenantRegistry(entities);
         if (invalid) {
             return;
         }
-        String fingerprint = fingerprint(modelDeclaration.getQualifiedName().toString(), entities);
+        String fingerprint = fingerprint(modelDeclaration.getQualifiedName().toString(), entities, tenantType);
+        if (invalid) return;
         CompiledModel model = new CompiledModel(
                 modelDeclaration,
                 modelPackage,
                 modelSimpleName,
                 modelDeclaration.getQualifiedName().toString(),
                 List.copyOf(entities),
-                fingerprint);
+                fingerprint, tenantType);
         JavaSourceGenerator generator = new JavaSourceGenerator();
         for (EntityMapping entity : entities) {
-            writeSource(entity.planQualifiedName(), generator.entityPlan(entity), entity.declaration());
+            writeSource(entity.planQualifiedName(), generator.entityPlan(entity, model.tenantType()), entity.declaration());
         }
         writeSource(modelQualifiedName, generator.modelRegistry(model), modelDeclaration);
+        writeManifest(model);
+    }
+
+    private void validateReferences(List<EntityMapping> entities) {
+        Map<String, EntityMapping> byType = new HashMap<>();
+        entities.forEach(entity -> byType.put(entity.qualifiedName(), entity));
+        for (EntityMapping entity : entities) {
+            Set<String> names = new HashSet<>();
+            if (entity.tenant() != null && entity.tenant().tenantReference() != null) names.add(entity.tenant().tenantReference().name());
+            entity.uniqueConstraints().forEach(unique -> names.add(unique.name()));
+            for (CheckMapping check : entity.checkConstraints()) {
+                if (!names.add(check.name())) {
+                    error(entity.declaration(), "Duplicate constraint name in one entity: " + check.name());
+                }
+            }
+            for (PropertyMapping property : entity.properties()) {
+                if (!property.reference()) {
+                    continue;
+                }
+                if (!names.add(property.referenceName())) {
+                    error(property.declaration(), "Duplicate foreign-key name in one entity: " + property.referenceName());
+                }
+                EntityMapping target = byType.get(property.referenceTarget());
+                if (target == null) {
+                    error(property.declaration(), "@VevReference target must belong to the same closed @VevModel");
+                } else if (!property.boxedType().equals(target.id().boxedType())
+                        || property.maximumLength() != target.id().maximumLength()) {
+                    error(property.declaration(), "@VevReference must use the target's exact scalar identifier type and bounds");
+                }
+                if (target != null && entity.shared() && !target.shared()) {
+                    error(property.declaration(), "@VevShared rows cannot reference tenant-owned rows");
+                }
+                if (target != null && target.shared() && !property.referenceTenantFirst()) {
+                    error(property.declaration(), "@VevReference to shared rows has no tenant order; omit tenantFirst");
+                }
+                if (target != null && !target.shared() && target.primaryKeyShape().equals("ID")
+                        && target.uniqueConstraints().stream().noneMatch(unique -> tenantIdentityUnique(unique.columns()))) {
+                    error(property.declaration(), "@VevReference target with an ID-only primary key requires a tenant-qualified @UniqueConstraint");
+                }
+            }
+        }
+    }
+
+    private void validateTenantRegistry(List<EntityMapping> entities) {
+        String registry = null;
+        String shape = null;
+        for (EntityMapping entity : entities) {
+            for (PropertyMapping property : entity.properties()) {
+                TenantReferenceMapping reference = property.tenantReference();
+                if (reference == null) continue;
+                if (entity.shared() || !property.tenant()) {
+                    error(property.declaration(), "@VevTenantReference requires the mandatory @TenantKey of a tenant-owned entity");
+                }
+                String actualShape = property.boxedType() + "|" + property.maximumLength();
+                if (registry != null && (!registry.equals(reference.registry()) || !shape.equals(actualShape))) {
+                    error(property.declaration(), "One model must use one tenant registry and exact tenant-key bounds");
+                }
+                registry = reference.registry();
+                shape = actualShape;
+                if (entities.stream().anyMatch(mapped -> mapped.schemaName().equals(reference.schema()) && mapped.tableName().equals(reference.table()))) {
+                    error(property.declaration(), "A tenant registry must remain outside the entity model");
+                }
+                if (entity.uniqueConstraints().stream().anyMatch(unique -> unique.name().equals(reference.name()))) {
+                    error(property.declaration(), "Tenant-registry foreign-key name collides with another constraint");
+                }
+            }
+        }
+    }
+
+    private void writeManifest(CompiledModel model) {
+        String name = SchemaManifestGenerator.resourceName(model);
+        List<Element> origins = new ArrayList<>();
+        origins.add(model.declaration());
+        model.entities().forEach(entity -> origins.add(entity.declaration()));
+        try {
+            var file = processingEnvironment.getFiler().createResource(
+                    StandardLocation.CLASS_OUTPUT, "", name, origins.toArray(Element[]::new));
+            try (var output = file.openOutputStream()) {
+                output.write(new SchemaManifestGenerator().generate(model).getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (IOException failure) {
+            error(model.declaration(), "Could not write generated schema manifest " + name + ": " + failure.getMessage());
+        }
     }
 
     private List<TypeElement> entityDeclarations(TypeElement modelDeclaration, AnnotationMirror modelAnnotation) {
@@ -209,9 +310,6 @@ final class MappingCompiler {
     }
 
     private EntityMapping compileEntity(TypeElement entity, String modelQualifiedName) {
-        if (!sourceTypes.contains(entity.getQualifiedName().toString())) {
-            error(entity, "Every Vev entity must be compiled from source in the same javac invocation as its closed model");
-        }
         validateTopLevelPublicType(entity, "Entity");
         if (entity.getKind() != ElementKind.RECORD) {
             error(entity, "Vev entities must be immutable Java records so hydration uses the canonical constructor without reflection");
@@ -227,9 +325,11 @@ final class MappingCompiler {
             return null;
         }
         rejectImplementedInterfaces(entity);
-        rejectExplicitCanonicalConstructor(entity);
-        rejectExplicitInstanceMethods(entity);
-        rejectInitializationSideEffects(entity);
+        if (sourceTypes.contains(entity.getQualifiedName().toString())) {
+            rejectExplicitCanonicalConstructor(entity);
+            rejectExplicitAccessors(entity);
+            rejectInitializationSideEffects(entity);
+        }
         if (annotation(entity, ENTITY) == null) {
             error(entity, "Entity in @VevModel must declare @jakarta.persistence.Entity");
         } else if (!stringValue(annotation(entity, ENTITY), "name").isEmpty()) {
@@ -252,9 +352,7 @@ final class MappingCompiler {
         if (!catalogName.isEmpty()) {
             error(entity, "PostgreSQL catalogs cannot be selected per entity; @Table.catalog must be empty");
         }
-        rejectNonEmptyList(entity, table, "uniqueConstraints", "@Table.uniqueConstraints");
         rejectNonEmptyList(entity, table, "indexes", "@Table.indexes");
-        rejectNonEmptyList(entity, table, "check", "@Table.check");
         rejectNonEmptyString(entity, table, "comment", "@Table.comment");
         rejectNonEmptyString(entity, table, "type", "@Table.type");
         rejectNonEmptyString(entity, table, "options", "@Table.options");
@@ -273,7 +371,20 @@ final class MappingCompiler {
             }
         }
         validateIndexes(entity, properties);
-        validateMaterializedResultBudget(entity, properties);
+        List<UniqueMapping> uniqueConstraints = compileUniqueConstraints(entity, table, properties);
+        List<CheckMapping> checkConstraints = compileCheckConstraints(entity, table, properties);
+        AnnotationMirror rowLimit = annotation(entity, VEV_ROWS);
+        int maximumRows = rowLimit == null ? 1000 : intValue(rowLimit, "value");
+        if (maximumRows < 1 || maximumRows > 1000) error(entity, "@VevRows must be between 1 and 1000");
+        validateMaterializedResultBudget(entity, properties, maximumRows);
+        if (!invalid && !sourceTypes.contains(entity.getQualifiedName().toString())) {
+            try {
+                compiledRecords.verify(entity, properties.stream().filter(property -> !property.nullable())
+                        .map(PropertyMapping::name).collect(java.util.stream.Collectors.toUnmodifiableSet()));
+            } catch (IOException | RuntimeException failure) {
+                error(entity, "Vev could not verify compiled record snapshot operations: " + failure.getMessage());
+            }
+        }
 
         List<PropertyMapping> ids = properties.stream().filter(PropertyMapping::id).toList();
         List<PropertyMapping> tenants = properties.stream().filter(PropertyMapping::tenant).toList();
@@ -283,15 +394,23 @@ final class MappingCompiler {
         } else if (ids.size() > 1) {
             error(entity, "Compound identifiers are forbidden; declare exactly one scalar @Id");
         }
-        if (tenants.isEmpty()) {
+        boolean shared = annotation(entity, VEV_SHARED) != null;
+        if (shared && !tenants.isEmpty()) {
+            error(entity, "@VevShared forbids @TenantKey; shared rows are intentionally visible to every tenant");
+        } else if (!shared && tenants.isEmpty()) {
             error(entity, "Every Vev entity must declare exactly one @TenantKey");
         } else if (tenants.size() > 1) {
             error(entity, "Every Vev entity must declare exactly one @TenantKey, but found " + tenants.size());
         }
         boolean appendOnly = annotation(entity, APPEND_ONLY) != null;
+        AnnotationMirror readOnlyMapping = annotation(entity, VEV_READ_ONLY);
+        boolean readOnly = readOnlyMapping != null;
+        boolean externalIncomingReferences = readOnly && booleanValue(readOnlyMapping, "externalIncomingReferences");
+        if (shared && !readOnly) error(entity, "@VevShared requires @VevReadOnly");
+        if (appendOnly && readOnly) error(entity, "@VevReadOnly and @AppendOnly are distinct capabilities and cannot be combined");
         if (appendOnly && !versions.isEmpty()) {
             error(entity, "@AppendOnly entities must not declare @Version because update and delete plans do not exist");
-        } else if (!appendOnly && versions.isEmpty()) {
+        } else if (!appendOnly && !readOnly && versions.isEmpty()) {
             error(entity, "Mutable Vev entities require exactly one @Version; use @AppendOnly to opt out of mutation");
         } else if (versions.size() > 1) {
             error(entity, "Mutable Vev entities must declare exactly one @Version");
@@ -300,8 +419,23 @@ final class MappingCompiler {
         PropertyMapping id = ids.size() == 1 ? ids.getFirst() : null;
         PropertyMapping tenant = tenants.size() == 1 ? tenants.getFirst() : null;
         PropertyMapping version = versions.size() == 1 ? versions.getFirst() : null;
+        boolean deletable = annotation(entity, VEV_DELETE) != null;
+        if (deletable && (readOnly || appendOnly || id == null || !id.identity() || version == null)) {
+            error(entity, "@VevDelete requires a versioned entity with a generated IDENTITY; assigned, read-only, and append-only entities cannot be deleted");
+        }
+        AnnotationMirror primaryKey = annotation(entity, VEV_PRIMARY_KEY);
+        String primaryKeyShape = primaryKey == null ? (shared ? "ID" : "TENANT_ID") : enumValue(primaryKey, "value");
+        if (shared && !primaryKeyShape.equals("ID")) error(entity, "@VevShared requires an ID-only primary key");
+        if (!Set.of("TENANT_ID", "ID_TENANT", "ID").contains(primaryKeyShape)) {
+            error(entity, "@VevPrimaryKey must select TENANT_ID, ID_TENANT, or ID");
+        }
+        if (!shared && id != null && !primaryKeyShape.equals("TENANT_ID") && !id.indexed()
+                && uniqueConstraints.stream().noneMatch(unique -> tenantIdentityUnique(unique.columns())
+                        && unique.columns().getFirst().tenant())) {
+            error(entity, "An ID-first primary key requires @VevIndex on @Id or a tenant-first (tenant, ID) @UniqueConstraint for bounded scans");
+        }
         if (id != null && id.nullable()) {
-            error(id.declaration(), "Assigned identifier columns must declare @Column(nullable = false)");
+            error(id.declaration(), "Identifier columns must declare @Column(nullable = false)");
         }
         if (id != null && !KEY_TYPES.contains(id.boxedType())) {
             error(id.declaration(), "@Id must use equality-stable Integer, Long, Short, String, or UUID semantics");
@@ -320,14 +454,14 @@ final class MappingCompiler {
                 error(version.declaration(), "@Version must use Integer, Long, or Short for atomic PostgreSQL increment semantics");
             }
         }
-        if (id != null && tenant != null) {
+        if (id != null && (shared || tenant != null)) {
             validateIndexKeyBudgets(properties, id, tenant);
         }
 
         String entityPackage = packageName(entity);
         String planQualifiedName = qualify(entityPackage, entity.getSimpleName() + "Vev");
         rejectGeneratedTypeCollision(entity, planQualifiedName);
-        if (invalid || id == null || tenant == null || (!appendOnly && version == null)
+        if (invalid || id == null || (!shared && tenant == null) || (!appendOnly && !readOnly && version == null)
                 || tableName.isBlank() || schemaName.isBlank()) {
             return null;
         }
@@ -343,10 +477,18 @@ final class MappingCompiler {
                 tableName,
                 tableSql,
                 List.copyOf(properties),
+                uniqueConstraints,
+                checkConstraints,
                 id,
                 tenant,
                 version,
-                appendOnly);
+                appendOnly,
+                readOnly,
+                externalIncomingReferences,
+                shared,
+                deletable,
+                primaryKeyShape,
+                maximumRows);
     }
 
     private PropertyMapping compileProperty(TypeElement entity, RecordComponentElement component) {
@@ -362,19 +504,26 @@ final class MappingCompiler {
         if (!hasExplicitValue(column, "nullable")) {
             error(component, "Every mapped component must explicitly declare @Column(nullable = true) or @Column(nullable = false)");
         }
+        if (annotation(entity, "kotlin.Metadata") != null && !component.asType().getKind().isPrimitive()) {
+            boolean kotlinNotNull = annotation(annotationSources, "org.jetbrains.annotations.NotNull") != null;
+            boolean kotlinNullable = annotation(annotationSources, "org.jetbrains.annotations.Nullable") != null;
+            if (kotlinNotNull == kotlinNullable || booleanValue(column, "nullable") != kotlinNullable) {
+                error(component, "Kotlin record nullability must exactly match explicit @Column.nullable metadata");
+            }
+        }
         if (!stringValue(column, "table").isEmpty()) {
             error(component, "Per-column secondary tables are forbidden; @Column.table must be empty");
         }
-        if (!booleanValue(column, "insertable") || !booleanValue(column, "updatable")) {
+        if ((!booleanValue(column, "insertable") || !booleanValue(column, "updatable"))
+                && annotation(entity, VEV_READ_ONLY) == null) {
             error(component, "@Column.insertable and @Column.updatable must both remain true in immutable Vev snapshots");
         }
         if (booleanValue(column, "unique")) {
             error(component, "@Column.unique is forbidden; declare and review unique constraints in the database migration");
         }
         rejectNonEmptyString(component, column, "columnDefinition", "@Column.columnDefinition");
-        rejectNonEmptyString(component, column, "options", "@Column.options");
+        String defaultExpression = compileDefaultExpression(component, column);
         rejectNonEmptyString(component, column, "comment", "@Column.comment");
-        rejectNonEmptyList(component, column, "check", "@Column.check");
         rejectNonDefaultInt(component, column, "secondPrecision", -1);
         boolean id = consistentAnnotation(component, annotationSources, ID) != null;
         boolean tenant = consistentAnnotation(component, annotationSources, TENANT_KEY) != null;
@@ -382,19 +531,65 @@ final class MappingCompiler {
         AnnotationMirror index = consistentAnnotation(component, annotationSources, VEV_INDEX);
         AnnotationMirror generatedValue = consistentAnnotation(component, annotationSources, GENERATED_VALUE);
         if (generatedValue != null) {
-            error(component,
-                    "@GeneratedValue is forbidden because shared database generators leak cross-tenant activity; use an assigned stable identifier");
+            if (!id || !enumValue(generatedValue, "strategy").equals("IDENTITY")
+                    || !hasExplicitValue(generatedValue, "strategy")
+                    || !stringValue(generatedValue, "generator").isEmpty()) {
+                error(component, "@GeneratedValue requires an @Id, explicit strategy = IDENTITY, and an empty generator");
+            }
+            if (!Set.of("short", "int", "long", "java.lang.Short", "java.lang.Integer", "java.lang.Long")
+                    .contains(component.asType().toString())) {
+                error(component, "PostgreSQL IDENTITY requires a Short, Integer, or Long identifier");
+            }
         }
         int roles = (id ? 1 : 0) + (tenant ? 1 : 0) + (version ? 1 : 0);
+        if (roles > 0 && !defaultExpression.isEmpty()) {
+            error(component, "@Column.options DEFAULT is permitted only on ordinary VALUE components, never identifiers, tenant keys, or versions");
+        }
         if (roles > 1) {
             error(component, "@Id, @TenantKey, and @Version must identify distinct record components");
         }
+        AnnotationMirror reference = consistentAnnotation(component, annotationSources, VEV_REFERENCE);
+        String referenceName = reference == null ? "" : stringValue(reference, "name");
+        String referenceTarget = "";
+        if (reference != null) {
+            validateIdentifier(component, referenceName, "foreign-key");
+            if (roles > 0) {
+                error(component, "@VevReference may only map an ordinary VALUE component");
+            }
+            AnnotationValue target = annotationValue(reference, "target");
+            if (target != null && target.getValue() instanceof TypeMirror targetType
+                    && processingEnvironment.getTypeUtils().asElement(targetType) instanceof TypeElement targetElement) {
+                referenceTarget = targetElement.getQualifiedName().toString();
+            } else {
+                error(component, "@VevReference target must resolve to a declared entity type");
+            }
+        }
+        AnnotationMirror tenantReferenceAnnotation = consistentAnnotation(component, annotationSources, VEV_TENANT_REFERENCE);
+        TenantReferenceMapping tenantReference = null;
+        if (tenantReferenceAnnotation != null) {
+            if (!tenant || roles != 1 || reference != null) {
+                error(component, "@VevTenantReference may only annotate the mandatory @TenantKey, without @VevReference");
+            }
+            for (String field : List.of("name", "schema", "table", "column")) {
+                validateIdentifier(component, stringValue(tenantReferenceAnnotation, field), "tenant-registry " + field);
+            }
+            String onDelete = enumValue(tenantReferenceAnnotation, "onDelete");
+            if (!Set.of("NO_ACTION", "CASCADE").contains(onDelete)) error(component, "Unsupported tenant-registry deletion action");
+            tenantReference = new TenantReferenceMapping(stringValue(tenantReferenceAnnotation, "name"),
+                    stringValue(tenantReferenceAnnotation, "schema"), stringValue(tenantReferenceAnnotation, "table"),
+                    stringValue(tenantReferenceAnnotation, "column"), onDelete);
+        }
         String indexName = index == null ? "" : stringValue(index, "name");
+        String indexOrderBy = index == null ? "" : stringValue(index, "orderBy");
+        String indexDirection = index == null ? "ASC" : enumValue(index, "direction");
         String indexFieldName = "";
         if (index != null) {
             validateIdentifier(component, indexName, "index");
-            if (roles > 0) {
-                error(component, "@VevIndex may only map an ordinary VALUE component, not @Id, @TenantKey, or @Version");
+            if (!Set.of("ASC", "DESC").contains(indexDirection) || indexOrderBy.isEmpty() && !indexDirection.equals("ASC")) {
+                error(component, "@VevIndex.direction must be ASC or DESC; DESC requires an explicit orderBy column");
+            }
+            if (tenant || version) {
+                error(component, "@VevIndex may map an ID or VALUE component, not @TenantKey or @Version");
             }
             String componentName = component.getSimpleName().toString();
             if (!INDEXED_COMPONENT.matcher(componentName).matches()) {
@@ -406,10 +601,44 @@ final class MappingCompiler {
                 }
             }
         }
+        AnnotationMirror enumerated = consistentAnnotation(component, annotationSources, ENUMERATED);
+        AnnotationMirror binary = consistentAnnotation(component, annotationSources, VEV_BINARY);
+        AnnotationMirror text = consistentAnnotation(component, annotationSources, VEV_TEXT);
+        List<String> enumConstants = List.of();
         CodecMapping codec = CODECS.get(component.asType().toString());
+        if (text != null) {
+            if (!component.asType().toString().equals("java.lang.String") || id || tenant || version) {
+                error(component, "@VevText only applies to String VALUE components");
+            } else {
+                codec = new CodecMapping("java.lang.String", "no.beint.vev.pg.PgCodecs.TEXT", "text");
+            }
+        }
+        Element valueType = processingEnvironment.getTypeUtils().asElement(component.asType());
+        if (valueType instanceof TypeElement enumType && enumType.getKind() == ElementKind.ENUM) {
+            if (enumerated == null || !enumValue(enumerated, "value").equals("STRING")) {
+                error(component, "Enum components require explicit @Enumerated(EnumType.STRING); ordinal persistence is forbidden");
+            }
+            for (Element member : enumType.getEnclosedElements()) {
+                if (annotation(member, "jakarta.persistence.EnumeratedValue") != null) {
+                    error(component, "@EnumeratedValue is not supported; enum columns store the exact declared constant name");
+                }
+            }
+            enumConstants = enumType.getEnclosedElements().stream()
+                    .filter(member -> member.getKind() == ElementKind.ENUM_CONSTANT)
+                    .map(member -> member.getSimpleName().toString()).sorted().toList();
+            if (enumConstants.isEmpty() || enumConstants.size() > 1_024) {
+                error(component, "An enum mapping requires between 1 and 1024 declared constants");
+            }
+            String type = enumType.getQualifiedName().toString();
+            codec = new CodecMapping(type,
+                    "no.beint.vev.pg.PgCodecs.enumNames(" + type + ".class, " + type + ".values())",
+                    "character varying");
+        } else if (enumerated != null) {
+            error(component, "@Enumerated may only annotate an enum component");
+        }
         if (codec == null) {
             error(component, "No safe PostgreSQL codec exists for " + component.asType()
-                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, and Instant");
+                    + "; supported scalar types are Boolean, Integer, Long, Short, String, UUID, BigDecimal, LocalDate, LocalDateTime, LocalTime, Instant, bounded Binary, and explicit STRING enums");
             return null;
         }
         boolean nullable = booleanValue(column, "nullable");
@@ -419,10 +648,19 @@ final class MappingCompiler {
         int maximumLength = 0;
         int numericPrecision = 0;
         int numericScale = 0;
-        if (codec.codec().endsWith(".STRING")) {
+        String lengthCheckName = "";
+        if (binary != null && !codec.arrayElementType().equals("bytea")) {
+            error(component, "@VevBinary only applies to immutable Binary VALUE components");
+        }
+        if (codec.arrayElementType().equals("character varying")) {
             maximumLength = intValue(column, "length");
             if (maximumLength < 1 || maximumLength > 65_535) {
                 error(component, "String @Column.length must be between 1 and 65535");
+            }
+            for (String constant : enumConstants) {
+                if (constant.codePointCount(0, constant.length()) > maximumLength) {
+                    error(component, "Enum constant " + constant + " exceeds @Column.length");
+                }
             }
             if ((id || tenant) && maximumLength != 128) {
                 error(component, "String @Id and @TenantKey columns must declare @Column(length = 128)");
@@ -430,6 +668,34 @@ final class MappingCompiler {
             if (index != null && maximumLength > 256) {
                 error(component, "Indexed String components must declare @Column(length <= 256) for Vev's deterministic B-tree key budget");
             }
+            rejectNonDefaultInt(component, column, "precision", 0);
+            rejectNonDefaultInt(component, column, "scale", 0);
+        } else if (codec.arrayElementType().equals("text")) {
+            maximumLength = intValue(column, "length");
+            if (!hasExplicitValue(column, "length") || maximumLength < 1 || maximumLength > 8 * 1024 * 1024) {
+                error(component, "@VevText requires explicit @Column.length between 1 and 8388608 code points");
+                maximumLength = 0;
+            }
+            lengthCheckName = stringValue(text, "check");
+            validateIdentifier(component, lengthCheckName, "text length check constraint");
+            if (index != null && maximumLength > 256) {
+                error(component, "Indexed text components must declare @Column(length <= 256) for Vev's deterministic B-tree key budget");
+            }
+            rejectNonDefaultInt(component, column, "precision", 0);
+            rejectNonDefaultInt(component, column, "scale", 0);
+        } else if (codec.arrayElementType().equals("bytea")) {
+            if (binary == null || id || tenant || version) {
+                error(component, "Binary VALUE components require explicit @VevBinary byte bounds and a named check constraint");
+            } else {
+                maximumLength = intValue(binary, "maximumBytes");
+                lengthCheckName = stringValue(binary, "check");
+                validateIdentifier(component, lengthCheckName, "binary check constraint");
+                if (maximumLength < 1 || maximumLength > 32 * 1024 * 1024) {
+                    error(component, "@VevBinary.maximumBytes must be between 1 and 33554432");
+                    maximumLength = 0;
+                }
+            }
+            rejectNonDefaultInt(component, column, "length", 255);
             rejectNonDefaultInt(component, column, "precision", 0);
             rejectNonDefaultInt(component, column, "scale", 0);
         } else if (codec.codec().endsWith(".BIG_DECIMAL")) {
@@ -463,7 +729,153 @@ final class MappingCompiler {
                 tenant,
                 version,
                 indexName,
-                indexFieldName);
+                indexFieldName,
+                indexOrderBy,
+                indexDirection,
+                enumConstants,
+                referenceName,
+                referenceTarget,
+                generatedValue != null,
+                reference == null || booleanValue(reference, "tenantFirst"),
+                lengthCheckName,
+                defaultExpression, tenantReference);
+    }
+
+    private String compileDefaultExpression(Element component, AnnotationMirror column) {
+        String options = stringValue(column, "options").strip();
+        if (options.isEmpty()) return "";
+        if (options.length() <= 7 || !options.regionMatches(true, 0, "DEFAULT", 0, 7) || !Character.isWhitespace(options.charAt(7))) {
+            error(component, "@Column.options supports only DEFAULT followed by exact PostgreSQL expression metadata");
+            return "";
+        }
+        String expression = options.substring(7).strip();
+        if (expression.isBlank() || expression.length() > 4096 || expression.indexOf('\0') >= 0
+                || expression.codePoints().anyMatch(codePoint -> codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+            error(component, "Default expression must be nonempty Unicode schema metadata of at most 4096 characters");
+            return "";
+        }
+        if (expression.equalsIgnoreCase("NULL")) {
+            error(component, "PostgreSQL omits a bare DEFAULT NULL; omit @Column.options instead");
+            return "";
+        }
+        return expression;
+    }
+
+    private List<CheckMapping> compileCheckConstraints(TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
+        List<CheckMapping> result = new ArrayList<>();
+        collectChecks(entity, table, result);
+        for (RecordComponentElement component : entity.getRecordComponents()) {
+            collectChecks(component, consistentAnnotation(component, componentSources(entity, component), COLUMN), result);
+        }
+        for (PropertyMapping property : properties) {
+            if (!property.lengthCheckName().isEmpty()) {
+                boolean binaryBound = property.arrayElementType().equals("bytea");
+                result.add(new CheckMapping(property.lengthCheckName(),
+                        "(" + (binaryBound ? "octet_length" : "char_length") + "(" + property.quotedColumn() + ") <= " + property.maximumLength() + ')',
+                        binaryBound ? CheckMapping.Kind.BINARY_MAXIMUM : CheckMapping.Kind.TEXT_MAXIMUM,
+                        property.columnName(), property.maximumLength()));
+            }
+        }
+        if (result.size() > 32) error(entity, "An entity must not exceed 32 declared check constraints including generated length bounds");
+        result.sort(Comparator.comparing(CheckMapping::name));
+        return List.copyOf(result);
+    }
+
+    private void collectChecks(Element source, AnnotationMirror annotation, List<CheckMapping> result) {
+        AnnotationValue value = annotation == null ? null : annotationValue(annotation, "check");
+        if (value == null || !(value.getValue() instanceof List<?> checks)) return;
+        if (checks.size() + result.size() > 32) {
+            error(source, "An entity must not exceed 32 declared check constraints");
+            return;
+        }
+        for (Object entry : checks) {
+            if (!(entry instanceof AnnotationValue item) || !(item.getValue() instanceof AnnotationMirror check)) {
+                error(source, "Check constraints require explicit @CheckConstraint metadata");
+                continue;
+            }
+            Set<String> members = new HashSet<>();
+            for (ExecutableElement member : ElementFilter.methodsIn(check.getAnnotationType().asElement().getEnclosedElements())) {
+                members.add(member.getSimpleName().toString());
+            }
+            if (!members.equals(Set.of("name", "constraint", "options"))) {
+                error(source, "Unsupported @CheckConstraint annotation shape");
+            }
+            String name = stringValue(check, "name");
+            validateIdentifier(source, name, "check constraint");
+            rejectNonEmptyString(source, check, "options", "@CheckConstraint.options");
+            String expression = stringValue(check, "constraint");
+            if (expression.isBlank() || expression.length() > 4096 || expression.indexOf('\0') >= 0
+                    || expression.codePoints().anyMatch(codePoint -> codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+                error(source, "Check expression must be nonempty Unicode schema metadata of at most 4096 characters");
+            }
+            result.add(new CheckMapping(name, expression));
+        }
+    }
+
+    private List<UniqueMapping> compileUniqueConstraints(
+            TypeElement entity, AnnotationMirror table, List<PropertyMapping> properties) {
+        boolean shared = annotation(entity, VEV_SHARED) != null;
+        AnnotationValue declaration = table == null ? null : annotationValue(table, "uniqueConstraints");
+        if (declaration == null || !(declaration.getValue() instanceof List<?> constraints)) {
+            return List.of();
+        }
+        if (constraints.size() + properties.stream().filter(PropertyMapping::indexed).count() > MAXIMUM_INDEXES) {
+            error(entity, "Unique constraints and query indexes must not exceed " + MAXIMUM_INDEXES + " per entity");
+            return List.of();
+        }
+        List<UniqueMapping> result = new ArrayList<>();
+        for (Object entry : constraints) {
+            if (!(entry instanceof AnnotationValue value) || !(value.getValue() instanceof AnnotationMirror unique)) {
+                error(entity, "@Table.uniqueConstraints requires explicit @UniqueConstraint metadata");
+                continue;
+            }
+            validateAnnotationShape(entity, unique);
+            String name = stringValue(unique, "name");
+            validateIdentifier(entity, name, "unique constraint");
+            rejectNonEmptyString(entity, unique, "options", "@UniqueConstraint.options");
+            AnnotationValue columnsValue = annotationValue(unique, "columnNames");
+            if (columnsValue == null || !(columnsValue.getValue() instanceof List<?> names)
+                    || names.size() < (shared ? 1 : 2) || names.size() > MAXIMUM_UNIQUE_KEY_COLUMNS) {
+                error(entity, shared ? "@VevShared unique constraints require one to 32 VALUE columns"
+                        : "@UniqueConstraint requires the tenant column followed by ordinary value columns");
+                continue;
+            }
+            List<PropertyMapping> columns = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (Object item : names) {
+                String columnName = item instanceof AnnotationValue columnValue ? String.valueOf(columnValue.getValue()) : "";
+                PropertyMapping column = properties.stream().filter(property -> property.columnName().equals(columnName))
+                        .findFirst().orElse(null);
+                if (column == null || !seen.add(columnName)) {
+                    error(entity, "@UniqueConstraint columns must be distinct explicitly mapped column names: " + columnName);
+                    continue;
+                }
+                columns.add(column);
+            }
+            if (shared) {
+                if (columns.stream().anyMatch(column -> column.id() || column.tenant() || column.version())) {
+                    error(entity, "@VevShared unique constraints may contain only VALUE columns");
+                }
+            } else if (!tenantIdentityUnique(columns)) {
+                for (int index = 0; index < columns.size(); index++) {
+                    PropertyMapping column = columns.get(index);
+                    if (index == 0 ? !column.tenant() : column.tenant() || column.id() || column.version()) {
+                        error(entity, "@UniqueConstraint requires tenant-first VALUE columns or exactly the ID and tenant columns");
+                    }
+                }
+            }
+            if (columns.stream().mapToInt(this::maximumIndexBytes).sum() > MAXIMUM_INDEX_KEY_BYTES) {
+                error(entity, "Unique constraint " + name + " can exceed Vev's " + MAXIMUM_INDEX_KEY_BYTES + "-byte B-tree key budget");
+            }
+            result.add(new UniqueMapping(name, List.copyOf(columns)));
+        }
+        result.sort(Comparator.comparing(UniqueMapping::name));
+        return List.copyOf(result);
+    }
+
+    private static boolean tenantIdentityUnique(List<PropertyMapping> columns) {
+        return columns.size() == 2 && (columns.get(0).tenant() && columns.get(1).id()
+                || columns.get(0).id() && columns.get(1).tenant());
     }
 
     private void validateIndexes(TypeElement entity, List<PropertyMapping> properties) {
@@ -474,6 +886,16 @@ final class MappingCompiler {
         Map<String, PropertyMapping> indexNames = new HashMap<>();
         Map<String, PropertyMapping> fieldNames = new HashMap<>();
         for (PropertyMapping property : indexed) {
+            if (!property.indexOrderBy().isEmpty()) {
+                validateIdentifier(property.declaration(), property.indexOrderBy(), "ordering column");
+                PropertyMapping order = properties.stream().filter(candidate -> candidate.columnName().equals(property.indexOrderBy()))
+                        .findFirst().orElse(null);
+                if (property.id() || order == null || order == property || order.id() || order.tenant() || order.version() || order.nullable()) {
+                    error(property.declaration(), "@VevIndex.orderBy requires a distinct non-null VALUE column and a VALUE filter");
+                } else if (Set.of("character varying", "text").contains(order.arrayElementType()) && order.maximumLength() > 256) {
+                    error(property.declaration(), "Index ordering String columns must not exceed 256 code points");
+                }
+            }
             PropertyMapping duplicateName = indexNames.putIfAbsent(property.indexName(), property);
             if (duplicateName != null) {
                 error(property.declaration(), "Duplicate explicit index name \"" + property.indexName() + "\"");
@@ -487,12 +909,15 @@ final class MappingCompiler {
 
     private void validateIndexKeyBudgets(
             List<PropertyMapping> properties, PropertyMapping id, PropertyMapping tenant) {
-        int identityBytes = Math.addExact(maximumIndexBytes(id), maximumIndexBytes(tenant));
+        int identityBytes = Math.addExact(maximumIndexBytes(id), tenant == null ? 0 : maximumIndexBytes(tenant));
         for (PropertyMapping property : properties) {
             if (!property.indexed()) {
                 continue;
             }
-            int maximumBytes = Math.addExact(identityBytes, maximumIndexBytes(property));
+            PropertyMapping order = properties.stream().filter(candidate -> candidate.columnName().equals(property.indexOrderBy()))
+                    .findFirst().orElse(null);
+            int maximumBytes = Math.addExact(Math.addExact(identityBytes, property.id() ? 0 : maximumIndexBytes(property)),
+                    order == null ? 0 : maximumIndexBytes(order));
             if (maximumBytes > MAXIMUM_INDEX_KEY_BYTES) {
                 error(property.declaration(), "PostgreSQL index " + property.indexName()
                         + " can exceed Vev's " + MAXIMUM_INDEX_KEY_BYTES
@@ -502,6 +927,7 @@ final class MappingCompiler {
     }
 
     private int maximumIndexBytes(PropertyMapping property) {
+        if (property.arrayElementType().equals("bytea")) return Math.addExact(32, property.maximumLength());
         if (property.maximumLength() > 0) {
             return Math.multiplyExact(4, property.maximumLength());
         }
@@ -511,11 +937,13 @@ final class MappingCompiler {
         return 64;
     }
 
-    private void validateMaterializedResultBudget(TypeElement entity, List<PropertyMapping> properties) {
+    private void validateMaterializedResultBudget(TypeElement entity, List<PropertyMapping> properties, int maximumRows) {
         long maximumRowBytes = Math.addExact(128L, Math.multiplyExact(16L, properties.size()));
         for (PropertyMapping property : properties) {
             long maximumColumnBytes;
-            if (property.maximumLength() > 0) {
+            if (property.arrayElementType().equals("bytea")) {
+                maximumColumnBytes = Math.addExact(64L, property.maximumLength());
+            } else if (property.maximumLength() > 0) {
                 maximumColumnBytes = Math.addExact(64L, Math.multiplyExact(4L, property.maximumLength()));
             } else if (property.numericPrecision() > 0) {
                 maximumColumnBytes = Math.addExact(64L, Math.multiplyExact(2L, property.numericPrecision()));
@@ -524,19 +952,35 @@ final class MappingCompiler {
             }
             maximumRowBytes = Math.addExact(maximumRowBytes, maximumColumnBytes);
         }
-        if (Math.multiplyExact(maximumRowBytes, 1_001L) > MAXIMUM_MATERIALIZED_RESULT_BYTES) {
-            error(entity, "Mapped row shape can exceed Vev's 64 MiB materialized-result safety budget");
+        if (Math.multiplyExact(maximumRowBytes, (long) maximumRows + 1) > MAXIMUM_MATERIALIZED_RESULT_BYTES) {
+            error(entity, "Mapped row shape can exceed Vev's 64 MiB materialized-result safety budget; reduce @VevRows or column bounds");
         }
     }
 
-    private void validateSingleTenantType(TypeElement model, List<EntityMapping> entities) {
+    private String validateSingleTenantType(TypeElement model, AnnotationMirror annotation, List<EntityMapping> entities) {
         Set<String> tenantTypes = new HashSet<>();
+        AnnotationValue explicit = annotationValue(annotation, "tenantType");
+        if (explicit == null || !(explicit.getValue() instanceof TypeMirror type)) {
+            error(model, "@VevModel.tenantType must resolve to a supported tenant-key type");
+        } else if (type.getKind() != javax.lang.model.type.TypeKind.VOID) {
+            String name = type.getKind().isPrimitive()
+                    ? processingEnvironment.getTypeUtils().boxedClass((javax.lang.model.type.PrimitiveType) type).getQualifiedName().toString()
+                    : type.toString();
+            if (!KEY_TYPES.contains(name)) {
+                error(model, "@VevModel.tenantType requires Integer, Long, Short, String, or UUID (integral primitives are boxed)");
+            }
+            tenantTypes.add(name);
+        }
         for (EntityMapping entity : entities) {
-            tenantTypes.add(entity.tenant().boxedType());
+            if (!entity.shared()) tenantTypes.add(entity.tenant().boxedType());
+        }
+        if (tenantTypes.isEmpty() && !entities.isEmpty()) {
+            error(model, "A closed @VevModel requires at least one tenant-owned mapping or an explicit tenantType to establish transaction authority");
         }
         if (tenantTypes.size() > 1) {
-            error(model, "All entities in one closed @VevModel must use the same tenant key type, found " + tenantTypes);
+            error(model, "All entities in one closed @VevModel must use the same tenant key type, including any explicit tenantType; found " + tenantTypes);
         }
+        return tenantTypes.stream().sorted().findFirst().orElse(null);
     }
 
     private void validateUniqueTables(TypeElement model, List<EntityMapping> entities) {
@@ -556,6 +1000,12 @@ final class MappingCompiler {
             mappedRelations.add(entity.schemaName() + '.' + entity.tableName());
         }
         for (EntityMapping entity : entities) {
+            for (UniqueMapping unique : entity.uniqueConstraints()) {
+                String index = entity.schemaName() + '.' + unique.name();
+                if (!indexes.add(index) || mappedRelations.contains(index)) {
+                    error(model, "Unique constraint backing index collides with a generated relation or index: " + index);
+                }
+            }
             for (PropertyMapping property : entity.properties()) {
                 if (!property.indexed()) {
                     continue;
@@ -582,7 +1032,8 @@ final class MappingCompiler {
     private void scanTypeAnnotations(TypeElement entity) {
         for (AnnotationMirror annotation : entity.getAnnotationMirrors()) {
             String name = annotationName(annotation);
-            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY)) {
+            if (name.equals(ENTITY) || name.equals(TABLE) || name.equals(APPEND_ONLY) || name.equals(VEV_PRIMARY_KEY)
+                    || name.equals(VEV_ROWS) || name.equals(VEV_DELETE) || name.equals(VEV_READ_ONLY) || name.equals(VEV_SHARED)) {
                 validateAnnotationShape(entity, annotation);
                 continue;
             }
@@ -598,7 +1049,8 @@ final class MappingCompiler {
             for (AnnotationMirror annotation : member.getAnnotationMirrors()) {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
-                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)) {
+                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_TENANT_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
                     if (!componentElements.contains(member)) {
                         error(member, "Persistence mapping @" + simpleName(name)
                                 + " is forbidden on members unrelated to a record component");
@@ -619,7 +1071,8 @@ final class MappingCompiler {
             for (AnnotationMirror annotation : source.getAnnotationMirrors()) {
                 String name = annotationName(annotation);
                 if (name.equals(ID) || name.equals(COLUMN) || name.equals(VERSION)
-                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)) {
+                        || name.equals(GENERATED_VALUE) || name.equals(TENANT_KEY) || name.equals(VEV_INDEX)
+                        || name.equals(ENUMERATED) || name.equals(VEV_REFERENCE) || name.equals(VEV_TENANT_REFERENCE) || name.equals(VEV_BINARY) || name.equals(VEV_TEXT)) {
                     validateAnnotationShape(component, annotation);
                     continue;
                 }
@@ -648,10 +1101,12 @@ final class MappingCompiler {
         }
     }
 
-    private void rejectExplicitInstanceMethods(TypeElement entity) {
+    private void rejectExplicitAccessors(TypeElement entity) {
         for (ExecutableElement method : ElementFilter.methodsIn(entity.getEnclosedElements())) {
-            if (!method.getModifiers().contains(Modifier.STATIC) && hasSourcePosition(entity, method)) {
-                error(method, "Explicit instance methods are forbidden because Vev entities must retain generated record equality and pure accessors");
+            if (!method.getModifiers().contains(Modifier.STATIC) && method.getParameters().isEmpty()
+                    && entity.getRecordComponents().stream().anyMatch(component -> component.getSimpleName().equals(method.getSimpleName()))
+                    && hasSourcePosition(entity, method)) {
+                error(method, "Explicit record accessors are forbidden because hydration requires direct unmodified component values");
             }
         }
     }
@@ -672,15 +1127,15 @@ final class MappingCompiler {
             return;
         }
         long typeStart = trees.getSourcePositions()
-                .getStartPosition(entityPath.getCompilationUnit(), classTree);
+                .getStartPosition(classTree);
         for (Tree member : classTree.getMembers()) {
             if (!(member instanceof MethodTree methodTree) || methodTree.getReturnType() != null) {
                 continue;
             }
             long constructorStart = trees.getSourcePositions()
-                    .getStartPosition(entityPath.getCompilationUnit(), member);
+                    .getStartPosition(member);
             long constructorEnd = trees.getSourcePositions()
-                    .getEndPosition(entityPath.getCompilationUnit(), member);
+                    .getEndPosition(member);
             if (constructorStart == Diagnostic.NOPOS
                     || constructorEnd == Diagnostic.NOPOS
                     || constructorStart <= typeStart) {
@@ -736,7 +1191,7 @@ final class MappingCompiler {
         var entityPath = trees.getPath(entity);
         return methodTree != null
                 && entityPath != null
-                && trees.getSourcePositions().getStartPosition(entityPath.getCompilationUnit(), methodTree) != Diagnostic.NOPOS;
+                && trees.getSourcePositions().getStartPosition(methodTree) != Diagnostic.NOPOS;
     }
 
     private static Trees compilerTrees(ProcessingEnvironment environment) {
@@ -802,7 +1257,18 @@ final class MappingCompiler {
 
     private void validateAnnotationShape(Element use, AnnotationMirror annotation) {
         String annotationName = annotationName(annotation);
-        Set<String> expected = ANNOTATION_MEMBERS.get(annotationName);
+        Set<String> expected = switch (annotationName) {
+            case ENUMERATED -> Set.of("value");
+            case UNIQUE_CONSTRAINT -> Set.of("name", "columnNames", "options");
+            case VEV_REFERENCE -> Set.of("name", "target", "tenantFirst");
+            case VEV_TENANT_REFERENCE -> Set.of("name", "schema", "table", "column", "onDelete");
+            case VEV_PRIMARY_KEY, VEV_ROWS -> Set.of("value");
+            case VEV_DELETE, VEV_SHARED -> Set.of();
+            case VEV_READ_ONLY -> Set.of("externalIncomingReferences");
+            case VEV_BINARY -> Set.of("maximumBytes", "check");
+            case VEV_TEXT -> Set.of("check");
+            default -> ANNOTATION_MEMBERS.get(annotationName);
+        };
         if (expected == null) {
             return;
         }
@@ -878,12 +1344,35 @@ final class MappingCompiler {
         }
     }
 
-    private String fingerprint(String modelName, List<EntityMapping> entities) {
+    private String fingerprint(String modelName, List<EntityMapping> entities, String tenantType) {
         StringBuilder canonical = new StringBuilder("vev-model-v4\n").append(modelName).append('\n');
+        if (entities.stream().allMatch(EntityMapping::shared)) canonical.append("tenantScopeType|").append(tenantType).append('\n');
+        int expressionCharacters = 0;
         for (EntityMapping entity : entities) {
             canonical.append(entity.qualifiedName()).append('|')
                     .append(entity.tableSql()).append('|')
                     .append(entity.appendOnly()).append('\n');
+            if (entity.deletable()) canonical.append("delete|versionedIdentity\n");
+            if (entity.readOnly()) canonical.append("readOnly\n");
+            if (entity.externalIncomingReferences()) canonical.append("externalIncomingReferences\n");
+            if (entity.shared()) canonical.append("shared\n");
+            for (CheckMapping check : entity.checkConstraints()) {
+                expressionCharacters += check.expression().length();
+                if (expressionCharacters > 16 * 1024 * 1024) {
+                    error(entity.declaration(), "Closed model exceeds the retained check/default-expression budget");
+                    return "";
+                }
+                canonical.append("check|").append(check.name()).append('|')
+                        .append(check.expression().length()).append('|').append(check.expression()).append('\n');
+                if (check.kind() != CheckMapping.Kind.EXACT) {
+                    canonical.append(check.kind() == CheckMapping.Kind.BINARY_MAXIMUM ? "binaryMaximum|" : "textMaximum|")
+                            .append(check.boundColumn()).append('|').append(check.maximumLength()).append('\n');
+                }
+            }
+            if (!entity.primaryKeyShape().equals("TENANT_ID")) {
+                canonical.append("primaryKey|").append(entity.primaryKeyShape()).append('\n');
+            }
+            if (entity.maximumRows() != 1000) canonical.append("maximumRows|").append(entity.maximumRows()).append('\n');
             for (PropertyMapping property : entity.properties()) {
                 canonical.append(property.name()).append('|')
                         .append(property.boxedType()).append('|')
@@ -896,6 +1385,38 @@ final class MappingCompiler {
                         .append(property.tenant()).append('|')
                         .append(property.version()).append('|')
                         .append(property.indexName()).append('\n');
+                if (!property.defaultExpression().isEmpty()) {
+                    expressionCharacters += property.defaultExpression().length();
+                    if (expressionCharacters > 16 * 1024 * 1024) {
+                        error(entity.declaration(), "Closed model exceeds the retained check/default-expression budget");
+                        return "";
+                    }
+                    canonical.append("default|").append(property.defaultExpression().length()).append('|')
+                            .append(property.defaultExpression()).append('\n');
+                }
+                if (!property.indexOrderBy().isEmpty()) canonical.append("indexOrder|").append(property.indexOrderBy()).append('\n');
+                if (property.indexDirection().equals("DESC")) canonical.append("indexDirection|DESC\n");
+                if (property.identity()) {
+                    canonical.append("identity|POSTGRESQL IDENTITY|START 1|INCREMENT 1|NO CYCLE\n");
+                }
+                if (!property.enumConstants().isEmpty()) {
+                    canonical.append("enumNames|").append(String.join("|", property.enumConstants())).append('\n');
+                }
+                if (property.tenantReference() != null) {
+                    TenantReferenceMapping registryReference = property.tenantReference();
+                    canonical.append("tenantReference|").append(registryReference.name()).append('|')
+                            .append(registryReference.registry()).append('|').append(registryReference.onDelete()).append('\n');
+                }
+                if (property.reference()) {
+                    canonical.append("reference|").append(property.referenceName()).append('|')
+                            .append(property.referenceTarget()).append('\n');
+                    if (!property.referenceTenantFirst()) canonical.append("referenceOrder|ID_TENANT\n");
+                }
+            }
+            for (UniqueMapping unique : entity.uniqueConstraints()) {
+                canonical.append("unique|").append(unique.name());
+                unique.columns().forEach(column -> canonical.append('|').append(column.columnName()));
+                canonical.append("|NULLS DISTINCT|NOT DEFERRABLE\n");
             }
         }
         try {
@@ -1034,10 +1555,12 @@ final class MappingCompiler {
         addCodec(codecs, "short", "java.lang.Short", "SHORT", "smallint");
         addCodec(codecs, "java.lang.Short", "java.lang.Short", "SHORT", "smallint");
         addCodec(codecs, "java.lang.String", "java.lang.String", "STRING", "character varying");
+        addCodec(codecs, "no.beint.vev.Binary", "no.beint.vev.Binary", "BINARY", "bytea");
         addCodec(codecs, "java.util.UUID", "java.util.UUID", "UUID", "uuid");
         addCodec(codecs, "java.math.BigDecimal", "java.math.BigDecimal", "BIG_DECIMAL", "numeric");
         addCodec(codecs, "java.time.LocalDate", "java.time.LocalDate", "LOCAL_DATE", "date");
         addCodec(codecs, "java.time.LocalDateTime", "java.time.LocalDateTime", "LOCAL_DATE_TIME", "timestamp");
+        addCodec(codecs, "java.time.LocalTime", "java.time.LocalTime", "LOCAL_TIME", "time");
         addCodec(codecs, "java.time.Instant", "java.time.Instant", "INSTANT", "timestamptz");
         return Map.copyOf(codecs);
     }

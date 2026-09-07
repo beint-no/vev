@@ -12,7 +12,7 @@ import java.lang.annotation.Target;
 @Target(ElementType.TYPE)
 public @interface VevModel {
     /** Largest closed entity set accepted by Vev's compiler and runtime. */
-    int MAXIMUM_ENTITIES = 128;
+    int MAXIMUM_ENTITIES = 512;
 
     /** Largest mapped record shape accepted by Vev's compiler and runtime. */
     int MAXIMUM_COLUMNS = 64;
@@ -23,4 +23,14 @@ public @interface VevModel {
      * @return every entity in the model
      */
     Class<?>[] entities();
+
+    /**
+     * Declares the lexical transaction tenant-key type when no mapped row stores a tenant key.
+     * The default infers it from tenant-owned entities. An explicit declaration must agree with every
+     * mapped tenant key and must be Integer, Long, Short, String, or UUID; integral primitives are boxed.
+     * This does not add a tenant column or permit access without a claimed tenant authority.
+     *
+     * @return explicit scope type, or void to infer it from tenant-owned mappings
+     */
+    Class<?> tenantType() default void.class;
 }

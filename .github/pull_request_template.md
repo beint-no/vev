@@ -12,7 +12,7 @@ List the exact commands and synthetic fixtures used.
 
 ## Checklist
 
-- [ ] I used JDK 26 and ran `./gradlew clean check integrationTest`.
+- [ ] I used JDK 27 and ran `./gradlew clean check integrationTest`.
 - [ ] Tests, examples, logs, and generated sources contain only synthetic data.
 - [ ] New mapping behavior has positive and negative compiler coverage.
 - [ ] Database behavior has PostgreSQL 18 integration coverage.

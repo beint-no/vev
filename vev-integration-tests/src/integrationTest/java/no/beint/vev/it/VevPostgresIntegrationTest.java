@@ -7,15 +7,28 @@ import jakarta.persistence.FindOption;
 import jakarta.persistence.PersistenceException;
 import jakarta.persistence.Timeout;
 import no.beint.vev.Batch;
+import no.beint.vev.Binary;
 import no.beint.vev.BoundedQuery;
 import no.beint.vev.EntityLookup;
 import no.beint.vev.ModelIdentity;
 import no.beint.vev.MutationResult;
+import no.beint.vev.DeleteTarget;
+import no.beint.vev.DeleteResult;
 import no.beint.vev.QueryLimit;
 import no.beint.vev.Rows;
 import no.beint.vev.TenantAuthority;
 import no.beint.vev.TenantScope;
 import no.beint.vev.WriteEntities;
+import no.beint.vev.fixtures.KotlinEntry;
+import no.beint.vev.fixtures.KotlinEntryVev;
+import no.beint.vev.fixtures.KotlinIdentity;
+import no.beint.vev.fixtures.KotlinIdentityVev;
+import no.beint.vev.fixtures.KotlinBinary;
+import no.beint.vev.fixtures.KotlinBinaryVev;
+import no.beint.vev.fixtures.KotlinTextVev;
+import no.beint.vev.fixtures.KotlinClock;
+import no.beint.vev.fixtures.KotlinClockVev;
+import no.beint.vev.fixtures.KotlinReadOnlyVev;
 import no.beint.vev.jakarta.VevEntityAgents;
 import no.beint.vev.pg.PgNullableIndex;
 import no.beint.vev.pg.PgQueries;
@@ -33,10 +46,13 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Array;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.ResultSet;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -49,6 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -79,6 +96,1502 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void tenantRegistryReferencesPreserveScopeAndAtomicWritesWithoutRegistryDataAccess() throws SQLException {
+        database.seedTenantRegistry();
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var created = runtime.write(scope, tx -> tx.entities().createMultiple(RegistryEntryVev.INSTANCE,
+                        Batch.copyOf(List.of(new RegistryEntryVev.New("first"), new RegistryEntryVev.New(null)))));
+                assertEquals(tenant, created.get(0).tenantId());
+                assertNull(created.get(1).label());
+                assertEquals(0L, created.get(0).version());
+                assertTrue(runtime.read(authority.scope(tenant == 7 ? 8 : 7), tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(created.get(0).id()))).isEmpty());
+                var updated = runtime.write(scope, tx -> tx.entities().updateMultiple(RegistryEntryVev.INSTANCE, Batch.one(
+                        new RegistryEntry(created.get(0).id(), tenant, 0L, "changed")))).get(0).entity();
+                assertEquals(new RegistryEntry(created.get(0).id(), tenant, 1L, "changed"), updated);
+                var kotlinType = no.beint.vev.fixtures.KotlinRegistryEntryVev.INSTANCE;
+                var kotlin = runtime.write(scope, tx -> tx.entities().create(kotlinType, new no.beint.vev.fixtures.KotlinRegistryEntryVev.New("kotlin")));
+                assertEquals(new no.beint.vev.fixtures.KotlinRegistryEntry(kotlin.id(), tenant, 0L, "kotlin"), kotlin);
+                assertEquals(kotlin, runtime.read(scope, tx -> tx.entities().find(kotlinType.key(kotlin.id()))).orElseThrow());
+            }
+            try (var connection = database.applicationDataSource(binary).getConnection(); var statement = connection.createStatement()) {
+                for (String sql : List.of("SELECT id FROM vev_it.tenant_registry", "SELECT private_payload FROM vev_it.tenant_registry",
+                        "INSERT INTO vev_it.tenant_registry(id) VALUES (9)", "UPDATE vev_it.tenant_registry SET id=9 WHERE id=7",
+                        "DELETE FROM vev_it.tenant_registry WHERE id=7")) {
+                    assertEquals("42501", assertThrows(SQLException.class, () -> statement.execute(sql)).getSQLState());
+                }
+            }
+            var before = id("registry-missing-" + binary);
+            var missing = authority.scope(9);
+            assertThrows(IllegalStateException.class, () -> runtime.write(missing, tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, new Account(before, 9, 0L, null, new BigDecimal("1.0000")));
+                assertThrows(RuntimeException.class, () -> tx.entities().createMultiple(RegistryEntryVev.INSTANCE,
+                        Batch.copyOf(List.of(new RegistryEntryVev.New("one"), new RegistryEntryVev.New("two")))));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)));
+                return null;
+            }));
+            assertTrue(runtime.read(missing, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty());
+        }
+    }
+
+    @Test
+    void tenantRegistryBootstrapRejectsDataPrivilegesAndStorageDriftAndRecovers() throws SQLException {
+        for (String privilege : List.of("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN", "SELECT(private_payload)", "UPDATE(private_payload)")) {
+            try {
+                database.alterTenantRegistry("GRANT " + privilege + " ON vev_it.tenant_registry TO vev_it_app");
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), privilege);
+            } finally {
+                database.alterTenantRegistry("REVOKE " + privilege + " ON vev_it.tenant_registry FROM vev_it_app");
+            }
+        }
+        for (var mutation : List.of(
+                List.of("RENAME TO missing_registry", "ALTER TABLE vev_it.missing_registry RENAME TO tenant_registry"),
+                List.of("RENAME COLUMN id TO wrong_key", "ALTER TABLE vev_it.tenant_registry RENAME COLUMN wrong_key TO id"),
+                List.of("OWNER TO vev_it_app", "ALTER TABLE vev_it.tenant_registry OWNER TO vev_it_owner"))) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.alterTenantRegistry("ALTER TABLE vev_it.tenant_registry " + mutation.get(0));
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority));
+            } finally {
+                database.alterTenantRegistry(mutation.get(1));
+            }
+            assertDoesNotThrow(() -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority));
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void tenantRegistryBootstrapRequiresExactImmediateBuiltinForeignKey() throws SQLException {
+        String drop = "ALTER TABLE vev_it.registry_entry DROP CONSTRAINT IF EXISTS registry_entry_tenant_fk";
+        String add = "ALTER TABLE vev_it.registry_entry ADD CONSTRAINT registry_entry_tenant_fk FOREIGN KEY (tenant_id) REFERENCES vev_it.tenant_registry(id) ";
+        for (String clause : List.of("missing", "", "ON DELETE SET NULL", "ON DELETE CASCADE ON UPDATE CASCADE",
+                "ON DELETE CASCADE DEFERRABLE", "ON DELETE CASCADE NOT VALID", "MATCH FULL ON DELETE CASCADE", "disabledTrigger")) {
+            try {
+                database.alterTenantRegistry(drop);
+                if (!clause.equals("missing")) database.alterTenantRegistry(add + (clause.equals("disabledTrigger") ? "ON DELETE CASCADE" : clause));
+                if (clause.equals("disabledTrigger")) database.alterTenantRegistry("ALTER TABLE vev_it.registry_entry DISABLE TRIGGER ALL");
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), clause);
+            } finally {
+                database.alterTenantRegistry(drop);
+                database.alterTenantRegistry(add + "ON DELETE CASCADE");
+            }
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void registryAdministrationHonorsDeclaredCascadeAndNoActionWithoutPartialDeletion() throws SQLException {
+        database.seedTenantRegistry();
+        var first = vev.write(TENANT_7, tx -> tx.entities().create(RegistryEntryVev.INSTANCE, new RegistryEntryVev.New("first")));
+        var other = vev.write(TENANT_8, tx -> tx.entities().create(RegistryEntryVev.INSTANCE, new RegistryEntryVev.New("other")));
+        var kotlin = vev.write(TENANT_7, tx -> tx.entities().create(no.beint.vev.fixtures.KotlinRegistryEntryVev.INSTANCE,
+                new no.beint.vev.fixtures.KotlinRegistryEntryVev.New("blocks registry deletion")));
+        assertEquals("23503", assertThrows(SQLException.class, () -> database.deleteRegistryTenant(7)).getSQLState());
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(first.id()))).orElseThrow());
+        assertEquals(kotlin, vev.read(TENANT_7, tx -> tx.entities().find(no.beint.vev.fixtures.KotlinRegistryEntryVev.INSTANCE.key(kotlin.id()))).orElseThrow());
+        database.clearRegistryNoActionRows();
+        database.deleteRegistryTenant(7);
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(first.id()))).isEmpty());
+        assertEquals(other, vev.read(TENANT_8, tx -> tx.entities().find(RegistryEntryVev.INSTANCE.key(other.id()))).orElseThrow());
+    }
+
+    @Test
+    void transactionClockDefaultsPreserveExternalValuesAndExplicitJavaKotlinWrites() throws SQLException {
+        var reference = database.seedClockDefaults();
+        assertEquals(reference.moment(), reference.nowValue());
+        assertEquals(reference.moment(), reference.transactionValue());
+        assertEquals(reference.moment().atOffset(java.time.ZoneOffset.UTC).toLocalDate(), reference.day());
+        assertEquals(reference.moment().atOffset(java.time.ZoneOffset.UTC).toLocalTime(), reference.clock());
+        assertEquals(reference.moment().atOffset(java.time.ZoneOffset.UTC).toLocalDateTime(), reference.stamp());
+        assertEquals(0, reference.roundedMoment().getNano() % 1_000_000);
+        // Full TIME precision avoids a nondeterministic rounded 24:00 sentinel near midnight.
+        assertEquals(reference.clock(), reference.roundedClock());
+        assertEquals(0, reference.roundedStamp().getNano());
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var row = runtime.read(scope, tx -> tx.entities().find(ClockDefaultEntryVev.INSTANCE.key(1001))).orElseThrow();
+                assertEquals(new ClockDefaultEntry(1001, tenant, 0, reference.day(), reference.moment(), reference.roundedMoment(),
+                        reference.clock(), reference.roundedClock(), reference.stamp(), reference.roundedStamp(), reference.nowValue(), reference.transactionValue()), row);
+                var kotlinType = no.beint.vev.fixtures.KotlinClockDefaultVev.INSTANCE;
+                assertEquals(new no.beint.vev.fixtures.KotlinClockDefault(1001L, tenant, 0L, reference.day(), reference.moment()),
+                        runtime.read(scope, tx -> tx.entities().find(kotlinType.key(1001L))).orElseThrow());
+                var fixed = fixedClockInput();
+                var empty = new ClockDefaultEntryVev.New(null, null, null, null, null, null, null, null, null);
+                var created = runtime.write(scope, tx -> tx.entities().create(ClockDefaultEntryVev.INSTANCE, fixed));
+                assertEquals(clockSnapshot(created, fixed), created);
+                assertEquals(0, created.version());
+                assertTrue(runtime.read(authority.scope(tenant == 7 ? 8 : 7), tx -> tx.entities().find(ClockDefaultEntryVev.INSTANCE.key(created.id()))).isEmpty());
+                var batch = runtime.write(scope, tx -> tx.entities().createMultiple(ClockDefaultEntryVev.INSTANCE, Batch.copyOf(List.of(empty, fixed))));
+                assertEquals(clockSnapshot(batch.get(0), empty), batch.get(0));
+                assertEquals(clockSnapshot(batch.get(1), fixed), batch.get(1));
+                var changed = runtime.write(scope, tx -> tx.entities().updateMultiple(ClockDefaultEntryVev.INSTANCE,
+                        Batch.copyOf(List.of(clockSnapshot(batch.get(0), fixed), clockSnapshot(batch.get(1), empty)))));
+                assertEquals(1, changed.get(0).entity().version());
+                assertEquals(clockSnapshot(changed.get(0).entity(), fixed), changed.get(0).entity());
+                assertEquals(clockSnapshot(changed.get(1).entity(), empty), changed.get(1).entity());
+                var kotlin = runtime.write(scope, tx -> tx.entities().createMultiple(kotlinType, Batch.copyOf(List.of(
+                        new no.beint.vev.fixtures.KotlinClockDefaultVev.New(null, null),
+                        new no.beint.vev.fixtures.KotlinClockDefaultVev.New(fixed.day(), fixed.moment())))));
+                assertNull(kotlin.get(0).day());
+                assertNull(kotlin.get(0).moment());
+                assertEquals(fixed.day(), kotlin.get(1).day());
+                assertEquals(fixed.moment(), kotlin.get(1).moment());
+                var replacement = new no.beint.vev.fixtures.KotlinClockDefault(kotlin.get(1).id(), tenant, 0L, null, null);
+                var updated = (MutationResult.Applied<?, no.beint.vev.fixtures.KotlinClockDefault, ?, ?>) runtime.write(scope,
+                        tx -> tx.entities().update(kotlinType, replacement));
+                assertEquals(1L, updated.entity().version());
+                assertNull(updated.entity().day());
+                assertNull(updated.entity().moment());
+            }
+        }
+    }
+
+    @Test
+    void transactionClockDefaultsRejectSchemaDriftAndLeaveFailedAuthoritiesReusable() throws SQLException {
+        for (String variant : List.of("missing", "differentSpelling", "differentPrecision", "volatile", "statementClock", "identity", "userFunction")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.clockDefaultVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.clockDefaultVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void transactionClockApprovalNeverLeaksIntoChecksOrBypassesSignatureAndDependencyValidation() throws SQLException {
+        database.verifyClockDefaultContracts(false);
+        for (String variant : List.of("volatile", "statementClock", "identity", "userFunction")) {
+            try {
+                database.clockDefaultVariant(variant);
+                database.verifyClockDefaultContracts(true);
+            } finally {
+                database.clockDefaultVariant("valid");
+            }
+        }
+        database.verifyClockDefaultContracts(false);
+    }
+
+    private static ClockDefaultEntryVev.New fixedClockInput() {
+        var instant = Instant.parse("2005-02-03T12:34:56.123456Z");
+        var local = instant.atOffset(java.time.ZoneOffset.UTC).toLocalDateTime();
+        // Precision in a DEFAULT expression must never round explicitly supplied values.
+        return new ClockDefaultEntryVev.New(local.toLocalDate(), instant, instant, local.toLocalTime(), local.toLocalTime(),
+                local, local, instant, instant);
+    }
+
+    private static ClockDefaultEntry clockSnapshot(ClockDefaultEntry stored, ClockDefaultEntryVev.New values) {
+        return new ClockDefaultEntry(stored.id(), stored.tenantId(), stored.version(), values.day(), values.moment(), values.roundedMoment(),
+                values.clock(), values.roundedClock(), values.stamp(), values.roundedStamp(), values.nowValue(), values.transactionValue());
+    }
+
+    @Test
+    void historicalMissingValuesSurviveChangedDefaultsAndPhysicalRewrites() throws SQLException {
+        try {
+            database.seedMissingValues("valid");
+            assertEquals(List.of("amount", "clock", "counter", "day", "enabled", "label", "long_value",
+                    "moment", "payload", "small_value", "stamp", "state", "token", "version"), database.missingValueColumns("default_sample"));
+            assertEquals(List.of("attempts", "enabled", "label", "version"), database.missingValueColumns("kotlin_default"));
+            assertEquals(List.of("label", "version"), database.missingValueColumns("only_note"));
+            assertEquals(List.of("id", "tenant_id", "value", "version"), database.missingValueColumns("snapshot_probe"));
+            assertHistoricalValues();
+            database.rewriteMissingValues(false);
+            for (String table : List.of("default_sample", "kotlin_default", "only_note", "snapshot_probe")) {
+                assertTrue(database.missingValueColumns(table).isEmpty(), table);
+            }
+            assertHistoricalValues();
+        } finally {
+            database.rewriteMissingValues(true);
+        }
+    }
+
+    private void assertHistoricalValues() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var row = runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow();
+                assertEquals(new DefaultSample(1001, tenant, 0, false, (short) 0, 1, 0L, new BigDecimal("0.00"),
+                        "prior", null, LocalDate.of(2024, 1, 1), LocalTime.NOON,
+                        LocalDateTime.parse("2024-01-01T12:00:00.123456"), Instant.parse("2024-01-01T00:00:00Z"),
+                        new UUID(0, 0), Binary.copyOf("sample".getBytes(StandardCharsets.UTF_8)), WorkState.OPEN), row);
+                assertEquals(List.of(row), runtime.read(scope, tx -> tx.entities().many(
+                        PgQueries.equal(DefaultSampleVev.ENABLED, false, new QueryLimit(8)))).values());
+                var recent = runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1002))).orElseThrow();
+                assertTrue(recent.enabled());
+                assertEquals(5, recent.counter());
+                assertEquals("fallback", recent.label());
+                assertEquals("defaults; are metadata", recent.body());
+                var kotlin = runtime.read(scope, tx -> tx.entities().find(no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE.key(1001L))).orElseThrow();
+                assertEquals(new no.beint.vev.fixtures.KotlinDefaultEntry(1001L, tenant, 0L, false, "earlier", 3), kotlin);
+                var recentKotlin = runtime.read(scope, tx -> tx.entities().find(no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE.key(1002L))).orElseThrow();
+                assertEquals(new no.beint.vev.fixtures.KotlinDefaultEntry(1002L, tenant, 0L, true, "kotlin", 7), recentKotlin);
+            }
+            var structural = runtime.read(authority.scope(7), tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1001L))).orElseThrow();
+            assertEquals(1001L, structural.id());
+            assertEquals(7, structural.tenantId());
+            assertEquals(0L, structural.version());
+            assertEquals("historical", structural.value());
+            assertTrue(runtime.read(authority.scope(8), tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1001L))).isEmpty());
+            var sharedAuthority = SharedOnlyModelVev.newTenantAuthority();
+            var shared = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, sharedAuthority);
+            for (int tenant : List.of(7, 8)) {
+                var historicNote = shared.read(sharedAuthority.scope(tenant), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1001L))).orElseThrow();
+                assertEquals(0, historicNote.version());
+                assertEquals("historic-note", historicNote.label());
+                assertEquals("from-schema", shared.read(sharedAuthority.scope(tenant), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1002L))).orElseThrow().label());
+            }
+        }
+    }
+
+    @Test
+    void missingValueStoragePreservesExplicitWritesVersionChecksAndRollback() throws SQLException {
+        try {
+            database.seedMissingValues("valid");
+            // Also exercise single/batch creation and replacement while historical storage is present.
+            assertExplicitDefaultWrites();
+            for (boolean binary : List.of(false, true)) {
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+                var scope = authority.scope(7);
+                var old = runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow();
+                var updated = runtime.write(scope, tx -> tx.entities().updateMultiple(DefaultSampleVev.INSTANCE,
+                        Batch.one(defaultSnapshot(old, defaultInput(false, 0))))).get(0).entity();
+                assertEquals(old.version() + 1, updated.version());
+                assertEquals(defaultSnapshot(updated, defaultInput(false, 0)), updated);
+                assertInstanceOf(MutationResult.Conflict.class, runtime.write(scope,
+                        tx -> tx.entities().update(DefaultSampleVev.INSTANCE, old)));
+                var oldStructural = runtime.read(scope, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1001L))).orElseThrow();
+                assertInstanceOf(MutationResult.Missing.class, runtime.write(authority.scope(8), tx -> tx.entities().update(
+                        SnapshotProbeVev.INSTANCE, new SnapshotProbe(1001L, 8, oldStructural.version(), "foreign"))));
+                var replacement = new SnapshotProbe(oldStructural.id(), 7, oldStructural.version(), "explicit");
+                var changed = (MutationResult.Applied<?, SnapshotProbe, ?, ?>) runtime.write(scope,
+                        tx -> tx.entities().update(SnapshotProbeVev.INSTANCE, replacement));
+                assertEquals(oldStructural.version() + 1, changed.entity().version());
+                assertEquals("explicit", changed.entity().value());
+                var before = id("missing-storage-rollback-" + binary);
+                assertThrows(IllegalStateException.class, () -> runtime.write(scope, tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, new Account(before, 7, 0L, null, new BigDecimal("1.0000")));
+                    assertThrows(RuntimeException.class, () -> tx.entities().createMultiple(DefaultSampleVev.INSTANCE,
+                            Batch.copyOf(List.of(defaultInput(true, 9), defaultInput(false, -1)))));
+                    assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)));
+                    return null;
+                }));
+                assertTrue(runtime.read(scope, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty());
+                assertEquals(updated, runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow());
+            }
+        } finally {
+            database.rewriteMissingValues(true);
+        }
+    }
+
+    @Test
+    void invalidHistoricalValuesPoisonTransactionsEvenWhenTheirDefaultWasReplaced() throws SQLException {
+        for (String variant : List.of("negativeVersion", "unknownEnum", "endOfDay")) {
+            try {
+                database.seedMissingValues(variant);
+                for (boolean binary : List.of(false, true)) {
+                    var authority = IntegrationModelVev.newTenantAuthority();
+                    var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+                    var scope = authority.scope(7);
+                    var before = id("historical-invalid-" + variant + "-" + binary);
+                    assertThrows(IllegalStateException.class, () -> runtime.write(scope, tx -> {
+                        tx.entities().insert(AccountVev.INSTANCE, new Account(before, 7, 0L, null, new BigDecimal("1.0000")));
+                        assertThrows(RuntimeException.class, () -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001)), variant);
+                        assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)), variant);
+                        return null;
+                    }), variant);
+                    assertTrue(runtime.read(scope, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty(), variant);
+                    assertEquals(0, runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1002))).orElseThrow().version());
+                }
+            } finally {
+                database.rewriteMissingValues(true);
+            }
+        }
+    }
+
+    @Test
+    void historicalMissingValuesDoNotMaskCurrentDefaultDrift() throws SQLException {
+        try {
+            database.seedMissingValues("valid");
+            for (String variant : List.of("missing", "changed", "arithmetic", "userFunction")) {
+                var authority = IntegrationModelVev.newTenantAuthority();
+                try {
+                    database.defaultVariant(variant);
+                    assertTrue(database.missingValueColumns("default_sample").contains("enabled"));
+                    assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                    assertThrows(IllegalStateException.class, () -> authority.scope(7));
+                } finally {
+                    database.defaultVariant("valid");
+                }
+                var runtime = new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+                assertFalse(runtime.read(authority.scope(7), tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow().enabled());
+            }
+        } finally {
+            database.rewriteMissingValues(true);
+        }
+    }
+
+    @Test
+    void defaultMappingsReadExternallyDefaultedValuesAcrossJavaKotlinAndBothWireModes() throws SQLException {
+        database.seedDatabaseDefaults();
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var row = runtime.read(authority.scope(tenant), tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(1001))).orElseThrow();
+                assertEquals(tenant, row.tenantId());
+                assertEquals(0, row.version());
+                assertTrue(row.enabled());
+                assertEquals((short) 0, row.smallValue());
+                assertEquals(5, row.counter());
+                assertEquals(0L, row.longValue());
+                assertEquals(new BigDecimal("0.00"), row.amount());
+                assertEquals("fallback", row.label());
+                assertEquals("defaults; are metadata", row.body());
+                assertEquals(java.time.LocalDate.of(2024,1,1), row.day());
+                assertEquals(java.time.LocalTime.NOON, row.clock());
+                assertEquals(java.time.LocalDateTime.parse("2024-01-01T12:00:00.123456"), row.stamp());
+                assertEquals(java.time.Instant.parse("2024-01-01T00:00:00Z"), row.moment());
+                assertEquals(new UUID(0,0), row.token());
+                assertEquals(no.beint.vev.Binary.copyOf("sample".getBytes(java.nio.charset.StandardCharsets.UTF_8)), row.payload());
+                assertEquals(WorkState.OPEN, row.state());
+                var kotlin = runtime.read(authority.scope(tenant), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE.key(1001L))).orElseThrow();
+                assertEquals(tenant, kotlin.tenantId());
+                assertTrue(kotlin.enabled());
+                assertEquals("kotlin", kotlin.label());
+                assertEquals(7, kotlin.attempts());
+            }
+            var sharedAuthority = SharedOnlyModelVev.newTenantAuthority();
+            var shared = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, sharedAuthority);
+            assertEquals("from-schema", shared.read(sharedAuthority.scope(7), tx -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1001L))).orElseThrow().label());
+        }
+    }
+
+    @Test
+    void explicitSingleBatchAndUpdatedValuesOverrideEveryDatabaseDefault() {
+        assertExplicitDefaultWrites();
+    }
+
+    private void assertExplicitDefaultWrites() {
+        for (boolean binary : List.of(false, true)) {
+            var statements = new java.util.ArrayList<String>();
+            var delegate = database.applicationDataSource(binary);
+            var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invokeTarget(delegate, method, arguments);
+                        if (!(result instanceof Connection connection)) return result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    if (connectionMethod.getName().equals("prepareStatement") && connectionArguments[0] instanceof String sql
+                                            && (sql.contains("\"default_sample\"") || sql.contains("\"kotlin_default\""))) statements.add(sql);
+                                    return invokeTarget(connection, connectionMethod, connectionArguments);
+                                });
+                    });
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(source, IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                var scope = authority.scope(tenant);
+                var full = defaultInput(true, 9);
+                var empty = defaultInput(false, 0);
+                var single = runtime.write(scope, tx -> tx.entities().create(DefaultSampleVev.INSTANCE, full));
+                assertEquals(defaultSnapshot(single, full), single);
+                assertEquals(tenant, single.tenantId());
+                assertEquals(0, single.version());
+                var batch = runtime.write(scope, tx -> tx.entities().createMultiple(DefaultSampleVev.INSTANCE, Batch.copyOf(List.of(empty, full))));
+                assertEquals(defaultSnapshot(batch.get(0), empty), batch.get(0));
+                assertEquals(defaultSnapshot(batch.get(1), full), batch.get(1));
+                assertTrue(runtime.read(authority.scope(tenant == 7 ? 8 : 7), tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(single.id()))).isEmpty());
+                var result = runtime.write(scope, tx -> tx.entities().update(DefaultSampleVev.INSTANCE, defaultSnapshot(single, empty)));
+                var updated = ((MutationResult.Applied<?, DefaultSample, ?, ?>) result).entity();
+                assertEquals(1, updated.version());
+                assertEquals(defaultSnapshot(updated, empty), updated);
+                assertEquals(updated, runtime.read(scope, tx -> tx.entities().find(DefaultSampleVev.INSTANCE.key(updated.id()))).orElseThrow());
+                var changes = runtime.write(scope, tx -> tx.entities().updateMultiple(DefaultSampleVev.INSTANCE,
+                        Batch.copyOf(List.of(defaultSnapshot(batch.get(0), full), defaultSnapshot(batch.get(1), empty)))));
+                assertEquals(defaultSnapshot(changes.get(0).entity(), full), changes.get(0).entity());
+                assertEquals(defaultSnapshot(changes.get(1).entity(), empty), changes.get(1).entity());
+                var kotlinType = no.beint.vev.fixtures.KotlinDefaultEntryVev.INSTANCE;
+                var kotlin = runtime.write(scope, tx -> tx.entities().createMultiple(kotlinType, Batch.copyOf(List.of(
+                        new no.beint.vev.fixtures.KotlinDefaultEntryVev.New(false, null, null),
+                        new no.beint.vev.fixtures.KotlinDefaultEntryVev.New(false, "explicit", 0)))));
+                assertFalse(kotlin.get(0).enabled());
+                assertNull(kotlin.get(0).label());
+                assertNull(kotlin.get(0).attempts());
+                assertEquals("explicit", kotlin.get(1).label());
+                assertEquals(0, kotlin.get(1).attempts());
+                var replacement = new no.beint.vev.fixtures.KotlinDefaultEntry(kotlin.get(1).id(), tenant, kotlin.get(1).version(), false, null, null);
+                var changed = runtime.write(scope, tx -> tx.entities().updateMultiple(kotlinType, Batch.one(replacement))).get(0).entity();
+                assertFalse(changed.enabled());
+                assertNull(changed.label());
+                assertNull(changed.attempts());
+                assertEquals(1L, changed.version());
+            }
+            assertFalse(statements.isEmpty());
+            for (String sql : statements) {
+                assertFalse(sql.contains("DEFAULT"), sql);
+                assertFalse(sql.contains("fallback") || sql.contains("metadata") || sql.contains("'OPEN'"), sql);
+            }
+        }
+    }
+
+    @Test
+    void defaultsCannotMaskConstraintFailuresAndCaughtBatchFailuresRollBackEarlierWrites() {
+        var before = id("default-batch-rollback");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, new Account(before, 7, 0L, null, new BigDecimal("1.0000")));
+            assertThrows(RuntimeException.class, () -> tx.entities().createMultiple(DefaultSampleVev.INSTANCE,
+                    Batch.copyOf(List.of(defaultInput(true, 9), defaultInput(false, -1)))));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(before)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(before))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(DefaultSampleVev.INSTANCE, new QueryLimit(8)))).values().isEmpty());
+        var good = vev.write(TENANT_7, tx -> tx.entities().create(DefaultSampleVev.INSTANCE, defaultInput(false, 0)));
+        assertEquals(defaultSnapshot(good, defaultInput(false, 0)), good);
+    }
+
+    @Test
+    void defaultBootstrapRejectsSchemaDriftAndNeverClaimsFailedAuthorities() throws SQLException {
+        for (String variant : List.of("missing", "changed", "arithmetic", "unexpected", "userFunction", "customType", "volatile", "systemExpression", "unapprovedCast")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.defaultVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.defaultVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void defaultCatalogRejectsUnapprovedDependenciesAndInvalidResultsBeforeDeparse() throws SQLException {
+        database.verifyDefaultResultContracts();
+        for (String variant : List.of("userFunction", "customType", "volatile", "systemExpression", "unapprovedCast")) {
+            try {
+                database.defaultVariant(variant);
+                database.verifyRejectedDefaultBeforeDeparse();
+            } finally {
+                database.defaultVariant("valid");
+            }
+        }
+    }
+
+    @Test
+    void defaultCatalogResourceFailuresCloseNestedResultsAndLeaveAuthorityUnclaimed() {
+        for (String stage : List.of("metadataQuery", "metadataResultClose", "metadataStatementClose", "definitionQuery", "definitionResultClose", "definitionStatementClose", "allCleanup")) {
+            var openedStatements = new AtomicInteger();
+            var closedStatements = new AtomicInteger();
+            var openedRows = new AtomicInteger();
+            var closedRows = new AtomicInteger();
+            var connectionsClosed = new AtomicInteger();
+            var commits = new AtomicInteger();
+            var delegate = database.applicationDataSource();
+            var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invokeTarget(delegate, method, arguments);
+                        if (!(result instanceof Connection connection)) return result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    if (connectionMethod.getName().equals("commit")) commits.incrementAndGet();
+                                    if (connectionMethod.getName().equals("prepareStatement") && connectionArguments[0] instanceof String sql
+                                            && (sql.contains("FROM pg_catalog.pg_attrdef definition") || sql.contains("pg_catalog.pg_get_expr(adbin"))) {
+                                        String kind = sql.contains("pg_catalog.pg_get_expr(adbin") ? "definition" : "metadata";
+                                        var statement = (java.sql.PreparedStatement) invokeTarget(connection, connectionMethod, connectionArguments);
+                                        openedStatements.incrementAndGet();
+                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.PreparedStatement.class},
+                                                (statementProxy, statementMethod, statementArguments) -> {
+                                                    if (statementMethod.getName().equals("executeQuery") && stage.equals(kind + "Query")) throw new SQLException("default catalog query fixture", "08006");
+                                                    Object statementResult = invokeTarget(statement, statementMethod, statementArguments);
+                                                    if (statementMethod.getName().equals("close")) {
+                                                        closedStatements.incrementAndGet();
+                                                        if (stage.equals(kind + "StatementClose") || stage.equals("allCleanup")) throw new SQLException("default catalog statement cleanup fixture", "08006");
+                                                    }
+                                                    if (!(statementResult instanceof java.sql.ResultSet rows)) return statementResult;
+                                                    openedRows.incrementAndGet();
+                                                    return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.ResultSet.class},
+                                                            (rowProxy, rowMethod, rowArguments) -> {
+                                                                Object rowResult = invokeTarget(rows, rowMethod, rowArguments);
+                                                                if (rowMethod.getName().equals("close")) {
+                                                                    closedRows.incrementAndGet();
+                                                                    if (stage.equals(kind + "ResultClose") || stage.equals("allCleanup")) throw new SQLException("default catalog result cleanup fixture", "08006");
+                                                                }
+                                                                return rowResult;
+                                                            });
+                                                });
+                                    }
+                                    Object connectionResult = invokeTarget(connection, connectionMethod, connectionArguments);
+                                    if (connectionMethod.getName().equals("close")) {
+                                        connectionsClosed.incrementAndGet();
+                                        if (stage.equals("allCleanup")) throw new SQLException("default catalog connection cleanup fixture", "08006");
+                                    }
+                                    return connectionResult;
+                                });
+                    });
+            var authority = IntegrationModelVev.newTenantAuthority();
+            assertThrows(RuntimeException.class, () -> new PgVev<>(source, IntegrationModelVev.POSTGRES, authority), stage);
+            assertThrows(IllegalStateException.class, () -> authority.scope(7), stage);
+            assertTrue(openedStatements.get() > 0, stage);
+            assertEquals(openedStatements.get(), closedStatements.get(), stage);
+            assertEquals(openedRows.get(), closedRows.get(), stage);
+            assertEquals(1, connectionsClosed.get(), stage);
+            assertEquals(0, commits.get(), stage);
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    private static DefaultSampleVev.New defaultInput(boolean filled, int counter) {
+        return new DefaultSampleVev.New(false, (short) 2, counter, 3L, new BigDecimal("4.25"),
+                filled ? "caller" : null, filled ? "caller text; remains a value" : null,
+                filled ? java.time.LocalDate.of(2025,2,3) : null,
+                filled ? java.time.LocalTime.of(1,2,3,456789000) : null,
+                filled ? java.time.LocalDateTime.parse("2025-02-03T01:02:03.456789") : null,
+                filled ? java.time.Instant.parse("2025-02-03T01:02:03.456789Z") : null,
+                filled ? new UUID(1,2) : null,
+                filled ? no.beint.vev.Binary.copyOf(new byte[]{0,1,2,(byte)255}) : null, WorkState.CLOSED);
+    }
+
+    private static DefaultSample defaultSnapshot(DefaultSample stored, DefaultSampleVev.New values) {
+        return new DefaultSample(stored.id(), stored.tenantId(), stored.version(), values.enabled(), values.smallValue(),
+                values.counter(), values.longValue(), values.amount(), values.label(), values.body(), values.day(),
+                values.clock(), values.stamp(), values.moment(), values.token(), values.payload(), values.state());
+    }
+
+    @Test
+    void externalIncomingReadOnlyReferencesPreservePhysicalConstraintsAndBothOwnershipModes() throws SQLException {
+        database.seedSharedOnlyRows();
+        var key = id("external-incoming-snapshot");
+        database.seedReadOnlyRows(key);
+        for (String variant : List.of("incoming", "externalWriteSemantics")) {
+            try {
+                database.externalIncomingVariant(variant);
+                for (boolean binary : List.of(false, true)) {
+                    var sharedAuthority = SharedOnlyModelVev.newTenantAuthority();
+                    var sharedRuntime = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, sharedAuthority);
+                    var tenantAuthority = IntegrationModelVev.newTenantAuthority();
+                    var tenantRuntime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, tenantAuthority);
+                    for (int tenant : List.of(7, 8)) {
+                        sharedRuntime.read(sharedAuthority.scope(tenant), tx -> {
+                            assertEquals("root", tx.entities().find(OnlyCategoryVev.INSTANCE.key(1)).orElseThrow().code());
+                            assertEquals("shared", tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1L)).orElseThrow().label());
+                            assertEquals(List.of(2, 3, 1), tx.entities().many(PgQueries.equal(OnlyCategoryVev.LABEL, "group", new QueryLimit(8))).values().stream().map(OnlyCategory::id).toList());
+                            assertEquals(4, tx.entities().many(PgQueries.scanById(OnlyCategoryVev.INSTANCE, new QueryLimit(8))).values().size());
+                            return null;
+                        });
+                        assertEquals("root", sharedRuntime.write(sharedAuthority.scope(tenant), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+                        assertEquals(tenant == 7 ? "visible" : "foreign", tenantRuntime.read(tenantAuthority.scope(tenant),
+                                tx -> tx.entities().find(ReadOnlySnapshotVev.INSTANCE.key(key))).orElseThrow().label());
+                    }
+                }
+                if (variant.equals("incoming")) database.verifyExternalIncomingConstraintsRemainEffective();
+            } finally {
+                database.externalIncomingVariant("valid");
+            }
+        }
+    }
+
+    @Test
+    void externalIncomingOptInRetainsOutgoingMappedSourceAndSelfReferenceAttestation() throws SQLException {
+        database.seedSharedOnlyRows();
+        for (String variant : List.of("outgoing", "mappedSource", "self", "missing", "cascade", "deferred", "unvalidated", "disabledTrigger")) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            try {
+                database.externalIncomingVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7), variant);
+            } finally {
+                database.externalIncomingVariant("valid");
+            }
+            var runtime = new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals("root", runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+        }
+    }
+
+    @Test
+    void externalIncomingOptInDoesNotRelaxStrictReadOnlyOrWritableTargets() throws SQLException {
+        for (String variant : List.of("strictTarget", "writableTarget")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            try {
+                database.externalIncomingVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.externalIncomingVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), IntegrationModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+        for (String variant : List.of("write", "sequence")) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            try {
+                database.externalIncomingVariant("incoming");
+                database.sharedOnlyVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.sharedOnlyVariant("valid");
+                database.externalIncomingVariant("valid");
+            }
+            new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void externalIncomingCatalogFailuresCloseArraysConnectionsAndReleaseUnclaimedAuthority() {
+        for (String stage : List.of("createArray", "prepare", "bind", "query", "resultClose", "statementClose", "arrayClose", "allCleanup")) {
+            var arrays = new AtomicInteger();
+            var arrayCloses = new AtomicInteger();
+            var connectionCloses = new AtomicInteger();
+            var commits = new AtomicInteger();
+            var delegate = database.applicationDataSource();
+            var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                    (proxy, method, arguments) -> {
+                        Object result = invokeTarget(delegate, method, arguments);
+                        if (!(result instanceof Connection connection)) return result;
+                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                                (connectionProxy, connectionMethod, connectionArguments) -> {
+                                    String name = connectionMethod.getName();
+                                    if (name.equals("commit")) commits.incrementAndGet();
+                                    if (name.equals("createArrayOf")) {
+                                        if (stage.equals("createArray")) throw new SQLException("external reference array fixture", "08006");
+                                        var array = (java.sql.Array) invokeTarget(connection, connectionMethod, connectionArguments);
+                                        arrays.incrementAndGet();
+                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.Array.class},
+                                                (arrayProxy, arrayMethod, arrayArguments) -> {
+                                                    Object arrayResult = invokeTarget(array, arrayMethod, arrayArguments);
+                                                    if (arrayMethod.getName().equals("close") || arrayMethod.getName().equals("free")) {
+                                                        arrayCloses.incrementAndGet();
+                                                        if (stage.equals("arrayClose") || stage.equals("allCleanup")) throw new SQLException("external reference array cleanup fixture", "08006");
+                                                    }
+                                                    return arrayResult;
+                                                });
+                                    }
+                                    if (name.equals("prepareStatement") && connectionArguments[0] instanceof String sql
+                                            && sql.contains("source_namespace.nspname") && sql.contains("= ANY (?::pg_catalog.text[])")) {
+                                        if (stage.equals("prepare")) throw new SQLException("external reference prepare fixture", "08006");
+                                        var statement = (java.sql.PreparedStatement) invokeTarget(connection, connectionMethod, connectionArguments);
+                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.PreparedStatement.class},
+                                                (statementProxy, statementMethod, statementArguments) -> {
+                                                    if (stage.equals("bind") && statementMethod.getName().equals("setArray")) throw new SQLException("external reference bind fixture", "08006");
+                                                    if (stage.equals("query") && statementMethod.getName().equals("executeQuery")) throw new SQLException("external reference query fixture", "08006");
+                                                    Object statementResult = invokeTarget(statement, statementMethod, statementArguments);
+                                                    if (statementMethod.getName().equals("close") && (stage.equals("statementClose") || stage.equals("allCleanup"))) throw new SQLException("external reference statement cleanup fixture", "08006");
+                                                    if (statementResult instanceof java.sql.ResultSet rows) {
+                                                        return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{java.sql.ResultSet.class},
+                                                                (rowsProxy, rowsMethod, rowsArguments) -> {
+                                                                    Object rowResult = invokeTarget(rows, rowsMethod, rowsArguments);
+                                                                    if (rowsMethod.getName().equals("close") && (stage.equals("resultClose") || stage.equals("allCleanup"))) throw new SQLException("external reference result cleanup fixture", "08006");
+                                                                    return rowResult;
+                                                                });
+                                                    }
+                                                    return statementResult;
+                                                });
+                                    }
+                                    Object connectionResult = invokeTarget(connection, connectionMethod, connectionArguments);
+                                    if (name.equals("close")) {
+                                        connectionCloses.incrementAndGet();
+                                        if (stage.equals("allCleanup")) throw new SQLException("external reference connection cleanup fixture", "08006");
+                                    }
+                                    return connectionResult;
+                                });
+                    });
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            assertThrows(RuntimeException.class, () -> new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority), stage);
+            assertThrows(IllegalStateException.class, () -> authority.scope(7), stage);
+            assertEquals(stage.equals("createArray") ? 0 : 1, arrays.get(), stage);
+            assertEquals(arrays.get(), arrayCloses.get(), stage);
+            assertEquals(1, connectionCloses.get(), stage);
+            assertEquals(0, commits.get(), stage);
+            new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals(7, authority.scope(7).tenantId());
+        }
+    }
+
+    @Test
+    void sharedOnlyJavaAndKotlinModelsReadWithRealTenantScopesAcrossBothWireModes() throws SQLException {
+        database.seedSharedOnlyRows();
+        for (boolean binary : List.of(false, true)) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            var runtime = new PgVev<>(database.applicationDataSource(binary), SharedOnlyModelVev.POSTGRES, authority);
+            assertEquals(Integer.class, runtime.model().tenantType());
+            for (int tenant : List.of(7, 8)) {
+                runtime.read(authority.scope(tenant), tx -> {
+                    assertEquals(tenant, tx.tenant().tenantId());
+                    var category = OnlyCategoryVev.INSTANCE;
+                    assertEquals("root", tx.entities().find(category.key(1)).orElseThrow().code());
+                    var batch = tx.entities().findMultiple(category, Batch.copyOf(List.of(1, 99, 2, 1)));
+                    assertEquals(4, batch.size());
+                    assertTrue(batch.get(1) instanceof no.beint.vev.EntityLookup.Missing<?, ?, ?>);
+                    var first = tx.entities().many(PgQueries.scanById(category, new QueryLimit(2)));
+                    assertEquals(List.of(1, 2), first.values().stream().map(OnlyCategory::id).toList());
+                    assertTrue(first.hasMore());
+                    var rest = tx.entities().many(PgQueries.scanByIdAfter(category.key(2), new QueryLimit(8)));
+                    assertEquals(List.of(3, 4), rest.values().stream().map(OnlyCategory::id).toList());
+                    assertFalse(rest.hasMore());
+                    assertEquals(2, tx.entities().many(PgQueries.equal(OnlyCategoryVev.CODE, "first", new QueryLimit(8))).values().getFirst().id());
+                    assertTrue(tx.entities().many(PgQueries.equalAfter(OnlyCategoryVev.CODE, "first", category.key(2), new QueryLimit(8))).values().isEmpty());
+                    var ordered = tx.entities().many(PgQueries.equal(OnlyCategoryVev.LABEL, "group", new QueryLimit(1)));
+                    assertEquals(2, ordered.values().getFirst().id());
+                    assertTrue(ordered.hasMore());
+                    assertEquals(List.of(3, 1), tx.entities().many(PgQueries.equalAfter(OnlyCategoryVev.LABEL, "group",
+                            OnlyCategoryVev.LABEL.cursor(10, category.key(2)), new QueryLimit(8))).values().stream().map(OnlyCategory::id).toList());
+                    assertEquals(4, tx.entities().many(PgQueries.isNull(OnlyCategoryVev.LABEL, new QueryLimit(8))).values().getFirst().id());
+                    assertTrue(tx.entities().many(PgQueries.isNullAfter(OnlyCategoryVev.LABEL,
+                            OnlyCategoryVev.LABEL.cursor(0, category.key(4)), new QueryLimit(8))).values().isEmpty());
+                    var note = no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE;
+                    assertEquals("shared", tx.entities().find(note.key(1L)).orElseThrow().label());
+                    assertEquals(Integer.MAX_VALUE, tx.entities().find(note.key(2L)).orElseThrow().version());
+                    assertEquals(1L, tx.entities().many(PgQueries.equal(no.beint.vev.fixtures.KotlinOnlyNoteVev.ID, 1L, new QueryLimit(8))).values().getFirst().id());
+                    assertEquals(2L, tx.entities().many(PgQueries.scanByIdAfter(note.key(1L), new QueryLimit(8))).values().getFirst().id());
+                    return null;
+                });
+            }
+            assertEquals("root", runtime.write(authority.scope(7),
+                    tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+        }
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void sharedOnlyModelsRejectForeignScopesAndWrongAuthorityTypesBeforeConnectionAccess() {
+        var refuseConnections = new java.util.concurrent.atomic.AtomicBoolean();
+        var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    if (refuseConnections.get()) throw new AssertionError("Invalid authority must fail before datasource access");
+                    return invokeTarget(database.applicationDataSource(), method, arguments);
+                });
+        var authority = SharedOnlyModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority);
+        var foreign = SharedOnlyModelVev.newTenantAuthority();
+        new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, foreign);
+        refuseConnections.set(true);
+        assertThrows(NullPointerException.class, () -> runtime.read(null, tx -> null));
+        assertThrows(IllegalArgumentException.class, () -> runtime.read(foreign.scope(7), tx -> null));
+        assertThrows(IllegalArgumentException.class, () -> runtime.read((TenantScope) TENANT_7, tx -> null));
+        assertThrows(IllegalStateException.class, () -> new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority));
+        var wrongType = TenantAuthority.create(SharedOnlyModelVev.Model.class, SharedOnlyModelVev.IDENTITY, String.class);
+        assertThrows(IllegalArgumentException.class, () -> new PgVev(source, SharedOnlyModelVev.POSTGRES, wrongType));
+        refuseConnections.set(false);
+        assertTrue(runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).isEmpty());
+    }
+
+    @Test
+    void sharedOnlyBootstrapRejectsUnexpectedAccessAndClaimsAuthorityOnlyAfterSuccessfulVerification() throws SQLException {
+        for (String variant : List.of("write", "sequence", "policy", "rls")) {
+            var authority = SharedOnlyModelVev.newTenantAuthority();
+            try {
+                database.sharedOnlyVariant(variant);
+                assertThrows(IllegalStateException.class, () -> new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority), variant);
+                assertThrows(IllegalStateException.class, () -> authority.scope(7));
+            } finally {
+                database.sharedOnlyVariant("valid");
+            }
+            var runtime = new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+            assertTrue(runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).isEmpty());
+        }
+    }
+
+    @Test
+    void sharedOnlyReadFailuresRollBackEvenWhenCaughtAndLeaveLaterTransactionsUsable() throws SQLException {
+        database.seedSharedOnlyRows();
+        database.sharedOnlyVariant("negativeVersion");
+        var rollbacks = new AtomicInteger();
+        var commits = new AtomicInteger();
+        var source = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(database.applicationDataSource(), method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, connectionMethod, connectionArguments) -> {
+                                if (connectionMethod.getName().equals("rollback")) rollbacks.incrementAndGet();
+                                if (connectionMethod.getName().equals("commit")) commits.incrementAndGet();
+                                return invokeTarget(connection, connectionMethod, connectionArguments);
+                            });
+                });
+        var authority = SharedOnlyModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(source, SharedOnlyModelVev.POSTGRES, authority);
+        rollbacks.set(0);
+        commits.set(0);
+        assertThrows(IllegalStateException.class, () -> runtime.read(authority.scope(7), tx -> {
+            // Count failure cleanup after checkout has reset any prior connection transaction.
+            rollbacks.set(0);
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(no.beint.vev.fixtures.KotlinOnlyNoteVev.INSTANCE.key(1L)));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1)));
+            return null;
+        }));
+        assertEquals(1, rollbacks.get());
+        assertEquals(0, commits.get());
+        assertEquals("root", runtime.read(authority.scope(8), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).orElseThrow().code());
+        assertEquals(1, commits.get());
+    }
+
+    @Test
+    void sharedOnlyTransactionsRecheckTheirOwnModelFingerprint() throws SQLException {
+        var authority = SharedOnlyModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(database.applicationDataSource(), SharedOnlyModelVev.POSTGRES, authority);
+        var calls = new AtomicInteger();
+        try {
+            database.setFingerprint(SharedOnlyModelVev.IDENTITY.name(), "wrong-shared-fingerprint");
+            assertThrows(IllegalStateException.class, () -> runtime.read(authority.scope(7), tx -> calls.incrementAndGet()));
+            assertEquals(0, calls.get());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(id("different-model")))).isEmpty());
+        } finally {
+            database.setFingerprint(SharedOnlyModelVev.IDENTITY.name(), SharedOnlyModelVev.IDENTITY.fingerprint());
+        }
+        assertTrue(runtime.read(authority.scope(7), tx -> tx.entities().find(OnlyCategoryVev.INSTANCE.key(1))).isEmpty());
+    }
+
+    @Test
+    void orderedIndexPagesTraverseTiesByValueThenIdentifierAcrossBothWireModes() throws SQLException {
+        database.seedOrderedRows();
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var count = new AtomicInteger();
+            var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(binary), count), IntegrationModelVev.POSTGRES, authority);
+            runtime.read(authority.scope(7), tx -> {
+                int before = count.get();
+                var first = tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(2)));
+                assertEquals(before + 1, count.get());
+                assertEquals(List.of(2, 3), first.values().stream().map(RankedItem::id).toList());
+                assertTrue(first.hasMore());
+                var last = first.values().getLast();
+                var second = tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(last.rank(), RankedItemVev.INSTANCE.key(last.id())), new QueryLimit(2)));
+                assertEquals(List.of(1, 4), second.values().stream().map(RankedItem::id).toList());
+                assertFalse(second.hasMore());
+                assertTrue(tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(20, RankedItemVev.INSTANCE.key(4)), new QueryLimit(2))).values().isEmpty());
+                assertEquals(List.of(3, 1, 4), tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(2)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(1, 4), tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(15, RankedItemVev.INSTANCE.key(999)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                var nulls = tx.entities().many(PgQueries.isNull(RankedItemVev.CATEGORY, new QueryLimit(1)));
+                assertEquals(List.of(6), nulls.values().stream().map(RankedItem::id).toList());
+                assertTrue(nulls.hasMore());
+                assertEquals(List.of(8, 5), tx.entities().many(PgQueries.isNullAfter(RankedItemVev.CATEGORY,
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(6)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(1, 8, 7, 5, 4, 2), tx.entities().many(PgQueries.equal(RankedItemVev.ENABLED, true, new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(2), tx.entities().many(PgQueries.equalAfter(RankedItemVev.ENABLED, true,
+                        RankedItemVev.ENABLED.cursor("delta", RankedItemVev.INSTANCE.key(4)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertTrue(tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "missing", new QueryLimit(8))).values().isEmpty());
+                return null;
+            });
+            runtime.read(authority.scope(8), tx -> {
+                assertEquals(List.of(2, 1), tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                assertEquals(List.of(1), tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(3)), new QueryLimit(8))).values().stream().map(RankedItem::id).toList());
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void sharedKotlinOrderedPagesKeepDecimalScaleAndIdentifierTieBreakers() throws SQLException {
+        database.seedOrderedRows();
+        var index = no.beint.vev.fixtures.KotlinRankedVev.CATEGORY;
+        var plan = no.beint.vev.fixtures.KotlinRankedVev.INSTANCE;
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            for (int tenant : List.of(7, 8)) {
+                runtime.read(authority.scope(tenant), tx -> {
+                    var first = tx.entities().many(PgQueries.equal(index, "g", new QueryLimit(1)));
+                    assertEquals(6, first.values().getFirst().id());
+                    assertTrue(first.hasMore());
+                    var rest = tx.entities().many(PgQueries.equalAfter(index, "g", index.cursor(new BigDecimal("3.00"), plan.key(6)), new QueryLimit(8)));
+                    assertEquals(List.of(1, 3, 2), rest.values().stream().map(no.beint.vev.fixtures.KotlinRanked::id).toList());
+                    assertFalse(rest.hasMore());
+                    assertEquals(List.of(2), tx.entities().many(PgQueries.equalAfter(index, "g",
+                            index.cursor(new BigDecimal("1.00"), plan.key(3)), new QueryLimit(8))).values().stream().map(no.beint.vev.fixtures.KotlinRanked::id).toList());
+                    assertTrue(tx.entities().many(PgQueries.equalAfter(index, "g",
+                            index.cursor(new BigDecimal("1.00"), plan.key(2)), new QueryLimit(8))).values().isEmpty());
+                    assertEquals(5, tx.entities().many(PgQueries.isNull(index, new QueryLimit(1))).values().getFirst().id());
+                    assertEquals(List.of(4), tx.entities().many(PgQueries.isNullAfter(index, index.cursor(new BigDecimal("0.00"), plan.key(5)), new QueryLimit(8))).values().stream().map(no.beint.vev.fixtures.KotlinRanked::id).toList());
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
+    void orderedQueriesRejectForeignTokensAndInvalidBoundsBeforePreparingSql() {
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var count = new AtomicInteger();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count), IntegrationModelVev.POSTGRES, authority);
+        runtime.read(authority.scope(7), tx -> {
+            int before = count.get();
+            var fake = new no.beint.vev.pg.PgNullableOrderedIndex<>(RankedItemVev.INSTANCE,
+                    "ranked_item_category_idx", 3, String.class, 5, Integer.class, no.beint.vev.VevIndex.Direction.ASC);
+            var fakeCursor = fake.cursor(10, RankedItemVev.INSTANCE.key(1));
+            assertThrows(IllegalArgumentException.class, () -> PgQueries.equalAfter(RankedItemVev.CATEGORY, "a", fakeCursor, new QueryLimit(1)));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equal(fake, "a", new QueryLimit(1))));
+            assertThrows(NullPointerException.class, () -> RankedItemVev.CATEGORY.cursor(null, RankedItemVev.INSTANCE.key(1)));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(9))));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a".repeat(65), new QueryLimit(1))));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.ENABLED, true,
+                    RankedItemVev.ENABLED.cursor("x".repeat(65), RankedItemVev.INSTANCE.key(1)), new QueryLimit(1))));
+            var decimal = no.beint.vev.fixtures.KotlinRankedVev.CATEGORY;
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.equalAfter(decimal, "g",
+                    decimal.cursor(new BigDecimal("1.0"), no.beint.vev.fixtures.KotlinRankedVev.INSTANCE.key(1)), new QueryLimit(1))));
+            assertEquals(before, count.get());
+            assertTrue(tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(1))).values().isEmpty());
+            return null;
+        });
+    }
+
+    @Test
+    void orderedIndexCatalogAttestationRejectsAlteredOrderingAndIndexShapes() throws SQLException {
+        try {
+            for (String variant : List.of("wrongOrder", "descending", "nullsFirst", "missingTieBreaker", "expression", "included", "partial", "sharedOrder", "descendingAsAscending", "descendingMixed", "descendingNullsLast", "descendingPrefix")) {
+                database.orderedVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.orderedVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void invalidOrderedResultRollsBackEarlierWritesEvenWhenTheFailureIsCaught() throws SQLException {
+        database.seedOrderedRows();
+        database.orderedVariant("negativeVersion");
+        UUID earlier = id("ordered-read-failure");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "ordered@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().many(PgQueries.equal(RankedItemVev.CATEGORY, "a", new QueryLimit(1))));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+    }
+
+    @Test
+    void orderedContinuationUsesItsDeclaredIndexWithoutASeparateSortOnTheSyntheticFixture() throws SQLException, java.io.IOException {
+        database.seedOrderedExplainRows();
+        var captured = new AtomicReference<String>();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var source = observingOrderedDataSource(database.applicationDataSource(), captured, "none");
+        var runtime = new PgVev<>(source, IntegrationModelVev.POSTGRES, authority);
+        var rows = runtime.read(authority.scope(7), tx -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "group",
+                RankedItemVev.CATEGORY.cursor(50, RankedItemVev.INSTANCE.key(10000)), new QueryLimit(8))));
+        assertEquals(8, rows.values().size());
+        assertTrue(rows.hasMore());
+        String explain = database.explainOrderedQuery(captured.get(), false);
+        java.nio.file.Path output = java.nio.file.Path.of("build", "reports", "ordered-index-explain.json");
+        java.nio.file.Files.createDirectories(output.getParent());
+        java.nio.file.Files.writeString(output, explain);
+        java.nio.file.Files.writeString(output.resolveSibling("ordered-index-query.sql"), captured.get() + ";\n");
+        assertTrue(explain.contains("\"Index Name\": \"ranked_item_category_idx\""), explain);
+        assertTrue(explain.contains("ROW(rank_value, id) > ROW(50, 10000)"), explain);
+        assertFalse(explain.contains("\"Node Type\": \"Sort\""), explain);
+    }
+
+    @Test
+    void descendingOrderedContinuationUsesItsDeclaredIndexWithoutASeparateSort() throws SQLException, java.io.IOException {
+        database.seedOrderedExplainRows();
+        var captured = new AtomicReference<String>();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(observingOrderedDataSource(database.applicationDataSource(), captured, "none"), IntegrationModelVev.POSTGRES, authority);
+        var rows = runtime.read(authority.scope(7), tx -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.ENABLED, true,
+                RankedItemVev.ENABLED.cursor("15000", RankedItemVev.INSTANCE.key(10000)), new QueryLimit(8))));
+        assertEquals(8, rows.values().size());
+        assertTrue(rows.hasMore());
+        String explain = database.explainOrderedQuery(captured.get(), true);
+        java.nio.file.Path output = java.nio.file.Path.of("build", "reports", "descending-ordered-index-explain.json");
+        java.nio.file.Files.createDirectories(output.getParent());
+        java.nio.file.Files.writeString(output, explain);
+        java.nio.file.Files.writeString(output.resolveSibling("descending-ordered-index-query.sql"), captured.get() + ";\n");
+        assertTrue(explain.contains("\"Index Name\": \"ranked_item_enabled_idx\""), explain);
+        assertTrue(explain.contains(" < ROW("), explain);
+        assertFalse(explain.contains("\"Node Type\": \"Sort\""), explain);
+    }
+
+    @Test
+    void orderedResultAndStatementCleanupFailuresPoisonAndRollBackTheTransaction() throws SQLException {
+        database.seedOrderedRows();
+        for (String fault : List.of("resultClose", "statementClose")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(observingOrderedDataSource(database.applicationDataSource(), new AtomicReference<>(), fault), IntegrationModelVev.POSTGRES, authority);
+            UUID earlier = id("ordered-" + fault);
+            assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "ordered-" + fault + "@example.test", "1.0000"));
+                assertThrows(IllegalStateException.class, () -> tx.entities().many(PgQueries.equalAfter(RankedItemVev.CATEGORY, "a",
+                        RankedItemVev.CATEGORY.cursor(10, RankedItemVev.INSTANCE.key(2)), new QueryLimit(1))));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        }
+    }
+
+    @Test
+    void sharedReferenceReadsPreserveEveryBoundedQueryShapeInBothProtocolsAndTenants() throws SQLException {
+        database.seedSharedRows();
+        UUID selection = id("shared-selection");
+        vev.write(TENANT_7, tx -> tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(selection, 7, 1)));
+        vev.write(TENANT_8, tx -> tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(selection, 8, 2)));
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var count = new AtomicInteger();
+            var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(binary), count), IntegrationModelVev.POSTGRES, authority);
+            for (int tenantId : List.of(7, 8)) {
+                runtime.read(authority.scope(tenantId), tx -> {
+                    int before = count.get();
+                    assertTrue(tx.entities().findMultiple(SharedCatalogVev.INSTANCE, Batch.empty()).isEmpty());
+                    assertThrows(IllegalArgumentException.class, () -> tx.entities().findMultiple(SharedCatalogVev.INSTANCE, Batch.copyOf(java.util.Collections.nCopies(9, 1))));
+                    assertThrows(IllegalArgumentException.class, () -> tx.entities().many(PgQueries.scanById(SharedCatalogVev.INSTANCE, new QueryLimit(9))));
+                    assertEquals(before, count.get());
+                    var first = tx.entities().find(SharedCatalogVev.INSTANCE.key(1)).orElseThrow();
+                    assertEquals("root", first.code());
+                    assertNull(first.parentId());
+                    var found = tx.entities().findMultiple(SharedCatalogVev.INSTANCE, Batch.copyOf(List.of(2, 99, 1, 2)));
+                    assertEquals(before + 2, count.get());
+                    assertInstanceOf(EntityLookup.Missing.class, found.get(1));
+                    var second = ((EntityLookup.Found<?, SharedCatalog, ?>) found.get(0)).entity();
+                    assertEquals(Long.MAX_VALUE, second.version());
+                    assertEquals(1, second.parentId());
+                    assertEquals(second, ((EntityLookup.Found<?, SharedCatalog, ?>) found.get(3)).entity());
+                    var page = tx.entities().many(PgQueries.scanById(SharedCatalogVev.INSTANCE, new QueryLimit(1)));
+                    assertEquals(List.of(first), page.values());
+                    assertTrue(page.hasMore());
+                    assertEquals(List.of(second), tx.entities().many(PgQueries.scanByIdAfter(SharedCatalogVev.INSTANCE.key(1), new QueryLimit(1))).values());
+                    assertEquals(List.of(first), tx.entities().many(PgQueries.equal(SharedCatalogVev.LABEL, "group", new QueryLimit(1))).values());
+                    assertEquals(List.of(3), tx.entities().many(PgQueries.equalAfter(SharedCatalogVev.LABEL, "group", SharedCatalogVev.INSTANCE.key(1), new QueryLimit(1))).values().stream().map(SharedCatalog::id).toList());
+                    assertEquals(List.of(second), tx.entities().many(PgQueries.isNull(SharedCatalogVev.LABEL, new QueryLimit(1))).values());
+                    assertEquals(List.of(4), tx.entities().many(PgQueries.isNullAfter(SharedCatalogVev.LABEL, SharedCatalogVev.INSTANCE.key(2), new QueryLimit(1))).values().stream().map(SharedCatalog::id).toList());
+                    assertEquals("common", tx.entities().find(no.beint.vev.fixtures.KotlinSharedVev.INSTANCE.key(1)).orElseThrow().label());
+                    assertEquals(1, tx.entities().many(PgQueries.equal(no.beint.vev.fixtures.KotlinSharedVev.ID, 1, new QueryLimit(1))).values().size());
+                    assertTrue(tx.entities().many(PgQueries.equalAfter(no.beint.vev.fixtures.KotlinSharedVev.ID, 1, no.beint.vev.fixtures.KotlinSharedVev.INSTANCE.key(1), new QueryLimit(1))).values().isEmpty());
+                    assertEquals(tenantId == 7 ? 1 : 2, tx.entities().find(CatalogSelectionVev.INSTANCE.key(selection)).orElseThrow().catalogId());
+                    assertEquals(4, tx.entities().many(PgQueries.scanById(SharedCatalogVev.INSTANCE, new QueryLimit(8))).values().size());
+                    assertTrue(tx.entities().find(SharedCatalogVev.INSTANCE.key(99)).isEmpty());
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
+    void sharedMappingsRemainReadOnlyThroughTheJakartaFacadeInsideWriteTransactions() throws SQLException {
+        database.seedSharedRows();
+        VevEntityAgents.runInTransaction(vev, TENANT_8, agent -> {
+            var stored = agent.find(SharedCatalog.class, 1);
+            assertNotNull(stored);
+            assertEquals("root", stored.code());
+            assertThrows(UnsupportedOperationException.class, () -> agent.insert(stored));
+            assertThrows(UnsupportedOperationException.class, () -> agent.insertMultiple(List.of(stored)));
+            assertThrows(IllegalArgumentException.class, () -> agent.update(stored));
+            assertEquals(4, agent.find(SharedCatalog.class, 4).id());
+        });
+    }
+
+    @Test
+    void sharedReferenceAttestationRejectsPoliciesPrivilegesAndUnexpectedConstraintShapes() throws SQLException {
+        try {
+            for (String variant : List.of("noSelect", "insert", "update", "delete", "sequence", "enabledRls", "forcedRls",
+                    "dormantPolicy", "indexOrder", "missingUnique", "wrongUnique", "missingReference", "wrongReference",
+                    "cascade", "deferred", "disabledTrigger", "unmappedIncoming", "extraTenant", "matchFull", "unvalidated",
+                    "wrongPrimaryKey", "insertTable", "selectGrantOption")) {
+                database.sharedVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.sharedVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void tenantWritesCanReferenceSharedRowsWithoutGivingSharedRowsMutationCapabilities() throws SQLException {
+        database.seedSharedRows();
+        for (var tenant : List.of(TENANT_7, TENANT_8)) {
+            int tenantId = tenant == TENANT_7 ? 7 : 8;
+            UUID key = id("shared-foreign-key");
+            vev.write(tenant, tx -> {
+                var inserted = tx.entities().insertMultiple(CatalogSelectionVev.INSTANCE, Batch.copyOf(List.of(
+                        new CatalogSelection(key, tenantId, 2), new CatalogSelection(id("shared-null-fk"), tenantId, null))));
+                assertEquals(2, inserted.size());
+                assertEquals(1, tx.entities().find(SharedCatalogVev.INSTANCE.key(2)).orElseThrow().parentId());
+                return null;
+            });
+            UUID earlier = id("shared-fk-earlier");
+            assertThrows(IllegalStateException.class, () -> vev.write(tenant, tx -> {
+                tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(earlier, tenantId, 1));
+                assertThrows(IllegalStateException.class, () -> tx.entities().insert(CatalogSelectionVev.INSTANCE,
+                        new CatalogSelection(id("shared-fk-missing"), tenantId, 99)));
+                return null;
+            }));
+            assertTrue(vev.read(tenant, tx -> tx.entities().find(CatalogSelectionVev.INSTANCE.key(earlier))).isEmpty());
+        }
+    }
+
+    @Test
+    void invalidSharedSnapshotPoisonsTheWholeTransactionEvenWhenItsReadFailureIsCaught() throws SQLException {
+        database.seedSharedRows();
+        database.negativeSharedVersion();
+        UUID earlier = id("shared-invalid-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(CatalogSelectionVev.INSTANCE, new CatalogSelection(earlier, 7, 2));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(SharedCatalogVev.INSTANCE.key(1)));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(SharedCatalogVev.INSTANCE.key(2)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(CatalogSelectionVev.INSTANCE.key(earlier))).isEmpty());
+    }
+
+    @Test
+    void readOnlyMappingsPreserveStoredVersionsTenantBoundsAndEveryReadShape() throws SQLException {
+        UUID key = id("read-only");
+        database.seedReadOnlyRows(key);
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            runtime.read(authority.scope(7), tx -> {
+                assertEquals("visible", tx.entities().find(ReadOnlySnapshotVev.INSTANCE.key(key)).orElseThrow().label());
+                assertEquals("visible", tx.entities().find(KotlinReadOnlyVev.INSTANCE.key(1)).orElseThrow().label());
+                var batch = tx.entities().findMultiple(ReadOnlyIdentityVev.INSTANCE, Batch.copyOf(List.of((short) 2, (short) 99, (short) 1)));
+                assertInstanceOf(EntityLookup.Missing.class, batch.get(1));
+                var first = ((EntityLookup.Found<?, ReadOnlyIdentity, ?>) batch.get(2)).entity();
+                var second = ((EntityLookup.Found<?, ReadOnlyIdentity, ?>) batch.get(0)).entity();
+                assertEquals(0L, first.version());
+                assertEquals(Long.MAX_VALUE, second.version());
+                var page = tx.entities().many(PgQueries.scanById(ReadOnlyIdentityVev.INSTANCE, new QueryLimit(1)));
+                assertEquals(List.of(first), page.values());
+                assertTrue(page.hasMore());
+                assertEquals(List.of(second), tx.entities().many(PgQueries.scanByIdAfter(ReadOnlyIdentityVev.INSTANCE.key((short) 1), new QueryLimit(1))).values());
+                assertEquals(List.of(first), tx.entities().many(PgQueries.equal(ReadOnlyIdentityVev.LABEL, "first", new QueryLimit(1))).values());
+                assertTrue(tx.entities().many(PgQueries.equalAfter(ReadOnlyIdentityVev.LABEL, "first", ReadOnlyIdentityVev.INSTANCE.key((short) 1), new QueryLimit(1))).values().isEmpty());
+                assertEquals(List.of(second), tx.entities().many(PgQueries.isNull(ReadOnlyIdentityVev.LABEL, new QueryLimit(1))).values());
+                assertTrue(tx.entities().many(PgQueries.isNullAfter(ReadOnlyIdentityVev.LABEL, ReadOnlyIdentityVev.INSTANCE.key((short) 2), new QueryLimit(1))).values().isEmpty());
+                return null;
+            });
+            runtime.write(authority.scope(8), tx -> {
+                assertEquals("foreign", tx.entities().find(ReadOnlySnapshotVev.INSTANCE.key(key)).orElseThrow().label());
+                assertEquals("foreign", tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 1)).orElseThrow().label());
+                assertTrue(tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 2)).isEmpty());
+                return null;
+            });
+        }
+    }
+
+    @Test
+    void jakartaFacadeReadsReadOnlyMappingsAndRejectsTheirWritesBeforeSql() throws SQLException {
+        UUID key = id("read-only-facade");
+        database.seedReadOnlyRows(key);
+        VevEntityAgents.runInTransaction(vev, TENANT_7, agent -> {
+            var stored = agent.find(ReadOnlyIdentity.class, (short) 1);
+            assertNotNull(stored);
+            assertEquals(0L, stored.version());
+            assertThrows(UnsupportedOperationException.class, () -> agent.insert(stored));
+            assertThrows(UnsupportedOperationException.class, () -> agent.insertMultiple(List.of(stored)));
+            assertThrows(IllegalArgumentException.class, () -> agent.update(stored));
+            assertEquals("visible", agent.find(ReadOnlySnapshot.class, key).label());
+        });
+        assertEquals(0L, vev.read(TENANT_7, tx -> tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 1))).orElseThrow().version());
+    }
+
+    @Test
+    void readOnlyTablesRejectEveryWritePrivilegeAndKeepIdentitySequenceAccessAbsent() throws SQLException {
+        try {
+            for (String variant : List.of("noSelect", "insert", "update", "delete", "usage", "sequenceUpdate")) {
+                database.readOnlyVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.readOnlyVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void invalidStoredReadOnlyVersionRollsBackEarlierWritesEvenWhenCaught() throws SQLException {
+        database.seedReadOnlyRows(id("read-only-version"));
+        database.readOnlyVariant("negativeVersion");
+        UUID earlier = id("read-only-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "readonly@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(ReadOnlyIdentityVev.INSTANCE.key((short) 1)));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+    }
+
+    @Test
+    void corruptDeleteResultsAndCleanupFailuresPoisonEvenWhenTheCallerCatchesThem() {
+        for (boolean batch : List.of(false, true)) {
+            var corruptions = new java.util.ArrayList<>(List.of("key", "tenant", "version", "null", "extra",
+                    "readerError", "driverFailure", "resultClose", "statementClose"));
+            corruptions.addAll(batch ? List.of("ordinal", "missing", "arrayLength") : List.of("outcome"));
+            for (String corruption : corruptions) {
+                var rows = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                        Batch.copyOf(java.util.Collections.nCopies(2, new IdentityCounterVev.New()))));
+                var targets = Batch.copyOf(rows.values().stream()
+                        .map(row -> new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version())).toList());
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var count = new AtomicInteger();
+                var runtime = new PgVev<>(DeleteObservationDataSource.observe(database.applicationDataSource(), count, corruption),
+                        IntegrationModelVev.POSTGRES, authority);
+                UUID earlier = id("delete-" + batch + '-' + corruption);
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, batch + corruption + "@example.test", "1.0000"));
+                    org.junit.jupiter.api.function.Executable operation = () -> {
+                        if (batch) tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, targets);
+                        else tx.entities().delete(targets.get(0));
+                    };
+                    if (corruption.equals("readerError")) assertThrows(AssertionError.class, operation);
+                    else assertThrows(IllegalStateException.class, operation);
+                    assertThrows(IllegalStateException.class, () -> tx.entities().find(IdentityCounterVev.INSTANCE.key(rows.get(0).id())));
+                    return null;
+                }), batch + corruption);
+                assertEquals(1, count.get());
+                assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+                for (var row : rows) assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+            }
+        }
+    }
+
+    @Test
+    void deletionCannotEscapeWriteOwnershipOrUseAForeignMappingToken() {
+        var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        var target = new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version());
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var count = new AtomicInteger();
+        var runtime = new PgVev<>(DeleteObservationDataSource.observe(database.applicationDataSource(), count, ""),
+                IntegrationModelVev.POSTGRES, authority);
+        runtime.read(authority.scope(7), tx -> {
+            var write = (WriteEntities<IntegrationModelVev.Model>) tx.entities();
+            assertThrows(IllegalStateException.class, () -> write.delete(target));
+            assertThrows(IllegalStateException.class, () -> write.deleteMultiple(IdentityCounterVev.INSTANCE, Batch.one(target)));
+            return null;
+        });
+        var escaped = new AtomicReference<WriteEntities<IntegrationModelVev.Model>>();
+        runtime.write(authority.scope(7), tx -> {
+            escaped.set(tx.entities());
+            @SuppressWarnings("unchecked")
+            var foreignType = (no.beint.vev.DeletableEntityType<IntegrationModelVev.Model, IdentityCounter, Integer, Integer>)
+                    Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{no.beint.vev.DeletableEntityType.class},
+                            (proxy, method, arguments) -> method.invoke(IdentityCounterVev.INSTANCE, arguments));
+            var foreign = new DeleteTarget<>(foreignType, row.id(), row.version());
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().delete(foreign));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                    Batch.copyOf(List.of(target, foreign))));
+            assertThrows(NullPointerException.class, () -> tx.entities().delete(null));
+            assertThrows(NullPointerException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, null));
+            return null;
+        });
+        assertThrows(IllegalStateException.class, () -> escaped.get().delete(target));
+        assertThrows(IllegalStateException.class, () -> escaped.get().deleteMultiple(IdentityCounterVev.INSTANCE, Batch.one(target)));
+        assertEquals(0, count.get());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+    }
+
+    @Test
+    void concurrentDeleteAndUpdateCannotBothApplyToTheSameVersion() throws Exception {
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            for (int attempt = 0; attempt < 8; attempt++) {
+                var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+                var ready = new java.util.concurrent.CountDownLatch(2);
+                var release = new java.util.concurrent.CountDownLatch(1);
+                var futures = new java.util.ArrayList<java.util.concurrent.Future<Object>>();
+                for (boolean delete : List.of(false, true)) {
+                    futures.add(executor.submit(() -> {
+                        try {
+                            return vev.write(TENANT_7, tx -> {
+                                var snapshot = tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id())).orElseThrow();
+                                ready.countDown();
+                                try {
+                                    if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Concurrent fixture did not release");
+                                } catch (InterruptedException interrupted) {
+                                    Thread.currentThread().interrupt();
+                                    throw new IllegalStateException(interrupted);
+                                }
+                                return delete ? tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), snapshot.version()))
+                                        : tx.entities().update(IdentityCounterVev.INSTANCE, snapshot);
+                            });
+                        } catch (IllegalStateException failure) {
+                            return failure;
+                        }
+                    }));
+                }
+                try {
+                    assertTrue(ready.await(10, TimeUnit.SECONDS));
+                } finally {
+                    release.countDown();
+                }
+                var first = futures.get(0).get(15, TimeUnit.SECONDS);
+                var second = futures.get(1).get(15, TimeUnit.SECONDS);
+                assertTrue(first instanceof MutationResult.Applied<?, ?, ?, ?> && second instanceof IllegalStateException
+                        || first instanceof IllegalStateException && second instanceof DeleteResult.Deleted<?, ?, ?, ?>);
+                var rejected = (IllegalStateException) (first instanceof IllegalStateException ? first : second);
+                assertTrue(rejected.getMessage().contains("SQLSTATE 40001"), rejected.getMessage());
+                var remaining = vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id())));
+                if (first instanceof MutationResult.Applied<?, ?, ?, ?>) assertEquals(1, remaining.orElseThrow().version());
+                else assertTrue(remaining.isEmpty());
+            }
+        }
+    }
+
+    @Test
+    void explicitDeletionClassifiesOneSnapshotAndNeverReusesTheGeneratedIdentifier() throws SQLException {
+        var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        var target = new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version());
+        assertInstanceOf(DeleteResult.Missing.class, vev.write(TENANT_8, tx -> tx.entities().delete(target)));
+        assertInstanceOf(DeleteResult.Conflict.class, vev.write(TENANT_7, tx -> tx.entities().delete(
+                new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), 1))));
+        UUID earlier = id("recoverable-delete-conflict");
+        vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "delete-conflict@example.test", "1.0000"));
+            assertInstanceOf(DeleteResult.Conflict.class, tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), 1)));
+            assertInstanceOf(DeleteResult.Missing.class, tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, -1, 0)));
+            return null;
+        });
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isPresent());
+        assertEquals(new DeleteResult.Deleted<>(target), vev.write(TENANT_7, tx -> tx.entities().delete(target)));
+        assertInstanceOf(DeleteResult.Missing.class, vev.write(TENANT_7, tx -> tx.entities().delete(target)));
+        var next = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        assertTrue(next.id() > row.id());
+        database.setCounterVersion(next.id(), Integer.MAX_VALUE);
+        assertInstanceOf(DeleteResult.Deleted.class, vev.write(TENANT_7, tx -> tx.entities().delete(
+                new DeleteTarget<>(IdentityCounterVev.INSTANCE, next.id(), Integer.MAX_VALUE))));
+    }
+
+    @Test
+    void deletionBatchUsesOneStatementAndPreservesOrderAtTheMaximumBound() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(DeleteObservationDataSource.observe(database.applicationDataSource(), count, ""),
+                IntegrationModelVev.POSTGRES, authority);
+        var rows = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                Batch.copyOf(java.util.Collections.nCopies(1000, new IdentityCounterVev.New()))));
+        var targets = Batch.copyOf(rows.values().reversed().stream()
+                .map(row -> new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), row.version())).toList());
+        var results = runtime.write(authority.scope(7), tx -> {
+            assertTrue(tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, Batch.empty()).isEmpty());
+            assertEquals(0, count.get());
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                    Batch.copyOf(List.of(targets.get(0), targets.get(0)))));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().delete(
+                    new DeleteTarget<>(IdentityCounterVev.INSTANCE, targets.get(0).value(), -1)));
+            assertEquals(0, count.get());
+            return tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE, targets);
+        });
+        assertEquals(1, count.get());
+        assertEquals(targets.values(), results.values().stream().map(DeleteResult.Deleted::target).toList());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityCounterVev.INSTANCE,
+                new QueryLimit(1000)))).values().isEmpty());
+    }
+
+    @Test
+    void staleMissingAndForeignTenantDeleteBatchesRollBackAllEarlierMutations() {
+        for (String failure : List.of("stale", "missing", "tenant")) {
+            var rows = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                    Batch.copyOf(java.util.Collections.nCopies(3, new IdentityCounterVev.New()))));
+            var foreign = vev.write(TENANT_8, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+            var valid = new DeleteTarget<>(IdentityCounterVev.INSTANCE, rows.get(1).id(), 0);
+            var bad = new DeleteTarget<>(IdentityCounterVev.INSTANCE,
+                    failure.equals("missing") ? -1 : failure.equals("tenant") ? foreign.id() : rows.get(2).id(),
+                    failure.equals("stale") ? 1 : 0);
+            UUID earlier = id("atomic-delete-" + failure);
+            assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, failure + "@example.test", "1.0000"));
+                assertInstanceOf(DeleteResult.Deleted.class, tx.entities().delete(new DeleteTarget<>(IdentityCounterVev.INSTANCE, rows.get(0).id(), 0)));
+                assertThrows(IllegalStateException.class, () -> tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                        Batch.copyOf(List.of(valid, bad))));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(IdentityCounterVev.INSTANCE.key(rows.get(0).id())));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+            for (var row : rows) assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+            assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(foreign.id()))).isPresent());
+        }
+    }
+
+    @Test
+    void deletionKeepsImmediateForeignKeysAndRollsBackEarlierWrites() {
+        var parent = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("parent", null, null)));
+        var child = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEventVev.INSTANCE, new IdentityEventVev.New("child", parent.id())));
+        UUID earlier = id("delete-foreign-key");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "fk@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().delete(new DeleteTarget<>(IdentityEntryVev.INSTANCE, parent.id(), parent.version())));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(parent.id()))).isPresent());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityEventVev.INSTANCE.key(child.id()))).isPresent());
+        var free = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("free", null, null)));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> tx.entities().deleteMultiple(IdentityEntryVev.INSTANCE,
+                Batch.copyOf(List.of(new DeleteTarget<>(IdentityEntryVev.INSTANCE, free.id(), free.version()),
+                        new DeleteTarget<>(IdentityEntryVev.INSTANCE, parent.id(), parent.version()))))));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(free.id()))).isPresent());
+        assertInstanceOf(DeleteResult.Deleted.class, vev.write(TENANT_7, tx -> tx.entities().delete(
+                new DeleteTarget<>(IdentityEntryVev.INSTANCE, free.id(), free.version()))));
+    }
+
+    @Test
+    void kotlinDeleteTargetsAndRowBoundsWorkInBothTransferModes() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            var rows = runtime.write(authority.scope(7), tx -> tx.entities().createMultiple(KotlinIdentityVev.INSTANCE,
+                    Batch.copyOf(java.util.Collections.nCopies(8, new KotlinIdentityVev.New("delete", null)))));
+            var targets = Batch.copyOf(rows.values().reversed().stream()
+                    .map(row -> new DeleteTarget<>(KotlinIdentityVev.INSTANCE, row.id(), row.version())).toList());
+            var results = runtime.write(authority.scope(7), tx -> {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().deleteMultiple(KotlinIdentityVev.INSTANCE,
+                        Batch.copyOf(java.util.Collections.nCopies(9, targets.get(0)))));
+                return tx.entities().deleteMultiple(KotlinIdentityVev.INSTANCE, targets);
+            });
+            assertEquals(targets.values(), results.values().stream().map(DeleteResult.Deleted::target).toList());
+        }
+    }
+
+    @Test
+    void deletionPrivilegesMustMatchTheCapabilityWithoutGrantOptions() throws SQLException {
+        try {
+            for (String variant : List.of("missing", "undeclared", "grantOption")) {
+                database.deletionPrivilege(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            }
+        } finally {
+            database.deletionPrivilege("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void deleteArrayCleanupFailureRollsBackTheDeletion() {
+        var row = vev.write(TENANT_7, tx -> tx.entities().create(IdentityCounterVev.INSTANCE, new IdentityCounterVev.New()));
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var failures = new AtomicInteger();
+        var runtime = new PgVev<>(arrayCleanupFailureDataSource(database.applicationDataSource(), failures),
+                IntegrationModelVev.POSTGRES, authority);
+        assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx ->
+                tx.entities().deleteMultiple(IdentityCounterVev.INSTANCE,
+                        Batch.one(new DeleteTarget<>(IdentityCounterVev.INSTANCE, row.id(), 0)))));
+        assertEquals(1, failures.get());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(IdentityCounterVev.INSTANCE.key(row.id()))).isPresent());
+    }
+
+    @Test
     void orderedBatchReadsPreserveMissingRowsAndTenantIsolation() {
         UUID sharedId = id("shared");
         Account tenantSeven = insert(account(sharedId, 7, 0, "seven@example.test", "17.00"), TENANT_7);
@@ -100,6 +1613,951 @@ final class VevPostgresIntegrationTest {
         assertEquals(sharedId, first.id());
         assertEquals(sharedId, third.id());
         assertNotSame(first, third);
+    }
+
+    @Test
+    void enumNamesRoundTripThroughBatchesUpdatesAndTypedIndexQueries() {
+        var first = new WorkItem(id("enum-first"), 7, 0L, WorkState.OPEN, null);
+        var second = new WorkItem(id("enum-second"), 7, 0L, null, null);
+        var input = Batch.copyOf(List.of(first, second));
+        var stored = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, input));
+        assertEquals(input, stored);
+        assertEquals(List.of(first), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(WorkItemVev.STATE, WorkState.OPEN, new QueryLimit(10)))).values());
+        assertEquals(List.of(second), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.isNull(WorkItemVev.STATE, new QueryLimit(10)))).values());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().many(
+                PgQueries.equal(WorkItemVev.STATE, WorkState.OPEN, new QueryLimit(10)))).values().isEmpty());
+        var changes = Batch.copyOf(List.of(
+                new WorkItem(first.id(), 7, 0L, WorkState.CLOSED, null),
+                new WorkItem(second.id(), 7, 0L, WorkState.OPEN, null)));
+        var updated = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(WorkItemVev.INSTANCE, changes));
+        assertEquals(new WorkItem(first.id(), 7, 1L, WorkState.CLOSED, null), updated.get(0).entity());
+        assertEquals(new WorkItem(second.id(), 7, 1L, WorkState.OPEN, null), updated.get(1).entity());
+        assertEquals(List.of(updated.get(1).entity()), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(WorkItemVev.STATE, WorkState.OPEN, new QueryLimit(10)))).values());
+    }
+
+    @Test
+    void unknownDatabaseEnumNamePoisonsAndRollsBackTheWholeTransaction() throws SQLException {
+        var work = new WorkItem(id("enum-corrupt"), 7, 0L, WorkState.OPEN, null);
+        vev.write(TENANT_7, tx -> tx.entities().insert(WorkItemVev.INSTANCE, work));
+        database.corruptWorkState(work.id());
+        UUID accountId = id("enum-rollback");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(accountId, 7, 0, "enum@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(WorkItemVev.INSTANCE.key(work.id())));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(accountId))).isEmpty());
+    }
+
+    @Test
+    void persistenceUsesColumnsWithoutCallingEntityEqualityHashingOrRendering() {
+        SnapshotProbe single = vev.write(TENANT_7,
+                tx -> tx.entities().insert(SnapshotProbeVev.INSTANCE, new SnapshotProbe(1, 7, 0, "first")));
+        assertEquals("first", single.value());
+        var inserted = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(SnapshotProbeVev.INSTANCE,
+                Batch.copyOf(List.of(new SnapshotProbe(2, 7, 0, "second"), new SnapshotProbe(3, 7, 0, "third")))));
+        assertEquals(List.of(2L, 3L), inserted.values().stream().map(SnapshotProbe::id).toList());
+        var updated = vev.write(TENANT_7, tx -> tx.entities().update(SnapshotProbeVev.INSTANCE,
+                new SnapshotProbe(1, 7, 0, "changed")));
+        assertEquals("changed", ((MutationResult.Applied<?, SnapshotProbe, ?, ?>) updated).entity().value());
+        var batch = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(SnapshotProbeVev.INSTANCE,
+                Batch.copyOf(List.of(new SnapshotProbe(3, 7, 0, "third changed"), new SnapshotProbe(2, 7, 0, "second changed")))));
+        assertEquals(1L, batch.get(0).entity().version());
+        assertEquals(3L, batch.get(0).entity().id());
+        assertEquals("changed", vev.read(TENANT_7,
+                tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1L))).orElseThrow().value());
+        var page = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(SnapshotProbeVev.INSTANCE, new QueryLimit(10))));
+        assertEquals(List.of(1L, 2L, 3L), page.values().stream().map(SnapshotProbe::id).toList());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(1L))).isEmpty());
+    }
+
+    @Test
+    void explicitlyGlobalAssignedIdentifiersRemainTenantFiltered() {
+        vev.write(TENANT_7, tx -> tx.entities().insert(SnapshotProbeVev.INSTANCE, new SnapshotProbe(42, 7, 0, "tenant seven")));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_8, tx -> tx.entities().insert(
+                SnapshotProbeVev.INSTANCE, new SnapshotProbe(42, 8, 0, "collision"))));
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(SnapshotProbeVev.INSTANCE.key(42L))).isEmpty());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().many(PgQueries.equal(SnapshotProbeVev.ID, 42L,
+                new QueryLimit(2)))).values().isEmpty());
+        var own = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(SnapshotProbeVev.ID, 42L,
+                new QueryLimit(2))));
+        assertEquals(1, own.values().size());
+        assertEquals("tenant seven", own.values().getFirst().value());
+    }
+
+    @Test
+    void bootstrapAttestsGlobalPrimaryKeysTheirTraversalIndexesAndAlternateReferenceKeys() throws SQLException {
+        for (String variant : List.of("tenantFirst", "idTenant", "included", "deferred")) {
+            try {
+                database.identityEntryPrimaryKey(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.identityEntryPrimaryKey("valid");
+            }
+        }
+        for (String variant : List.of("missing", "reversed", "duplicate", "partial", "unique")) {
+            try {
+                database.identityEntryTraversalIndex(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.identityEntryTraversalIndex("valid");
+            }
+        }
+        try {
+            database.identityEntryAlternateKeyTenantFirst(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.identityEntryAlternateKeyTenantFirst(false);
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void globalIdentityPrimaryKeysRetainTenantScopedReferencesAndIndexedPagination() {
+        var entries = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE,
+                Batch.copyOf(List.of(new IdentityEntryVev.New("first", null, null),
+                        new IdentityEntryVev.New("second", null, null), new IdentityEntryVev.New("third", null, null)))));
+        var child = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEventVev.INSTANCE,
+                new IdentityEventVev.New("child", entries.get(0).id())));
+        assertEquals(entries.get(0).id(), child.entryId());
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_8, tx -> tx.entities().create(IdentityEventVev.INSTANCE,
+                new IdentityEventVev.New("foreign child", entries.get(0).id()))));
+        var firstPage = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE, new QueryLimit(2))));
+        assertEquals(entries.values().subList(0, 2), firstPage.values());
+        assertTrue(firstPage.hasMore());
+        var nextPage = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanByIdAfter(
+                IdentityEntryVev.INSTANCE.key(entries.get(1).id()), new QueryLimit(2))));
+        assertEquals(List.of(entries.get(2)), nextPage.values());
+        assertFalse(nextPage.hasMore());
+        assertEquals(List.of(entries.get(0)), vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(
+                IdentityEntryVev.ID, entries.get(0).id(), new QueryLimit(2)))).values());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().many(PgQueries.equal(
+                IdentityEntryVev.ID, entries.get(0).id(), new QueryLimit(2)))).values().isEmpty());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(IdentityEventVev.INSTANCE.key(child.id()))).isEmpty());
+    }
+
+    @Test
+    void bootstrapRequiresTheDeclaredIdentifierFirstReferenceOrder() throws SQLException {
+        try {
+            database.identityReferenceTenantFirst(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.identityReferenceTenantFirst(false);
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+        UUID parent = id("identifier-first-parent");
+        insert(account(parent, 7, 0, "parent@example.test", "1.0000"), TENANT_7);
+        var child = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("child", null, parent)));
+        assertEquals(parent, child.accountId());
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_8, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("foreign child", null, parent))));
+    }
+
+    @Test
+    void jakartaFacadeRejectsIdentityInsertionWithoutPoisoningPreSqlValidation() {
+        var snapshot = new IdentityEntry(1L, 7, (short) 0, "identified", null, null);
+        Account assigned = account(id("agent-after-identity-rejection"), 7, 0, "assigned@example.test", "1.0000");
+        VevEntityAgents.callInTransaction(vev, TENANT_7, agent -> {
+            assertThrows(UnsupportedOperationException.class, () -> agent.insert(snapshot));
+            assertThrows(UnsupportedOperationException.class, () -> agent.insertMultiple(List.of(snapshot)));
+            agent.insert(assigned);
+            return null;
+        });
+        assertEquals(assigned, find(assigned.id(), TENANT_7));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE,
+                new QueryLimit(10)))).values().isEmpty());
+    }
+
+    @Test
+    void kotlinIdentityCreationPreservesNullabilityAndExplicitCopyUpdates() {
+        var created = vev.write(TENANT_7, tx -> tx.entities().createMultiple(KotlinIdentityVev.INSTANCE,
+                Batch.copyOf(List.of(new KotlinIdentityVev.New("required", null), new KotlinIdentityVev.New("second", "note")))));
+        KotlinIdentity first = created.get(0);
+        assertTrue(first.id() > 0);
+        assertEquals(7, first.tenantId());
+        assertEquals(0L, first.version());
+        assertEquals("required", first.label());
+        assertNull(first.note());
+        assertEquals("note", created.get(1).note());
+        var expected = first.copy(first.id(), 7, 0L, "changed", null);
+        var changed = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(KotlinIdentityVev.INSTANCE, Batch.one(expected)));
+        assertEquals(first.copy(first.id(), 7, 1L, "changed", null), changed.get(0).entity());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(KotlinIdentityVev.INSTANCE.key(first.id()))).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().create(KotlinIdentityVev.INSTANCE, new KotlinIdentityVev.New(null, null))));
+    }
+
+    @Test
+    void identityCreationUsesOneStatementAndValidatesTheWholeInputBeforeSql() {
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var count = new AtomicInteger();
+        var runtime = new PgVev<>(IdentityObservationDataSource.observe(database.applicationDataSource(), count, ""),
+                IntegrationModelVev.POSTGRES, authority);
+        var scope = authority.scope(7);
+        runtime.write(scope, tx -> {
+            assertTrue(tx.entities().createMultiple(IdentityEntryVev.INSTANCE, Batch.empty()).isEmpty());
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE,
+                    Batch.copyOf(List.of(new IdentityEntryVev.New("valid", null, null), new IdentityEntryVev.New(null, null, null)))));
+            assertEquals(0, count.get());
+            var inputs = java.util.stream.IntStream.range(0, 1000)
+                    .mapToObj(row -> new IdentityEntryVev.New("row " + row, null, null)).toList();
+            var created = tx.entities().createMultiple(IdentityEntryVev.INSTANCE, Batch.copyOf(inputs));
+            assertEquals(1000, created.size());
+            assertEquals("row 999", created.get(999).label());
+            assertEquals(1, count.get());
+            return null;
+        });
+    }
+
+    @Test
+    void unexpectedIdentityResultsPoisonAndRollbackTheCompleteTransaction() {
+        for (String corruption : List.of("ordinal", "key", "tenant", "version", "value")) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var count = new AtomicInteger();
+            var runtime = new PgVev<>(IdentityObservationDataSource.observe(database.applicationDataSource(), count, corruption),
+                    IntegrationModelVev.POSTGRES, authority);
+            UUID earlier = id("identity-result-" + corruption);
+            assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "earlier@example.test", "1.0000"));
+                assertThrows(IllegalStateException.class, () -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                        new IdentityEntryVev.New("input", null, null)));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+                return null;
+            }), corruption);
+            assertEquals(1, count.get());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE,
+                    new QueryLimit(10)))).values().isEmpty());
+        }
+    }
+
+    @Test
+    void identityArrayCleanupFailureRollsBackAnOtherwiseSuccessfulCreation() {
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var failures = new AtomicInteger();
+        var runtime = new PgVev<>(arrayCleanupFailureDataSource(database.applicationDataSource(), failures),
+                IntegrationModelVev.POSTGRES, authority);
+        assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx ->
+                tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("cleanup", null, null))));
+        assertEquals(1, failures.get());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE,
+                new QueryLimit(10)))).values().isEmpty());
+    }
+
+    @Test
+    void identityCreationAcceptsBothIdentityModesAtEveryIntegerWidth() throws SQLException {
+        try {
+            database.identityMode("BY DEFAULT");
+            assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+            identityCreationHandlesAllIntegerWidthsAppendOnlyAndEmptyInputs();
+            var entry = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                    new IdentityEntryVev.New("by default", null, null)));
+            assertTrue(entry.id() > 0);
+        } finally {
+            database.identityMode("ALWAYS");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void bootstrapAttestsIdentitySequenceShapeAndLeastPrivilege() throws SQLException {
+        for (String variant : List.of("increment", "minimum", "maximum", "start", "cycle", "type",
+                "missingUsage", "select", "update", "grantOption")) {
+            try {
+                database.identitySequenceVariant(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.identitySequenceVariant("valid");
+            }
+        }
+        try {
+            database.identitySequenceVariant("cache");
+            assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+        } finally {
+            database.identitySequenceVariant("valid");
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void identityExhaustionPoisonsTheTransactionAndRollsBackEarlierWrites() throws SQLException {
+        UUID earlier = id("identity-exhaustion");
+        try {
+            database.restartSmallIdentity(Short.MAX_VALUE);
+            assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "earlier@example.test", "1.0000"));
+                assertThrows(IllegalStateException.class, () -> tx.entities().createMultiple(IdentityEventVev.INSTANCE,
+                        Batch.copyOf(List.of(new IdentityEventVev.New("last", null), new IdentityEventVev.New("exhausted", null)))));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEventVev.INSTANCE,
+                    new QueryLimit(10)))).values().isEmpty());
+        } finally {
+            database.restartSmallIdentity(1);
+        }
+    }
+
+    @Test
+    void concurrentIdentityBatchesKeepUniqueKeysAndExactInputCorrelation() throws Exception {
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var tasks = new java.util.ArrayList<java.util.concurrent.Future<Batch<IdentityEntry>>>();
+            for (int task = 0; task < 16; task++) {
+                int batchNumber = task;
+                tasks.add(executor.submit(() -> vev.write(batchNumber % 2 == 0 ? TENANT_7 : TENANT_8, tx -> {
+                    var inputs = java.util.stream.IntStream.range(0, 20)
+                            .mapToObj(row -> new IdentityEntryVev.New(batchNumber + ":" + row, null, null)).toList();
+                    return tx.entities().createMultiple(IdentityEntryVev.INSTANCE, Batch.copyOf(inputs));
+                })));
+            }
+            var keys = new java.util.HashSet<Long>();
+            for (int task = 0; task < tasks.size(); task++) {
+                Batch<IdentityEntry> rows = tasks.get(task).get(20, TimeUnit.SECONDS);
+                for (int row = 0; row < rows.size(); row++) {
+                    IdentityEntry entry = rows.get(row);
+                    assertTrue(keys.add(entry.id()));
+                    assertEquals(task + ":" + row, entry.label());
+                    assertEquals(task % 2 == 0 ? 7 : 8, entry.tenantId());
+                }
+            }
+            assertEquals(320, keys.size());
+        }
+    }
+
+    @Test
+    void identityCreationCorrelatesDuplicatePayloadsAndKeepsSnapshotsTenantBound() {
+        var inputs = Batch.copyOf(List.of(new IdentityEntryVev.New("duplicate", null, null),
+                new IdentityEntryVev.New("last", null, null), new IdentityEntryVev.New("duplicate", null, null)));
+        var created = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE, inputs));
+        assertEquals(List.of("duplicate", "last", "duplicate"), created.values().stream().map(IdentityEntry::label).toList());
+        assertEquals(3, created.values().stream().map(IdentityEntry::id).distinct().count());
+        for (IdentityEntry entry : created) {
+            assertTrue(entry.id() > 0);
+            assertEquals(7, entry.tenantId());
+            assertEquals((short) 0, entry.version());
+            assertNull(entry.code());
+            assertEquals(entry, vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(entry.id()))).orElseThrow());
+            assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(entry.id()))).isEmpty());
+        }
+        IdentityEntry first = created.get(0);
+        var changed = new IdentityEntry(first.id(), 7, first.version(), "changed", null, null);
+        var result = vev.write(TENANT_7, tx -> tx.entities().update(IdentityEntryVev.INSTANCE, changed));
+        var updated = ((MutationResult.Applied<?, IdentityEntry, ?, ?>) result).entity();
+        assertEquals(first.id(), updated.id());
+        assertEquals((short) 1, updated.version());
+        assertEquals("changed", updated.label());
+        var other = vev.write(TENANT_8, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, inputs.get(0)));
+        assertEquals(8, other.tenantId());
+        assertFalse(created.values().stream().anyMatch(entry -> entry.id().equals(other.id())));
+        assertTrue(vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE, Batch.empty())).isEmpty());
+    }
+
+    @Test
+    void identityCreationHandlesAllIntegerWidthsAppendOnlyAndEmptyInputs() {
+        var counters = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityCounterVev.INSTANCE,
+                Batch.copyOf(List.of(new IdentityCounterVev.New(), new IdentityCounterVev.New()))));
+        assertEquals(2, counters.size());
+        assertTrue(counters.get(0).id() > 0 && counters.get(1).id() > counters.get(0).id());
+        assertEquals(0, counters.get(0).version());
+        var events = vev.write(TENANT_7, tx -> tx.entities().createMultiple(IdentityEventVev.INSTANCE,
+                Batch.copyOf(List.of(new IdentityEventVev.New(null, null), new IdentityEventVev.New("event", null)))));
+        assertEquals(2, events.size());
+        assertNull(events.get(0).message());
+        assertEquals("event", events.get(1).message());
+        assertTrue(events.get(0).id() > 0 && events.get(1).id() > events.get(0).id());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(IdentityEventVev.INSTANCE.key(events.get(0).id()))).isEmpty());
+    }
+
+    @Test
+    void binarySnapshotsSupportNullableArraysIndexesAndCompleteBatchWrites() {
+        byte[] everyByte = new byte[256];
+        for (int index = 0; index < everyByte.length; index++) everyByte[index] = (byte) index;
+        byte[] maximum = new byte[65536];
+        new java.util.Random(1701).nextBytes(maximum);
+        var rows = List.of(new BinarySample(1, 7, 0, null, null),
+                new BinarySample(2, 7, 0, Binary.empty(), Binary.empty()),
+                new BinarySample(3, 7, 0, Binary.copyOf(everyByte), Binary.fromHex("00ff")),
+                new BinarySample(4, 7, 0, Binary.copyOf(maximum), Binary.fromHex("80")));
+        everyByte[0] = 99;
+        assertEquals(rows, vev.write(TENANT_7, tx -> tx.entities().insertMultiple(BinarySampleVev.INSTANCE, Batch.copyOf(rows))).values());
+        var lookedUp = vev.read(TENANT_7, tx -> tx.entities().findMultiple(BinarySampleVev.INSTANCE,
+                Batch.copyOf(List.of(4, 1, 3, 2, 99, 4))));
+        assertEquals(rows.get(3), ((EntityLookup.Found<?, ?, ?>) lookedUp.get(0)).entity());
+        assertInstanceOf(EntityLookup.Missing.class, lookedUp.get(4));
+        assertEquals(List.of(rows.get(2)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(BinarySampleVev.DIGEST, Binary.fromHex("00FF"), new QueryLimit(32)))).values());
+        assertEquals(List.of(rows.get(0)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.isNull(BinarySampleVev.DIGEST, new QueryLimit(32)))).values());
+        var updates = rows.stream().map(row -> new BinarySample(row.id(), 7, 0, Binary.empty(), row.digest())).toList();
+        assertEquals(4, vev.write(TENANT_7, tx -> tx.entities().updateMultiple(BinarySampleVev.INSTANCE, Batch.copyOf(updates))).size());
+        var otherTenant = new BinarySample(3, 8, 0, Binary.fromHex("01"), Binary.fromHex("00ff"));
+        vev.write(TENANT_8, tx -> tx.entities().insert(BinarySampleVev.INSTANCE, otherTenant));
+        assertEquals(List.of(otherTenant), vev.read(TENANT_8, tx -> tx.entities().many(
+                PgQueries.equal(BinarySampleVev.DIGEST, Binary.fromHex("00ff"), new QueryLimit(32)))).values());
+        UUID earlier = id("binary-unique-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "binary-rollback@example.test", "1.0000"));
+            return tx.entities().insertMultiple(BinarySampleVev.INSTANCE, Batch.copyOf(List.of(
+                    new BinarySample(5, 7, 0, Binary.empty(), Binary.fromHex("1234")),
+                    new BinarySample(6, 7, 0, Binary.empty(), Binary.fromHex("00ff")))));
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(5))).isEmpty());
+    }
+
+    @Test
+    void binaryIdentityCreationHandlesTwentyMiBAndKotlinNullableArrays() {
+        byte[] bytes = new byte[20 * 1024 * 1024];
+        new java.util.Random(827).nextBytes(bytes);
+        Binary content = Binary.copyOf(bytes);
+        var created = vev.write(TENANT_7, tx -> tx.entities().create(BinaryAssetVev.INSTANCE, new BinaryAssetVev.New(content)));
+        assertEquals(content, created.content());
+        assertEquals(created, vev.read(TENANT_7, tx -> tx.entities().find(BinaryAssetVev.INSTANCE.key(created.id()))).orElseThrow());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(BinaryAssetVev.INSTANCE.key(created.id()))).isEmpty());
+        var updated = vev.write(TENANT_7, tx -> tx.entities().update(BinaryAssetVev.INSTANCE,
+                new BinaryAsset(created.id(), 7, 0, Binary.empty())));
+        assertEquals(Binary.empty(), ((MutationResult.Applied<?, BinaryAsset, ?, ?>) updated).entity().content());
+        Binary excessive = Binary.copyOf(new byte[20 * 1024 * 1024 + 1]);
+        assertThrows(IllegalArgumentException.class, () -> vev.write(TENANT_7, tx -> tx.entities().create(BinaryAssetVev.INSTANCE,
+                new BinaryAssetVev.New(excessive))));
+        var kotlin = vev.write(TENANT_7, tx -> tx.entities().createMultiple(KotlinBinaryVev.INSTANCE, Batch.copyOf(List.of(
+                new KotlinBinaryVev.New(null), new KotlinBinaryVev.New(Binary.empty()),
+                new KotlinBinaryVev.New(Binary.fromHex("0001feff")), new KotlinBinaryVev.New(null)))));
+        assertNull(kotlin.get(0).payload());
+        assertEquals(Binary.empty(), kotlin.get(1).payload());
+        assertEquals(Binary.fromHex("0001feff"), kotlin.get(2).payload());
+        assertNull(kotlin.get(3).payload());
+        KotlinBinary first = kotlin.get(0);
+        KotlinBinary replacement = first.copy(first.id(), first.tenantId(), first.version(), Binary.fromHex("20"));
+        var changed = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(KotlinBinaryVev.INSTANCE, Batch.one(replacement)));
+        assertEquals(Binary.fromHex("20"), changed.get(0).entity().payload());
+    }
+
+    @Test
+    void binaryBoundsFailBeforeSqlAndReturnedSnapshotsDoNotAliasDriverBuffers() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count), IntegrationModelVev.POSTGRES, authority);
+        count.set(0);
+        var valid = new BinarySample(1, 7, 0, Binary.fromHex("12345678"), null);
+        runtime.write(authority.scope(7), tx -> {
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().insert(BinarySampleVev.INSTANCE,
+                    new BinarySample(2, 7, 0, Binary.copyOf(new byte[65537]), null)));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().insert(BinarySampleVev.INSTANCE,
+                    new BinarySample(2, 7, 0, null, Binary.copyOf(new byte[33]))));
+            assertEquals(0, count.get());
+            return tx.entities().insert(BinarySampleVev.INSTANCE, valid);
+        });
+        var borrowed = new AtomicReference<byte[]>();
+        var readAuthority = IntegrationModelVev.newTenantAuthority();
+        var reader = new PgVev<>(binaryResultDataSource(database.applicationDataSource(), borrowed, false), IntegrationModelVev.POSTGRES, readAuthority);
+        var snapshot = reader.read(readAuthority.scope(7), tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(1))).orElseThrow();
+        assertNotNull(borrowed.get());
+        java.util.Arrays.fill(borrowed.get(), (byte) 0);
+        assertEquals(valid, snapshot);
+    }
+
+    @Test
+    void corruptedBinaryResultsAndArrayCleanupFailuresRollbackEarlierWrites() {
+        for (boolean corrupt : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var failures = new AtomicInteger();
+            DataSource source = corrupt ? binaryResultDataSource(database.applicationDataSource(), new AtomicReference<>(), true)
+                    : arrayCleanupFailureDataSource(database.applicationDataSource(), failures);
+            var runtime = new PgVev<>(source, IntegrationModelVev.POSTGRES, authority);
+            UUID earlier = id("binary-failure-" + corrupt);
+            assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "binary-failure@example.test", "1.0000"));
+                return tx.entities().insertMultiple(BinarySampleVev.INSTANCE,
+                        Batch.one(new BinarySample(1, 7, 0, Binary.fromHex("aabb"), null)));
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(BinarySampleVev.INSTANCE.key(1))).isEmpty());
+            if (!corrupt) assertTrue(failures.get() > 0);
+        }
+    }
+
+    @Test
+    void boundedTextPreservesUnicodeWhitespaceNullsAndTypedBatchQueries() {
+        String maximum = "🙂".repeat(1048576);
+        var rows = List.of(new TextDocument(1, 7, 0, maximum, "  trailing  "),
+                new TextDocument(2, 7, 0, "e\u0301é\n\t'\\{}", "🙂".repeat(128)),
+                new TextDocument(3, 7, 0, "", ""), new TextDocument(4, 7, 0, null, null));
+        assertEquals(rows, vev.write(TENANT_7, tx -> tx.entities().insertMultiple(TextDocumentVev.INSTANCE, Batch.copyOf(rows))).values());
+        assertEquals(rows.get(0), vev.read(TENANT_7, tx -> tx.entities().find(TextDocumentVev.INSTANCE.key(1))).orElseThrow());
+        assertEquals(List.of(rows.get(0)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(TextDocumentVev.LABEL, "  trailing  ", new QueryLimit(4)))).values());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.equal(TextDocumentVev.LABEL, "  trailing", new QueryLimit(4)))).values().isEmpty());
+        assertEquals(List.of(rows.get(3)), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.isNull(TextDocumentVev.LABEL, new QueryLimit(4)))).values());
+        var page = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(TextDocumentVev.INSTANCE, new QueryLimit(2))));
+        assertEquals(rows.subList(0, 2), page.values());
+        assertTrue(page.hasMore());
+        assertEquals(rows.subList(2, 4), vev.read(TENANT_7, tx -> tx.entities().many(
+                PgQueries.scanByIdAfter(TextDocumentVev.INSTANCE.key(2), new QueryLimit(4)))).values());
+        var changed = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(TextDocumentVev.INSTANCE, Batch.copyOf(
+                rows.stream().map(row -> new TextDocument(row.id(), 7, 0, null, row.label())).toList())));
+        assertEquals(4, changed.size());
+        assertTrue(changed.values().stream().allMatch(result -> result.entity().version() == 1 && result.entity().body() == null));
+        var other = new TextDocument(1, 8, 0, "other", "  trailing  ");
+        vev.write(TENANT_8, tx -> tx.entities().insert(TextDocumentVev.INSTANCE, other));
+        assertEquals(List.of(other), vev.read(TENANT_8, tx -> tx.entities().many(
+                PgQueries.equal(TextDocumentVev.LABEL, "  trailing  ", new QueryLimit(4)))).values());
+    }
+
+    @Test
+    void kotlinTextIdentityBatchesPreserveNullAndExactCharacterBounds() {
+        var inputs = List.of(new KotlinTextVev.New(null), new KotlinTextVev.New(""),
+                new KotlinTextVev.New("🙂".repeat(64)), new KotlinTextVev.New(" leading and trailing "));
+        var created = vev.write(TENANT_7, tx -> tx.entities().createMultiple(KotlinTextVev.INSTANCE, Batch.copyOf(inputs)));
+        for (int index = 0; index < inputs.size(); index++) assertEquals(inputs.get(index).payload(), created.get(index).payload());
+        var first = created.get(0);
+        var replacement = first.copy(first.id(), first.tenantId(), first.version(), "changed");
+        var changed = vev.write(TENANT_7, tx -> tx.entities().update(KotlinTextVev.INSTANCE, replacement));
+        assertEquals("changed", ((MutationResult.Applied<?, no.beint.vev.fixtures.KotlinText, ?, ?>) changed).entity().payload());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(KotlinTextVev.INSTANCE.key(first.id()))).isEmpty());
+    }
+
+    @Test
+    void textValidationRunsBeforeSqlAndConstraintFailuresRollbackEarlierWrites() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count), IntegrationModelVev.POSTGRES, authority);
+        count.set(0);
+        runtime.write(authority.scope(7), tx -> {
+            for (String invalid : List.of("x".repeat(1048577), "\0", "\ud800", "\udc00")) {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().insert(TextDocumentVev.INSTANCE,
+                        new TextDocument(1, 7, 0, invalid, null)));
+            }
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().many(
+                    PgQueries.equal(TextDocumentVev.LABEL, "🙂".repeat(129), new QueryLimit(4))));
+            assertEquals(0, count.get());
+            return tx.entities().insert(TextDocumentVev.INSTANCE, new TextDocument(1, 7, 0, "valid", "unique"));
+        });
+        UUID earlier = id("text-rollback-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "text-rollback@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().insertMultiple(TextDocumentVev.INSTANCE,
+                    Batch.copyOf(List.of(new TextDocument(2, 7, 0, "would succeed", "new"), new TextDocument(3, 7, 0, "conflicts", "unique")))));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(TextDocumentVev.INSTANCE.key(2))).isEmpty());
+    }
+
+    @Test
+    void textSchemaRejectsWrongBoundsUnitsTypesAndConstraintStates() throws SQLException {
+        for (String variant : List.of("missing", "renamed", "weakened", "tightened", "wrongcolumn", "wrongunits",
+                "unvalidated", "unenforced", "noinherit", "extra")) {
+            try {
+                database.textDocumentBound(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.textDocumentBound("valid");
+            }
+        }
+        try {
+            database.textDocumentUsesVarchar(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.textDocumentUsesVarchar(false);
+        }
+        runtime(database.applicationDataSource());
+        SQLException oversized = assertThrows(SQLException.class, () -> database.insertTextBeyondDatabaseBound());
+        assertEquals("23514", oversized.getSQLState());
+    }
+
+    @Test
+    void localTimePreservesMicrosecondsNullableBatchesAndIndexResultsInBothTransferModes() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            var scope = authority.scope(binary ? 8 : 7);
+            var inputs = List.of(new KotlinClockVev.New(null), new KotlinClockVev.New(LocalTime.MIDNIGHT),
+                    new KotlinClockVev.New(LocalTime.of(12, 34, 56, 123456000)),
+                    new KotlinClockVev.New(LocalTime.of(23, 59, 59, 999999000)));
+            var created = runtime.write(scope, tx -> tx.entities().createMultiple(KotlinClockVev.INSTANCE, Batch.copyOf(inputs)));
+            for (int index = 0; index < inputs.size(); index++) assertEquals(inputs.get(index).observedAt(), created.get(index).observedAt());
+            assertEquals(created.get(3), runtime.read(scope, tx -> tx.entities().find(KotlinClockVev.INSTANCE.key(created.get(3).id()))).orElseThrow());
+            assertEquals(List.of(created.get(1)), runtime.read(scope, tx -> tx.entities().many(
+                    PgQueries.equal(KotlinClockVev.OBSERVED_AT, LocalTime.MIDNIGHT, new QueryLimit(10)))).values());
+            assertEquals(List.of(created.get(0)), runtime.read(scope, tx -> tx.entities().many(
+                    PgQueries.isNull(KotlinClockVev.OBSERVED_AT, new QueryLimit(10)))).values());
+            var changed = runtime.write(scope, tx -> tx.entities().updateMultiple(KotlinClockVev.INSTANCE,
+                    Batch.copyOf(created.values().stream().map(row -> row.copy(row.id(), row.tenantId(), row.version(), LocalTime.NOON)).toList())));
+            assertTrue(changed.values().stream().allMatch(result -> result.entity().version() == 1 && result.entity().observedAt().equals(LocalTime.NOON)));
+            assertEquals(4, runtime.read(scope, tx -> tx.entities().many(
+                    PgQueries.equal(KotlinClockVev.OBSERVED_AT, LocalTime.NOON, new QueryLimit(10)))).values().size());
+            var first = changed.get(0).entity();
+            var single = runtime.write(scope, tx -> tx.entities().update(KotlinClockVev.INSTANCE, first.copy(first.id(), first.tenantId(), first.version(), null)));
+            assertNull(((MutationResult.Applied<?, KotlinClock, ?, ?>) single).entity().observedAt());
+        }
+    }
+
+    @Test
+    void localTimeRejectsLossyInputsBeforeSqlAndUnrepresentableStoredValuesPoisonTransactions() throws SQLException {
+        var counter = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), counter), IntegrationModelVev.POSTGRES, authority);
+        counter.set(0);
+        runtime.write(authority.scope(7), tx -> {
+            for (LocalTime invalid : List.of(LocalTime.MAX, LocalTime.of(1, 2, 3, 1), LocalTime.of(1, 2, 3, 999999999))) {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().create(KotlinClockVev.INSTANCE, new KotlinClockVev.New(invalid)));
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().many(
+                        PgQueries.equal(KotlinClockVev.OBSERVED_AT, invalid, new QueryLimit(1))));
+            }
+            assertEquals(0, counter.get());
+            return tx.entities().create(KotlinClockVev.INSTANCE, new KotlinClockVev.New(LocalTime.NOON));
+        });
+        int invalidKey = database.insertEndOfDayClock();
+        for (boolean binary : List.of(false, true)) {
+            var readAuthority = IntegrationModelVev.newTenantAuthority();
+            var reader = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, readAuthority);
+            UUID earlier = id("clock-invalid-" + binary);
+            assertThrows(IllegalStateException.class, () -> reader.write(readAuthority.scope(7), tx -> {
+                tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "clock-failure@example.test", "1.0000"));
+                assertThrows(IllegalStateException.class, () -> tx.entities().find(KotlinClockVev.INSTANCE.key(invalidKey)));
+                return null;
+            }));
+            assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        }
+    }
+
+    @Test
+    void localTimeBootstrapRejectsDatabasePrecisionThatWouldRoundValues() throws SQLException {
+        try {
+            database.clockUsesMilliseconds(true);
+            assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()));
+        } finally {
+            database.clockUsesMilliseconds(false);
+        }
+        runtime(database.applicationDataSource());
+    }
+
+    @Test
+    void largeSnapshotsUseDeclaredBatchLimitsAndPreservePagingAndTenantIsolation() {
+        assertEquals(8, LargeTextVev.INSTANCE.maximumRows());
+        assertEquals(8, KotlinIdentityVev.INSTANCE.maximumRows());
+        String body = "🙂".repeat(65535);
+        var inputs = java.util.stream.IntStream.rangeClosed(1, 8).mapToObj(index -> new LargeText(index, 7, 0, "bulk", body)).toList();
+        var inserted = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(LargeTextVev.INSTANCE, Batch.copyOf(inputs)));
+        assertEquals(inputs, inserted.values());
+        vev.write(TENANT_7, tx -> tx.entities().insert(LargeTextVev.INSTANCE, new LargeText(9, 7, 0, "bulk", body)));
+        var first = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(LargeTextVev.INSTANCE, new QueryLimit(8))));
+        assertEquals(8, first.values().size());
+        assertTrue(first.hasMore());
+        var next = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanByIdAfter(LargeTextVev.INSTANCE.key(8), new QueryLimit(8))));
+        assertEquals(List.of(9), next.values().stream().map(LargeText::id).toList());
+        assertFalse(next.hasMore());
+        var indexed = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(LargeTextVev.CATEGORY, "bulk", new QueryLimit(8))));
+        assertEquals(first, indexed);
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(LargeTextVev.INSTANCE.key(1))).isEmpty());
+        var lookups = vev.read(TENANT_7, tx -> tx.entities().findMultiple(LargeTextVev.INSTANCE, Batch.copyOf(List.of(8, 1, 8, 2, 7, 6, 5, 4))));
+        assertEquals(8, lookups.size());
+        var updates = inputs.stream().map(row -> new LargeText(row.id(), 7, 0, null, "changed")).toList();
+        var updated = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(LargeTextVev.INSTANCE, Batch.copyOf(updates)));
+        assertEquals(8, updated.size());
+        assertTrue(updated.values().stream().allMatch(result -> result.entity().version() == 1));
+        assertEquals(8, vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.isNull(LargeTextVev.CATEGORY, new QueryLimit(8)))).values().size());
+    }
+
+    @Test
+    void oversizedPagesAndBatchesFailBeforeSqlWithoutPoisoningTheLexicalTransaction() {
+        var count = new AtomicInteger();
+        var authority = IntegrationModelVev.newTenantAuthority();
+        var runtime = new PgVev<>(entityStatementCountingDataSource(database.applicationDataSource(), count),
+                IntegrationModelVev.POSTGRES, authority);
+        count.set(0);
+        var large = LargeTextVev.INSTANCE;
+        var keys = Batch.copyOf(java.util.stream.IntStream.rangeClosed(1, 9).boxed().toList());
+        var rows = Batch.copyOf(keys.values().stream().map(key -> new LargeText(key, 7, 0, "batch", "body")).toList());
+        var creations = Batch.copyOf(keys.values().stream().map(key -> new KotlinIdentityVev.New("row " + key, null)).toList());
+        runtime.write(authority.scope(7), tx -> {
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().findMultiple(large, keys));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().insertMultiple(large, rows));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().updateMultiple(large, rows));
+            assertThrows(IllegalArgumentException.class, () -> tx.entities().createMultiple(KotlinIdentityVev.INSTANCE, creations));
+            QueryLimit excessive = new QueryLimit(9);
+            for (var query : List.of(PgQueries.scanById(large, excessive), PgQueries.scanByIdAfter(large.key(1), excessive),
+                    PgQueries.equal(LargeTextVev.CATEGORY, "batch", excessive),
+                    PgQueries.equalAfter(LargeTextVev.CATEGORY, "batch", large.key(1), excessive),
+                    PgQueries.isNull(LargeTextVev.CATEGORY, excessive), PgQueries.isNullAfter(LargeTextVev.CATEGORY, large.key(1), excessive))) {
+                assertThrows(IllegalArgumentException.class, () -> tx.entities().many(query));
+            }
+            assertEquals(0, count.get());
+            tx.entities().insert(large, rows.get(0));
+            tx.entities().create(KotlinIdentityVev.INSTANCE, creations.get(0));
+            assertEquals(2, count.get());
+            return null;
+        });
+        assertEquals(rows.get(0), vev.read(TENANT_7, tx -> tx.entities().find(large.key(1))).orElseThrow());
+    }
+
+    @Test
+    void checkCatalogAcceptsReviewedRowLocalExpressionsAndRejectsUnapprovedBehaviorWithoutExecution() throws SQLException {
+        database.verifyCheckExpressionCatalog();
+    }
+
+    @Test
+    void dateArithmeticChecksPreserveCalendarDaysNullSemanticsAndTenantIsolation() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            int firstId = binary ? 3 : 1;
+            var leap = new DateWindow(firstId, 7, LocalDate.of(2024, 2, 28), LocalDate.of(2024, 3, 1), 2, 1, 2);
+            var absent = new DateWindow(firstId + 1, 7, LocalDate.of(2024, 12, 31), null, 2, 2, 2);
+            runtime.write(authority.scope(7), tx -> {
+                tx.entities().insertMultiple(DateWindowVev.INSTANCE, Batch.copyOf(List.of(leap, absent)));
+                assertEquals(leap, tx.entities().find(DateWindowVev.INSTANCE.key(firstId)).orElseThrow());
+                assertEquals(absent, tx.entities().find(DateWindowVev.INSTANCE.key(firstId + 1)).orElseThrow());
+                return null;
+            });
+            runtime.write(authority.scope(8), tx -> {
+                assertTrue(tx.entities().find(DateWindowVev.INSTANCE.key(firstId)).isEmpty());
+                var year = new DateWindow(firstId, 8, LocalDate.of(2024, 12, 31), LocalDate.of(2025, 1, 2), 2, 2, 2);
+                tx.entities().insert(DateWindowVev.INSTANCE, year);
+                assertEquals(year, tx.entities().find(DateWindowVev.INSTANCE.key(firstId)).orElseThrow());
+                return null;
+            });
+            assertEquals(leap, runtime.read(authority.scope(7), tx -> tx.entities().find(DateWindowVev.INSTANCE.key(firstId))).orElseThrow());
+        }
+    }
+
+    @Test
+    void dateArithmeticConstraintAndOverflowFailuresRollBackWholeBatchesAndEarlierWrites() {
+        for (boolean binary : List.of(false, true)) {
+            var authority = IntegrationModelVev.newTenantAuthority();
+            var runtime = new PgVev<>(database.applicationDataSource(binary), IntegrationModelVev.POSTGRES, authority);
+            var good = new DateWindow(10, 7, LocalDate.of(2024, 2, 28), LocalDate.of(2024, 3, 1), 2, 1, 2);
+            for (String variant : List.of("plus", "minus", "span", "overflow")) {
+                var bad = new DateWindow(11, 7, good.opened(), good.closed(),
+                        variant.equals("plus") ? 3 : variant.equals("overflow") ? Integer.MAX_VALUE : 2,
+                        variant.equals("minus") ? 3 : 1, variant.equals("span") ? 3 : 2);
+                UUID earlier = id("date-check-" + binary + variant);
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "date-check@example.test", "1.0000"));
+                    assertThrows(IllegalStateException.class, () -> tx.entities().insertMultiple(DateWindowVev.INSTANCE, Batch.copyOf(List.of(good, bad))));
+                    assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+                    return null;
+                }), variant);
+                runtime.read(authority.scope(7), tx -> {
+                    assertTrue(tx.entities().find(AccountVev.INSTANCE.key(earlier)).isEmpty());
+                    assertTrue(tx.entities().find(DateWindowVev.INSTANCE.key(10)).isEmpty());
+                    assertTrue(tx.entities().find(DateWindowVev.INSTANCE.key(11)).isEmpty());
+                    return null;
+                });
+            }
+        }
+    }
+
+    @Test
+    void bootstrapRequiresExactDeclaredValidatedAndEnforcedCheckConstraints() throws SQLException {
+        for (String variant : List.of("missing", "renamed", "weakened", "unvalidated", "unenforced", "noinherit", "extra", "unsafe")) {
+            try {
+                database.identityEntryCheck(variant);
+                IllegalStateException failure = assertThrows(IllegalStateException.class,
+                        () -> runtime(database.applicationDataSource()), variant);
+                assertTrue(failure.getMessage().contains("tenant isolation verification"),
+                        variant + ": " + failure.getMessage());
+            } finally {
+                database.identityEntryCheck("valid");
+            }
+        }
+        runtime(database.applicationDataSource());
+    }
+
+    @Test
+    void checkViolationsRollBackEntireCreationBatchAndEarlierWritesEvenWhenCaught() {
+        UUID earlier = id("check-earlier-write");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "before-check@example.test", "1.0000"));
+            assertThrows(IllegalStateException.class, () -> tx.entities().createMultiple(IdentityEntryVev.INSTANCE,
+                    Batch.copyOf(List.of(new IdentityEntryVev.New("valid", null, null), new IdentityEntryVev.New("   ", null, null)))));
+            assertThrows(IllegalStateException.class, () -> tx.entities().find(AccountVev.INSTANCE.key(earlier)));
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE, new QueryLimit(10)))).values().isEmpty());
+        var created = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("valid", null, null)));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> tx.entities().update(IdentityEntryVev.INSTANCE,
+                new IdentityEntry(created.id(), 7, created.version(), "", null, null))));
+        assertEquals(created, vev.read(TENANT_7, tx -> tx.entities().find(IdentityEntryVev.INSTANCE.key(created.id()))).orElseThrow());
+    }
+
+    @Test
+    void binaryBoundsRequireExactColumnsLengthsNamesValidationAndEnforcementAtBootstrap() throws SQLException {
+        for (String variant : List.of("missing", "renamed", "weakened", "tightened", "wrongcolumn",
+                "unvalidated", "unenforced", "noinherit", "extra", "unsafe")) {
+            try {
+                database.binarySampleBound(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.binarySampleBound("valid");
+            }
+        }
+        runtime(database.applicationDataSource());
+    }
+
+    @Test
+    void identityConstraintFailureRollsBackBatchAndEarlierWritesButNotSequenceAllocation() {
+        var committed = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("committed", "unique", null)));
+        UUID earlierId = id("identity-earlier-write");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlierId, 7, 0, "earlier@example.test", "1.0000"));
+            return tx.entities().createMultiple(IdentityEntryVev.INSTANCE, Batch.copyOf(List.of(
+                    new IdentityEntryVev.New("first", null, null), new IdentityEntryVev.New("conflict", "unique", null))));
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlierId))).isEmpty());
+        var rows = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE, new QueryLimit(10))));
+        assertEquals(List.of(committed), rows.values());
+        var next = vev.write(TENANT_7, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("after rollback", null, null)));
+        assertTrue(next.id() > committed.id() + 1);
+        var otherTenant = vev.write(TENANT_8, tx -> tx.entities().create(IdentityEntryVev.INSTANCE,
+                new IdentityEntryVev.New("other tenant", "unique", null)));
+        assertEquals(8, otherTenant.tenantId());
+        UUID foreignId = id("identity-foreign-parent");
+        insert(account(foreignId, 8, 0, "parent@example.test", "1.0000"), TENANT_8);
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().create(IdentityEntryVev.INSTANCE, new IdentityEntryVev.New("cross tenant", null, foreignId))));
+        assertEquals(2, vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.scanById(IdentityEntryVev.INSTANCE,
+                new QueryLimit(10)))).values().size());
+    }
+
+    @Test
+    void kotlinRecordDependencySupportsNullsBatchWritesTypedQueriesAndTenantIsolation() {
+        var first = new KotlinEntry(10, 7, 0, "entry", null);
+        var second = new KotlinEntry(20, 7, 0, "entry", "named");
+        var inserted = vev.write(TENANT_7, tx -> tx.entities().insertMultiple(KotlinEntryVev.INSTANCE,
+                Batch.copyOf(List.of(second, first))));
+        assertEquals(List.of(second, first), inserted.values());
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(KotlinEntryVev.INSTANCE.key(10L))).orElseThrow());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(KotlinEntryVev.INSTANCE.key(10L))).isEmpty());
+        var changed = second.copy(20, 7, 0, "changed", null);
+        var updated = vev.write(TENANT_7, tx -> tx.entities().updateMultiple(KotlinEntryVev.INSTANCE, Batch.one(changed)));
+        assertEquals(changed.copy(20, 7, 1, "changed", null), updated.get(0).entity());
+        var rows = vev.read(TENANT_7, tx -> tx.entities().many(PgQueries.equal(KotlinEntryVev.LABEL, "changed", new QueryLimit(10))));
+        assertEquals(List.of(updated.get(0).entity()), rows.values());
+        assertThrows(NullPointerException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().insert(KotlinEntryVev.INSTANCE, new KotlinEntry(30, 7, 0, null, null))));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(KotlinEntryVev.INSTANCE.key(30L))).isEmpty());
+    }
+
+    @Test
+    void scalarReferencesEnforceTenantCompositeKeysAndRollbackEarlierWrites() {
+        UUID targetId = id("reference-parent");
+        insert(account(targetId, 8, 0, "parent@example.test", "1.0000"), TENANT_8);
+        UUID earlierId = id("reference-earlier-write");
+        var invalid = new WorkItem(id("reference-invalid"), 7, 0L, WorkState.OPEN, targetId);
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlierId, 7, 0, "earlier@example.test", "2.0000"));
+            tx.entities().insert(WorkItemVev.INSTANCE, invalid);
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlierId))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(invalid.id()))).isEmpty());
+        insert(account(targetId, 7, 0, "own-parent@example.test", "3.0000"), TENANT_7);
+        assertEquals(invalid, vev.write(TENANT_7, tx -> tx.entities().insert(WorkItemVev.INSTANCE, invalid)));
+        var saved = vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(invalid.id()))).orElseThrow();
+        assertEquals(targetId, saved.accountId());
+        assertTrue(vev.read(TENANT_8, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(invalid.id()))).isEmpty());
+    }
+
+    @Test
+    void invalidReferenceInABatchUpdatePreservesEveryOriginalSnapshot() {
+        UUID targetId = id("batch-reference-parent");
+        insert(account(targetId, 8, 0, "parent@example.test", "1.0000"), TENANT_8);
+        var first = new WorkItem(id("reference-batch-first"), 7, 0L, WorkState.OPEN, null);
+        var second = new WorkItem(id("reference-batch-second"), 7, 0L, WorkState.OPEN, null);
+        vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(first, second))));
+        var updates = Batch.copyOf(List.of(
+                new WorkItem(first.id(), 7, 0L, WorkState.CLOSED, null),
+                new WorkItem(second.id(), 7, 0L, WorkState.CLOSED, targetId)));
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().updateMultiple(WorkItemVev.INSTANCE, updates)));
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).orElseThrow());
+        assertEquals(second, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(second.id()))).orElseThrow());
+    }
+
+    @Test
+    void bootstrapRequiresExactForeignKeyEnforcementAndActions() throws SQLException {
+        for (String variant : List.of("missing", "wrongColumn", "reversedColumns", "cascadeDelete", "cascadeUpdate",
+                "deferrable", "unvalidated", "fullMatch", "disabledTrigger")) {
+            try {
+                database.setWorkItemReference(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.setWorkItemReference("valid");
+            }
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
+    }
+
+    @Test
+    void uniqueConstraintsAreTenantScopedAndKeepPostgresDistinctNullSemantics() {
+        UUID parent = id("unique-parent");
+        insert(account(parent, 7, 0, "first@example.test", "1.0000"), TENANT_7);
+        insert(account(parent, 8, 0, "second@example.test", "1.0000"), TENANT_8);
+        var first = new WorkItem(id("unique-first"), 7, 0L, WorkState.OPEN, parent);
+        var otherTenant = new WorkItem(id("unique-other-tenant"), 8, 0L, WorkState.OPEN, parent);
+        assertEquals(first, vev.write(TENANT_7, tx -> tx.entities().insert(WorkItemVev.INSTANCE, first)));
+        assertEquals(otherTenant, vev.write(TENANT_8, tx -> tx.entities().insert(WorkItemVev.INSTANCE, otherTenant)));
+        var distinctNulls = Batch.copyOf(List.of(
+                new WorkItem(id("unique-null-state-a"), 7, 0L, null, parent),
+                new WorkItem(id("unique-null-state-b"), 7, 0L, null, parent),
+                new WorkItem(id("unique-null-parent-a"), 7, 0L, WorkState.OPEN, null),
+                new WorkItem(id("unique-null-parent-b"), 7, 0L, WorkState.OPEN, null)));
+        assertEquals(distinctNulls, vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, distinctNulls)));
+        var duplicate = new WorkItem(id("unique-duplicate"), 7, 0L, WorkState.OPEN, parent);
+        UUID earlier = id("unique-earlier");
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx -> {
+            tx.entities().insert(AccountVev.INSTANCE, account(earlier, 7, 0, "earlier@example.test", "2.0000"));
+            tx.entities().insert(WorkItemVev.INSTANCE, duplicate);
+            return null;
+        }));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(earlier))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(duplicate.id()))).isEmpty());
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).orElseThrow());
+    }
+
+    @Test
+    void uniqueViolationsInBatchInsertsAndUpdatesRollbackEveryMember() {
+        UUID parent = id("unique-batch-parent");
+        insert(account(parent, 7, 0, "parent@example.test", "1.0000"), TENANT_7);
+        var first = new WorkItem(id("unique-batch-a"), 7, 0L, WorkState.OPEN, parent);
+        var second = new WorkItem(id("unique-batch-b"), 7, 0L, WorkState.OPEN, parent);
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7,
+                tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(first, second)))));
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).isEmpty());
+        assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(second.id()))).isEmpty());
+        var secondOriginal = new WorkItem(second.id(), 7, 0L, WorkState.CLOSED, parent);
+        vev.write(TENANT_7, tx -> tx.entities().insertMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(first, secondOriginal))));
+        var firstChanged = new WorkItem(first.id(), 7, 0L, WorkState.CLOSED, parent);
+        assertThrows(IllegalStateException.class, () -> vev.write(TENANT_7, tx ->
+                tx.entities().updateMultiple(WorkItemVev.INSTANCE, Batch.copyOf(List.of(firstChanged, secondOriginal)))));
+        assertEquals(first, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(first.id()))).orElseThrow());
+        assertEquals(secondOriginal, vev.read(TENANT_7, tx -> tx.entities().find(WorkItemVev.INSTANCE.key(second.id()))).orElseThrow());
+    }
+
+    @Test
+    void bootstrapRequiresExactGeneratedUniqueConstraints() throws SQLException {
+        for (String variant : List.of("missing", "wrongColumns", "wrongOrder", "global", "deferred", "nullsNotDistinct",
+                "included", "nonUniqueIndex", "standaloneUniqueIndex")) {
+            try {
+                database.setWorkItemUniqueConstraint(variant);
+                assertThrows(IllegalStateException.class, () -> runtime(database.applicationDataSource()), variant);
+            } finally {
+                database.setWorkItemUniqueConstraint("valid");
+            }
+        }
+        assertDoesNotThrow(() -> runtime(database.applicationDataSource()));
     }
 
     @Test
@@ -1500,6 +3958,45 @@ final class VevPostgresIntegrationTest {
     }
 
     @Test
+    void displaySettingsAreVerifiedAtBootstrapCheckoutAndBeforeCommit() throws SQLException {
+        for (String setting : List.of("DateStyle = 'ISO, DMY'", "IntervalStyle = 'iso_8601'")) {
+            try (Connection connection = database.applicationDataSource().getConnection()) {
+                try (var statement = connection.createStatement()) {
+                    statement.execute("SET " + setting);
+                }
+                DataSource changed = (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{DataSource.class},
+                        (proxy, method, arguments) -> nonClosing(connection));
+                assertThrows(IllegalStateException.class, () -> runtime(changed));
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var runtime = new PgVev<>(firstCleanThenRetainedConnection(database.applicationDataSource(), connection),
+                        IntegrationModelVev.POSTGRES, authority);
+                var invocations = new AtomicInteger();
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    invocations.incrementAndGet();
+                    return null;
+                }));
+                assertEquals(0, invocations.get());
+            }
+            try (Connection connection = database.applicationDataSource().getConnection()) {
+                var authority = IntegrationModelVev.newTenantAuthority();
+                var runtime = new PgVev<>(firstCleanThenRetainedConnection(database.applicationDataSource(), connection),
+                        IntegrationModelVev.POSTGRES, authority);
+                UUID key = id("display-" + setting);
+                assertThrows(IllegalStateException.class, () -> runtime.write(authority.scope(7), tx -> {
+                    tx.entities().insert(AccountVev.INSTANCE, account(key, 7, 0, "display@example.test", "1.0000"));
+                    try (var statement = connection.createStatement()) {
+                        statement.execute("SET LOCAL " + setting);
+                    } catch (SQLException failure) {
+                        throw new AssertionError(failure);
+                    }
+                    return null;
+                }));
+                assertTrue(vev.read(TENANT_7, tx -> tx.entities().find(AccountVev.INSTANCE.key(key))).isEmpty());
+            }
+        }
+    }
+
+    @Test
     void checkoutRejectsRetainedTempTypesBeforeParsingConfiguration() throws SQLException {
         database.installHostileTempDomainTripwire();
         Connection hostileConnection = database.openHostileTempDomainConnection();
@@ -1584,6 +4081,83 @@ final class VevPostgresIntegrationTest {
                         return cleanDataSource.getConnection();
                     }
                     return nonClosing(retainedConnection);
+                });
+    }
+
+    private static DataSource binaryResultDataSource(DataSource source, AtomicReference<byte[]> borrowed, boolean corrupt) {
+        return (DataSource) Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(source, method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, operation, parameters) -> {
+                                Object value = invokeTarget(connection, operation, parameters);
+                                if (!(value instanceof PreparedStatement statement)) return value;
+                                return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                                        (statementProxy, call, inputs) -> {
+                                            Object output = invokeTarget(statement, call, inputs);
+                                            if (!(output instanceof java.sql.ResultSet rows)) return output;
+                                            return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{java.sql.ResultSet.class},
+                                                    (rowsProxy, access, positions) -> {
+                                                        Object cell = invokeTarget(rows, access, positions);
+                                                        if (access.getName().equals("getBytes") && cell instanceof byte[] bytes) {
+                                                            borrowed.set(bytes);
+                                                            if (corrupt && bytes.length > 0) bytes[0] ^= (byte) 0xff;
+                                                        }
+                                                        return cell;
+                                                    });
+                                        });
+                            });
+                });
+    }
+
+    private static Object invokeTarget(Object target, java.lang.reflect.Method method, Object[] arguments) throws Throwable {
+        try {
+            return method.invoke(target, arguments);
+        } catch (InvocationTargetException failure) {
+            throw failure.getCause();
+        }
+    }
+
+    private static DataSource observingOrderedDataSource(DataSource source, AtomicReference<String> captured, String fault) {
+        return (DataSource) Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(source, method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, operation, parameters) -> {
+                                Object prepared = invokeTarget(connection, operation, parameters);
+                                if (!operation.getName().equals("prepareStatement") || !(parameters[0] instanceof String sql)
+                                        || !sql.contains("\"vev_it\".\"ranked_item\"")) return prepared;
+                                captured.set(sql);
+                                var statement = (PreparedStatement) prepared;
+                                return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{PreparedStatement.class},
+                                        (statementProxy, statementMethod, statementArguments) -> {
+                                            Object answer = invokeTarget(statement, statementMethod, statementArguments);
+                                            if (fault.equals("statementClose") && statementMethod.getName().equals("close")) throw new SQLException("Synthetic ordered statement cleanup failure");
+                                            if (!(answer instanceof ResultSet rows) || !fault.equals("resultClose")) return answer;
+                                            return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{ResultSet.class},
+                                                    (resultProxy, resultMethod, resultArguments) -> {
+                                                        Object value = invokeTarget(rows, resultMethod, resultArguments);
+                                                        if (resultMethod.getName().equals("close")) throw new SQLException("Synthetic ordered result cleanup failure");
+                                                        return value;
+                                                    });
+                                        });
+                            });
+                });
+    }
+
+    private static DataSource entityStatementCountingDataSource(DataSource source, AtomicInteger count) {
+        return (DataSource) Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+                (proxy, method, arguments) -> {
+                    Object result = invokeTarget(source, method, arguments);
+                    if (!(result instanceof Connection connection)) return result;
+                    return Proxy.newProxyInstance(VevPostgresIntegrationTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+                            (connectionProxy, operation, parameters) -> {
+                                if (operation.getName().equals("prepareStatement") && parameters[0] instanceof String sql
+                                        && sql.contains("\"vev_it\".")) count.incrementAndGet();
+                                return invokeTarget(connection, operation, parameters);
+                            });
                 });
     }
 

@@ -1,0 +1,54 @@
+{
+  "format": "vev-schema",
+  "formatVersion": 1,
+  "postgresqlMajor": 18,
+  "profile": "tenant-record-v1",
+  "model": "example.BillingModel",
+  "fingerprint": "<model fingerprint>",
+  "entities": [
+    {
+      "javaType": "example.Account",
+      "schema": "ledger",
+      "table": "account",
+      "appendOnly": false,
+      "maximumRows": 1000,
+      "columns": [
+        {"name": "id", "javaType": "java.lang.Long", "databaseType": "bigint", "nullable": false, "role": "ID", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
+        {"name": "tenant_id", "javaType": "java.util.UUID", "databaseType": "uuid", "nullable": false, "role": "TENANT", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
+        {"name": "version", "javaType": "java.lang.Integer", "databaseType": "integer", "nullable": false, "role": "VERSION", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
+        {"name": "display_name", "javaType": "java.lang.String", "databaseType": "character varying", "nullable": false, "role": "VALUE", "maximumLength": 255, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
+        {"name": "balance", "javaType": "java.math.BigDecimal", "databaseType": "numeric", "nullable": false, "role": "VALUE", "maximumLength": 0, "numericPrecision": 19, "numericScale": 2, "enumNames": []},
+        {"name": "alias", "javaType": "java.lang.String", "databaseType": "character varying", "nullable": true, "role": "VALUE", "maximumLength": 64, "numericPrecision": 0, "numericScale": 0, "enumNames": []}
+      ],
+      "primaryKey": ["tenant_id", "id"],
+      "indexes": [
+        {"name": "account_display_name_idx", "method": "btree", "unique": false, "columns": ["tenant_id", "display_name", "id"]},
+        {"name": "account_alias_idx", "method": "btree", "unique": false, "columns": ["tenant_id", "alias", "id"]}
+      ],
+      "uniqueConstraints": [],
+      "checkConstraints": [],
+      "references": [],
+      "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": "tenant_id", "setting": "vev.tenant_id"},
+      "privileges": {"select": true, "insert": ["id", "tenant_id", "version", "display_name", "balance", "alias"], "update": ["version", "display_name", "balance", "alias"], "delete": false}
+    },
+    {
+      "javaType": "example.AuditEvent",
+      "schema": "ledger",
+      "table": "audit_event",
+      "appendOnly": true,
+      "maximumRows": 1000,
+      "columns": [
+        {"name": "id", "javaType": "java.util.UUID", "databaseType": "uuid", "nullable": false, "role": "ID", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
+        {"name": "tenant_id", "javaType": "java.util.UUID", "databaseType": "uuid", "nullable": false, "role": "TENANT", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []},
+        {"name": "occurred_at", "javaType": "java.time.Instant", "databaseType": "timestamptz", "nullable": false, "role": "VALUE", "maximumLength": 0, "numericPrecision": 0, "numericScale": 0, "enumNames": []}
+      ],
+      "primaryKey": ["tenant_id", "id"],
+      "indexes": [],
+      "uniqueConstraints": [],
+      "checkConstraints": [],
+      "references": [],
+      "rowSecurity": {"enabled": true, "forced": true, "tenantColumn": "tenant_id", "setting": "vev.tenant_id"},
+      "privileges": {"select": true, "insert": ["id", "tenant_id", "occurred_at"], "update": [], "delete": false}
+    }
+  ]
+}

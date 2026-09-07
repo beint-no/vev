@@ -3,6 +3,7 @@ package no.beint.vev.pg;
 import no.beint.vev.ModelIdentity;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
+import no.beint.vev.pg.spi.PgTenantEntityPlan;
 import org.junit.jupiter.api.Test;
 
 import java.util.AbstractCollection;
@@ -12,6 +13,7 @@ import java.util.Iterator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 final class PgModelBoundsTest {
     private static final ModelIdentity IDENTITY = new ModelIdentity(
@@ -21,6 +23,32 @@ final class PgModelBoundsTest {
             "id", PgCodecs.INTEGER, false, PgColumn.Role.ID, 0, 0, 0);
     private static final PgColumn TENANT = new PgColumn(
             "tenant_id", PgCodecs.INTEGER, false, PgColumn.Role.TENANT, 0, 0, 0);
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void tenantRegistryMetadataIsCapturedOnceAndRejectsUnboundedOrNullEntries() {
+        var reference = new PgTenantReference("tenant_fk", "registry", "tenant", "id", no.beint.vev.VevTenantReference.OnDelete.CASCADE);
+        var source = plan(List.of(ID, TENANT));
+        for (String variant : List.of("valid", "two", "null")) {
+            var references = new java.util.ArrayList<PgTenantReference>();
+            references.add(variant.equals("null") ? null : reference);
+            if (variant.equals("two")) references.add(reference);
+            var reads = new java.util.concurrent.atomic.AtomicInteger();
+            var decorated = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class}, (proxy, method, arguments) -> {
+                        if (method.getName().equals("tenantReferences")) { reads.incrementAndGet(); return references; }
+                        return method.invoke(source, arguments);
+                    });
+            if (variant.equals("valid")) {
+                var model = new PgModel<>(IDENTITY, List.of(decorated));
+                references.clear();
+                assertEquals(List.of(reference), model.frozenPlan(decorated).tenantReferences());
+                assertEquals(1, reads.get());
+            } else if (variant.equals("null")) {
+                assertThrows(NullPointerException.class, () -> new PgModel<>(IDENTITY, List.of(decorated)));
+            } else assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(decorated)), variant);
+        }
+    }
 
     @Test
     void modelDoesNotTrustCollectionSizeBeforeApplyingItsEntityBound() {
@@ -77,10 +105,549 @@ final class PgModelBoundsTest {
         assertThrows(IllegalArgumentException.class, () -> PgModel.of(IDENTITY, plans));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void orderedIndexMetadataRejectsUnsafePositionsTypesRolesAndIndexBudgets() {
+        for (String variant : List.of("valid", "descending", "negative", "outside", "sameColumn", "tenant", "idFilter", "nullableOrder", "wrongType", "wrongNullability", "longString", "keyBudget")) {
+            var filter = new PgColumn("filter", PgCodecs.STRING, true, PgColumn.Role.VALUE, variant.equals("keyBudget") ? 256 : 64, 0, 0);
+            var order = new PgColumn("ordering", PgCodecs.STRING, variant.equals("nullableOrder"), PgColumn.Role.VALUE,
+                    variant.equals("longString") ? 257 : variant.equals("keyBudget") ? 256 : 64, 0, 0);
+            var source = plan(List.of(ID, TENANT, filter, order));
+            var indexes = new java.util.concurrent.atomic.AtomicReference<List<PgQueryIndex<TestModel, TestEntity, Integer, ?>>>();
+            var capturedSource = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class},
+                    (proxy, method, arguments) -> method.getName().equals("indexes") ? indexes.get() : method.invoke(source, arguments));
+            int orderPosition = switch (variant) {
+                case "negative" -> -1;
+                case "outside" -> 4;
+                case "sameColumn" -> 2;
+                case "tenant" -> 1;
+                default -> 3;
+            };
+            var direction = variant.equals("descending") ? no.beint.vev.VevIndex.Direction.DESC : no.beint.vev.VevIndex.Direction.ASC;
+            Class<?> orderType = variant.equals("wrongType") ? Object.class : String.class;
+            if (variant.equals("idFilter")) {
+                indexes.set(List.of(new PgRequiredOrderedIndex<>(capturedSource, "ordered_idx", 0, Integer.class, 3, String.class, no.beint.vev.VevIndex.Direction.ASC)));
+            } else if (variant.equals("wrongNullability")) {
+                indexes.set(List.of(new PgRequiredOrderedIndex<>(capturedSource, "ordered_idx", 2, String.class, 3, String.class, no.beint.vev.VevIndex.Direction.ASC)));
+            } else {
+                indexes.set(List.of(new PgNullableOrderedIndex<>(capturedSource, "ordered_idx", 2, String.class,
+                        orderPosition, orderType, direction)));
+            }
+            if (!variant.equals("valid") && !variant.equals("descending")) {
+                assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(capturedSource)), variant);
+            } else {
+                var model = new PgModel<>(IDENTITY, List.of(capturedSource));
+                var sql = model.frozenPlan(capturedSource).indexSql(indexes.get().getFirst());
+                org.junit.jupiter.api.Assertions.assertTrue(sql.equalAfter().contains("(\"ordering\", \"id\") " + (variant.equals("descending") ? "<" : ">") + " (?, ?)"));
+                org.junit.jupiter.api.Assertions.assertTrue(sql.isNullAfter().contains(variant.equals("descending") ? "ORDER BY \"ordering\" DESC, \"id\" DESC LIMIT ?" : "ORDER BY \"ordering\", \"id\" LIMIT ?"));
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void orderedCursorRejectsErasedWrongTypesAndKeysFromAnotherPlan() {
+        var source = plan(List.of(ID, TENANT));
+        var other = plan(List.of(ID, TENANT));
+        var index = new PgRequiredOrderedIndex<>(source, "ordered_idx", 0, Integer.class, 1, String.class, no.beint.vev.VevIndex.Direction.ASC);
+        assertThrows(IllegalArgumentException.class, () -> index.cursor("a", other.key(1)));
+        assertThrows(IllegalArgumentException.class, () -> new PgOrderedCursor((PgOrderedIndex) index, 1, source.key(1)));
+        assertThrows(NullPointerException.class, () -> index.cursor(null, source.key(1)));
+        assertThrows(NullPointerException.class, () -> new PgRequiredOrderedIndex<>(source,
+                "ordered_idx", 0, Integer.class, 1, String.class, null));
+    }
+
+    @Test
+    void uniqueMetadataCapturesPositionsAndEnforcesDatabaseAndTenantBounds() {
+        var positions = new java.util.ArrayList<>(List.of(1, 2));
+        var unique = new PgUnique("test_entity_code_key", positions);
+        positions.set(0, 0);
+        assertEquals(List.of(1, 2), unique.columnIndexes());
+        assertThrows(UnsupportedOperationException.class, () -> unique.columnIndexes().set(0, 0));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad.name", List.of(1, 2)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad", List.of(1, 1)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad", List.of(1, -1)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad", List.of(1, 64)));
+        assertThrows(IllegalArgumentException.class, () -> new PgUnique("bad",
+                java.util.stream.IntStream.range(0, 33).boxed().toList()));
+        var code = new PgColumn("code", PgCodecs.STRING, true, PgColumn.Role.VALUE, 64, 0, 0);
+        for (List<Integer> invalid : List.of(List.of(0, 2), List.of(2, 1), List.of(1, 0, 2), List.of(1, 3))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT, code), List.of(new PgUnique("bad", invalid))))));
+        }
+        var largeCode = new PgColumn("code", PgCodecs.STRING, true, PgColumn.Role.VALUE, 1024, 0, 0);
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT, largeCode), List.of(unique)))));
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT, code), java.util.stream.IntStream.range(0, 17)
+                        .mapToObj(index -> new PgUnique("key_" + index, List.of(1, 2))).toList()))));
+    }
+
     private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(List<PgColumn> columns) {
-        return new PgEntityPlan<>() {
+        return plan(columns, List.of());
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(List<PgColumn> columns, List<PgUnique> unique) {
+        return plan(columns, unique, no.beint.vev.VevPrimaryKey.Shape.TENANT_ID);
+    }
+
+    @Test
+    void physicalPrimaryKeysRequireTenantTraversalAndCaptureTheirExactOrder() {
+        for (var shape : List.of(no.beint.vev.VevPrimaryKey.Shape.ID, no.beint.vev.VevPrimaryKey.Shape.ID_TENANT)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(), shape))));
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(new PgUnique("id_tenant", List.of(0, 1))), shape))));
+            var model = new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(new PgUnique("tenant_id_key", List.of(1, 0))), shape)));
+            assertEquals(shape == no.beint.vev.VevPrimaryKey.Shape.ID ? List.of("id") : List.of("id", "tenant_id"),
+                    model.frozenPlans().getFirst().primaryKeyColumns());
+        }
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape) {
+        return plan(columns, unique, shape, List.of());
+    }
+
+    @Test
+    void defaultMetadataCannotOverrideStructuralRolesOrWeakenValueValidation() {
+        var column = new PgColumn("enabled", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0, "true");
+        assertEquals("true", column.defaultExpression());
+        column.validateValue(false);
+        assertThrows(IllegalArgumentException.class, () -> column.validateValue(null));
+        assertThrows(IllegalArgumentException.class, () -> column.validateValue("false"));
+        new PgColumn("optional", PgCodecs.BOOLEAN, true, PgColumn.Role.VALUE, 0, 0, 0, "true").validateValue(null);
+        assertEquals("", new PgColumn("plain", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0).defaultExpression());
+        for (PgColumn.Role role : List.of(PgColumn.Role.ID, PgColumn.Role.TENANT, PgColumn.Role.VERSION)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("structural", PgCodecs.INTEGER, false, role, 0, 0, 0, "0"));
+        }
+        for (String invalid : List.of(" ", "x".repeat(4097), "\0", "\uD800", "NULL", "null")) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("bad", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0, invalid));
+        }
+        assertThrows(NullPointerException.class, () -> new PgColumn("bad", PgCodecs.BOOLEAN, false, PgColumn.Role.VALUE, 0, 0, 0, null));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void runtimeBoundsCombinedDefaultAndCheckMetadataAcrossTheWholeModel() {
+        var columns = new java.util.ArrayList<>(List.of(ID, TENANT));
+        for (int index = 0; index < 48; index++) columns.add(new PgColumn("value_" + index, PgCodecs.INTEGER, false, PgColumn.Role.VALUE, 0, 0, 0, "x".repeat(4096)));
+        var checks = java.util.stream.IntStream.range(0, 16).mapToObj(index -> new PgCheck("check_" + index, "x".repeat(4096))).toList();
+        var base = plan(columns, List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks);
+        var sources = new java.util.ArrayList<PgEntityPlan<TestModel, ?, ?, Integer>>();
+        Class<?> marker = Object.class;
+        for (int index = 0; index < 65; index++) {
+            Class<?> javaType = marker = marker.arrayType();
+            String name = "default_budget_" + index;
+            var source = (PgEntityPlan<TestModel, ?, ?, Integer>) java.lang.reflect.Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class},
+                    (proxy, method, arguments) -> switch (method.getName()) {
+                        case "javaType" -> javaType;
+                        case "logicalName", "tableName" -> name;
+                        default -> method.invoke(base, arguments);
+                    });
+            sources.add(source);
+        }
+        assertEquals(64, new PgModel<>(IDENTITY, sources.subList(0, 64)).plans().size());
+        var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, sources));
+        assertEquals("Closed model exceeds the retained check/default-expression budget", failure.getMessage());
+    }
+
+    @Test
+    void capturesCheckMetadataAndRejectsDuplicatesAndHostileUnboundedLists() {
+        var checks = new java.util.ArrayList<>(List.of(new PgCheck("test_check", "(id > 0)")));
+        var source = plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks);
+        var model = new PgModel<>(IDENTITY, List.of(source));
+        checks.clear();
+        assertEquals(List.of(new PgCheck("test_check", "(id > 0)")), model.frozenPlans().getFirst().checkConstraints());
+        List<PgCheck> misleading = new AbstractList<>() {
+            @Override
+            public PgCheck get(int index) {
+                return new PgCheck("test_check", "true");
+            }
+
+            @Override
+            public int size() {
+                return Integer.MAX_VALUE;
+            }
+        };
+        for (List<PgCheck> invalid : List.of(misleading, List.of(new PgCheck("duplicate", "true"), new PgCheck("duplicate", "false")),
+                java.util.Collections.nCopies(33, new PgCheck("test_check", "true")))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, invalid))));
+        }
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks) {
+        return plan(columns, unique, shape, checks, () -> 1000);
+    }
+
+    @Test
+    void binaryColumnsRequireExactlyOneMatchingTypedDatabaseBound() {
+        var payload = new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, 32, 0, 0);
+        var bound = PgCheck.binaryMaximum("payload_max", "payload", 32);
+        var model = new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, payload), List.of(),
+                no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound))));
+        assertEquals(List.of(bound), model.frozenPlans().getFirst().checkConstraints());
+        assertEquals(-1, payload.expectedTypeModifier());
+        payload.validateValue(no.beint.vev.Binary.copyOf(new byte[32]));
+        assertThrows(IllegalArgumentException.class, () -> payload.validateValue(no.beint.vev.Binary.copyOf(new byte[33])));
+        assertThrows(IllegalArgumentException.class, () -> payload.validateValue(new byte[32]));
+        for (List<PgCheck> checks : List.<List<PgCheck>>of(List.of(), List.of(new PgCheck("payload_max", bound.expression())),
+                List.of(PgCheck.binaryMaximum("payload_max", "payload", 31)),
+                List.of(PgCheck.binaryMaximum("payload_max", "other_column", 32)),
+                List.of(bound, PgCheck.binaryMaximum("duplicate_max", "payload", 32)))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT, payload), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks))));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound)))));
+        for (var role : List.of(PgColumn.Role.ID, PgColumn.Role.TENANT, PgColumn.Role.VERSION)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.BINARY, false, role, 32, 0, 0));
+        }
+        for (int length : List.of(-1, 0, no.beint.vev.Binary.MAXIMUM_LENGTH + 1)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, length, 0, 0));
+            assertThrows(IllegalArgumentException.class, () -> PgCheck.binaryMaximum("payload_max", "payload", length));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", PgCheck.Kind.BINARY_MAXIMUM, "payload", 32));
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", "true", PgCheck.Kind.EXACT, "", 32));
+        assertThrows(IllegalArgumentException.class, () -> PgCheck.binaryMaximum("payload_max", "bad.name", 32));
+        var large = new PgColumn("payload", PgCodecs.BINARY, true, PgColumn.Role.VALUE, 2048, 0, 0);
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, large),
+                List.of(new PgUnique("payload_key", List.of(1, 2))), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID,
+                List.of(PgCheck.binaryMaximum("payload_max", "payload", 2048))))));
+    }
+
+    @Test
+    void textMetadataSeparatesCharacterBoundsFromBinaryBytesAndVarcharTypeModifiers() {
+        var text = new PgColumn("payload", PgCodecs.TEXT, true, PgColumn.Role.VALUE, 32, 0, 0);
+        var bound = PgCheck.textMaximum("payload_max", "payload", 32);
+        var model = new PgModel<>(IDENTITY, List.of(plan(List.of(ID, TENANT, text), List.of(),
+                no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound))));
+        assertEquals(List.of(bound), model.frozenPlans().getFirst().checkConstraints());
+        assertEquals(-1, text.expectedTypeModifier());
+        assertEquals(64 + 4 * 32, text.maximumRetainedBytes());
+        text.validateValue("🙂".repeat(32));
+        assertThrows(IllegalArgumentException.class, () -> text.validateValue("🙂".repeat(33)));
+        for (List<PgCheck> checks : List.<List<PgCheck>>of(List.of(), List.of(PgCheck.binaryMaximum("payload_max", "payload", 32)),
+                List.of(PgCheck.textMaximum("payload_max", "payload", 31)), List.of(PgCheck.textMaximum("payload_max", "other", 32)),
+                List.of(bound, PgCheck.textMaximum("duplicate", "payload", 32)))) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT, text), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, checks))));
+        }
+        var varchar = new PgColumn("payload", PgCodecs.STRING, true, PgColumn.Role.VALUE, 32, 0, 0);
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                List.of(plan(List.of(ID, TENANT, varchar), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(bound)))));
+        for (var role : List.of(PgColumn.Role.ID, PgColumn.Role.TENANT, PgColumn.Role.VERSION)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.TEXT, false, role, 32, 0, 0));
+        }
+        for (int length : List.of(-1, 0, no.beint.vev.VevText.MAXIMUM_LENGTH + 1)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgColumn("payload", PgCodecs.TEXT, true, PgColumn.Role.VALUE, length, 0, 0));
+            assertThrows(IllegalArgumentException.class, () -> PgCheck.textMaximum("payload_max", "payload", length));
+        }
+        assertThrows(IllegalArgumentException.class, () -> new PgCheck("payload_max", bound.expression(), PgCheck.Kind.BINARY_MAXIMUM, "payload", 32));
+        var large = new PgColumn("payload", PgCodecs.TEXT, true, PgColumn.Role.VALUE, 1048576, 0, 0);
+        var source = plan(List.of(ID, TENANT, large), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID,
+                List.of(PgCheck.textMaximum("payload_max", "payload", 1048576)));
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+    }
+
+    @Test
+    void localTimeRequiresExactMicrosecondsWithoutLegacyJdbcCoercion() {
+        var time = new PgColumn("clock", PgCodecs.LOCAL_TIME, true, PgColumn.Role.VALUE, 0, 0, 0);
+        assertEquals(-1, time.expectedTypeModifier());
+        time.validateValue(java.time.LocalTime.MIDNIGHT);
+        time.validateValue(java.time.LocalTime.of(23, 59, 59, 999999000));
+        time.validateValue(null);
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.time.LocalTime.MAX));
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.time.LocalTime.ofNanoOfDay(1)));
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.sql.Time.valueOf("12:00:00")));
+        assertThrows(IllegalArgumentException.class, () -> time.validateValue(java.time.OffsetTime.of(java.time.LocalTime.NOON, java.time.ZoneOffset.UTC)));
+    }
+
+    @Test
+    void capturesRowLimitsOnceAndKeepsTheMaterializedResultBudget() {
+        var bound = new java.util.concurrent.atomic.AtomicInteger(8);
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        List<PgColumn> columns = List.of(ID, TENANT, new PgColumn("body", PgCodecs.STRING, false, PgColumn.Role.VALUE, 65535, 0, 0));
+        var source = plan(columns, List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(), () -> {
+            calls.incrementAndGet();
+            return bound.get();
+        });
+        var model = new PgModel<>(IDENTITY, List.of(source));
+        bound.set(1000);
+        var captured = model.frozenPlans().getFirst();
+        assertEquals(8, captured.maximumRows());
+        captured.requireRowCount(8);
+        captured.requireRowCount(0);
+        assertThrows(IllegalArgumentException.class, () -> captured.requireRowCount(9));
+        assertEquals(1, calls.get());
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+        for (int invalid : List.of(-1, 0, 1001, Integer.MAX_VALUE)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY,
+                    List.of(plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(), () -> invalid))));
+        }
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks,
+            java.util.function.IntSupplier maximumRows) {
+        return plan(columns, unique, shape, checks, maximumRows, () -> PgEntityPlan.ABI_VERSION);
+    }
+
+    @Test
+    void rejectsUnversionedAndIncompatiblePlansBeforeCapturingOtherMetadata() {
+        for (Integer abi : java.util.Arrays.asList(null, -1, 0, 1, 2, 3, 4, 5, 6, PgEntityPlan.ABI_VERSION + 1, Integer.MAX_VALUE)) {
+            var source = plan(null, null, null, null, () -> {
+                throw new AssertionError("Incompatible plans must fail before metadata access");
+            }, abi == null ? null : () -> abi);
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+            assertEquals("Generated PostgreSQL plan ABI mismatch: runtime requires " + PgEntityPlan.ABI_VERSION
+                    + ", plan declares " + (abi == null ? 0 : abi)
+                    + "; recompile mappings with matching Vev processor/runtime versions", failure.getMessage());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void readOnlyMetadataCannotAcquireMutationCapabilitiesOrCompileWriteStatements() {
+        var source = plan(List.of(ID, TENANT));
+        for (Class<?> extra : List.of(no.beint.vev.AssignedEntityType.class, no.beint.vev.VersionedEntityType.class,
+                no.beint.vev.pg.spi.PgGeneratedEntityPlan.class, no.beint.vev.DeletableEntityType.class)) {
+            var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class, extra},
+                    (proxy, method, arguments) -> method.getName().equals("creationType") ? Object.class : method.invoke(source, arguments));
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(invalid)));
+            assertEquals("Read-only plans cannot expose mutation capabilities", failure.getMessage());
+        }
+        for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgIdentityEntityPlan.class)) {
+            var valid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class, extra},
+                    (proxy, method, arguments) -> method.getName().equals("externalIncomingReferences") ? false : method.invoke(source, arguments));
+            var captured = new PgModel<>(IDENTITY, List.of(valid)).frozenPlans().getFirst();
+            org.junit.jupiter.api.Assertions.assertTrue(captured.readOnly());
+            assertEquals(extra == no.beint.vev.pg.spi.PgIdentityEntityPlan.class, captured.generatedIdentity());
+            org.junit.jupiter.api.Assertions.assertNull(captured.creationType());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().insert());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().insertMultiple());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().update());
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().updateMultiple());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void deletionMetadataRequiresBothGeneratedIdentityAndVersionedSpiCapabilities() {
+        var source = plan(List.of(ID, TENANT));
+        for (Class<?> extra : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgGeneratedEntityPlan.class,
+                no.beint.vev.pg.spi.PgVersionedEntityPlan.class)) {
+            var inconsistent = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{extra, PgTenantEntityPlan.class, no.beint.vev.DeletableEntityType.class},
+                    (proxy, method, arguments) -> {
+                        if (method.getName().equals("creationType")) return Object.class;
+                        if (method.getName().equals("columns")) throw new AssertionError("Invalid capabilities must fail before column capture");
+                        return method.invoke(source, arguments);
+                    });
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(inconsistent)));
+            assertEquals("Physical deletion requires a versioned generated identity plan", failure.getMessage());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void commonOrReadOnlyMetadataDoesNotImplicitlyGrantTenantOwnership() {
+        var source = plan(List.of(ID, TENANT));
+        for (Class<?> kind : List.of(PgEntityPlan.class, no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class,
+                no.beint.vev.pg.spi.PgIdentityEntityPlan.class)) {
+            var missing = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{kind}, (proxy, method, arguments) -> {
+                        if (method.getName().equals("columns")) throw new AssertionError("Ownership must be explicit before column capture");
+                        return method.invoke(source, arguments);
+                    });
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(missing)));
+            assertEquals("A PostgreSQL entity plan must explicitly declare tenant ownership or shared read-only access", failure.getMessage());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void sharedCapabilitiesRejectTenantRolesMutationMarkersAndMissingTransactionAuthority() {
+        var source = plan(List.of(ID));
+        for (String variant : List.of("tenantMarker", "tenantColumn", "tenantPrimaryKey", "assigned", "generated", "versioned", "deleted", "unsupportedScope")) {
+            var kinds = new java.util.ArrayList<Class<?>>();
+            kinds.add(no.beint.vev.pg.spi.PgSharedEntityPlan.class);
+            switch (variant) {
+                case "tenantMarker" -> kinds.add(PgTenantEntityPlan.class);
+                case "assigned" -> kinds.add(no.beint.vev.AssignedEntityType.class);
+                case "generated" -> kinds.add(no.beint.vev.pg.spi.PgGeneratedEntityPlan.class);
+                case "versioned" -> kinds.add(no.beint.vev.VersionedEntityType.class);
+                case "deleted" -> kinds.add(no.beint.vev.DeletableEntityType.class);
+                default -> { }
+            }
+            var invalid = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), kinds.toArray(Class<?>[]::new), (proxy, method, arguments) -> switch (method.getName()) {
+                        case "tenantCodec", "tenantColumn", "tenantKeyOf" -> throw new AssertionError("Shared plans have no tenant metadata");
+                        case "externalIncomingReferences" -> false;
+                        case "scopeType" -> variant.equals("unsupportedScope") ? Object.class : Integer.class;
+                        case "primaryKeyShape" -> variant.equals("tenantPrimaryKey") ? no.beint.vev.VevPrimaryKey.Shape.TENANT_ID : no.beint.vev.VevPrimaryKey.Shape.ID;
+                        case "columns" -> variant.equals("tenantColumn") ? List.of(ID, TENANT) : List.of(ID);
+                        default -> method.invoke(source, arguments);
+                    });
+            var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(invalid)), variant);
+            String expected = switch (variant) {
+                case "tenantMarker", "generated" -> "mutually exclusive";
+                case "tenantColumn", "tenantPrimaryKey" -> "no tenant column and an ID-only primary key";
+                case "unsupportedScope" -> "Tenant keys require an equality-stable";
+                default -> "cannot expose mutation capabilities";
+            };
+            org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains(expected), failure.getMessage());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void externalIncomingChoiceIsCapturedOnceOnlyAfterReadOnlyCapabilitiesAreVerified() {
+        var base = plan(List.of(ID, TENANT));
+        for (boolean external : List.of(false, true)) {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            var source = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgReadOnlyEntityPlan.class, PgTenantEntityPlan.class},
+                    (proxy, method, arguments) -> {
+                        if (method.getName().equals("externalIncomingReferences")) {
+                            if (calls.incrementAndGet() != 1) throw new AssertionError("Read-only closure choice must be captured once");
+                            return external;
+                        }
+                        return method.invoke(base, arguments);
+                    });
+            var frozen = new PgModel<>(IDENTITY, List.of(source)).frozenPlan(source);
+            for (int read = 0; read < 3; read++) assertEquals(external, frozen.externalIncomingReferences());
+            assertEquals(1, calls.get());
+            org.junit.jupiter.api.Assertions.assertNull(frozen.sql().insert());
+            org.junit.jupiter.api.Assertions.assertNull(frozen.sql().update());
+        }
+        var writable = new PgModel<>(IDENTITY, List.of(base)).frozenPlan(base);
+        org.junit.jupiter.api.Assertions.assertFalse(writable.externalIncomingReferences());
+    }
+
+    @Test
+    void sharedOnlyModelsCaptureTheExplicitScopeTypeOnceWithoutTenantColumnMetadata() {
+        for (Class<?> type : List.of(Integer.class, Long.class, Short.class, String.class, java.util.UUID.class)) {
+            var calls = new java.util.concurrent.atomic.AtomicInteger();
+            var source = sharedScopePlan(() -> {
+                if (calls.incrementAndGet() != 1) throw new AssertionError("Shared scope type must be captured once");
+                return type;
+            });
+            var model = new PgModel<>(IDENTITY, List.of(source));
+            var captured = model.frozenPlan(source);
+            assertEquals(type, model.tenantType());
+            assertEquals(type, captured.scopeType());
+            org.junit.jupiter.api.Assertions.assertFalse(captured.sql().find().contains("tenant_id"));
+            org.junit.jupiter.api.Assertions.assertNull(captured.sql().insert());
+            assertThrows(IllegalStateException.class, captured::tenantCodec);
+            assertThrows(IllegalStateException.class, captured::tenantColumn);
+            assertEquals(1, calls.get());
+        }
+    }
+
+    @Test
+    void sharedScopeMetadataMustBeNonNullBoxedAndCompatibleWithMappedTenantOwnership() {
+        assertThrows(NullPointerException.class, () -> new PgModel<>(IDENTITY, List.of(sharedScopePlan(() -> null))));
+        for (Class<?> invalid : List.of(void.class, int.class, Object.class, Boolean.class, java.math.BigDecimal.class, Integer[].class)) {
+            assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(sharedScopePlan(() -> invalid))));
+        }
+        var tenant = plan(List.of(ID, TENANT));
+        var mismatch = sharedScopePlan(() -> String.class);
+        var failure = assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(tenant, mismatch)));
+        org.junit.jupiter.api.Assertions.assertTrue(failure.getMessage().contains("same tenant key type"), failure.getMessage());
+        assertEquals(Integer.class, new PgModel<>(IDENTITY, List.of(tenant, sharedScopePlan(() -> Integer.class))).tenantType());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static PgEntityPlan<TestModel, SharedScopeSnapshot, Integer, Integer> sharedScopePlan(java.util.function.Supplier<Class<?>> scopeType) {
+        var source = plan(List.of(ID));
+        return (PgEntityPlan<TestModel, SharedScopeSnapshot, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                PgModelBoundsTest.class.getClassLoader(), new Class<?>[]{no.beint.vev.pg.spi.PgSharedEntityPlan.class},
+                (proxy, method, arguments) -> switch (method.getName()) {
+                    case "externalIncomingReferences" -> false;
+                    case "scopeType" -> scopeType.get();
+                    case "javaType" -> SharedScopeSnapshot.class;
+                    case "logicalName" -> "SharedScopeSnapshot";
+                    case "tableName" -> "shared_scope_snapshot";
+                    case "primaryKeyShape" -> no.beint.vev.VevPrimaryKey.Shape.ID;
+                    case "tenantCodec", "tenantColumn", "tenantKeyOf" -> throw new AssertionError("Shared rows have no tenant metadata");
+                    default -> method.invoke(source, arguments);
+                });
+    }
+
+    private record SharedScopeSnapshot(Integer id) {
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void capturesTenantMetadataOnceAndRetainsDirectSnapshotAccess() {
+        var source = plan(List.of(ID, TENANT));
+        var codecCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var columnCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var keyCalls = new java.util.concurrent.atomic.AtomicInteger();
+        var counted = (PgEntityPlan<TestModel, TestEntity, Integer, Integer>) java.lang.reflect.Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[]{PgTenantEntityPlan.class}, (proxy, method, arguments) -> {
+                    if (method.getName().equals("tenantCodec") && codecCalls.incrementAndGet() != 1) {
+                        throw new AssertionError("Tenant codec must be captured once");
+                    }
+                    if (method.getName().equals("tenantColumn") && columnCalls.incrementAndGet() != 1) {
+                        throw new AssertionError("Tenant column must be captured once");
+                    }
+                    if (method.getName().equals("tenantKeyOf")) keyCalls.incrementAndGet();
+                    return method.invoke(source, arguments);
+                });
+        var model = new PgModel<>(IDENTITY, List.of(counted));
+        var captured = model.frozenPlan(counted);
+        for (int iteration = 0; iteration < 3; iteration++) {
+            assertEquals(PgCodecs.INTEGER, captured.tenantCodec());
+            assertEquals("tenant_id", captured.tenantColumn());
+            assertEquals(7, captured.tenantKeyOf(new TestEntity(11, 7)));
+        }
+        assertEquals(1, codecCalls.get());
+        assertEquals(1, columnCalls.get());
+        assertEquals(3, keyCalls.get());
+    }
+
+    @Test
+    void capturesGeneratedPlanAbiOnceDuringModelConstruction() {
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var source = plan(List.of(ID, TENANT), List.of(), no.beint.vev.VevPrimaryKey.Shape.TENANT_ID, List.of(),
+                () -> 1000, () -> calls.incrementAndGet() == 1 ? PgEntityPlan.ABI_VERSION : 0);
+        var model = new PgModel<>(IDENTITY, List.of(source));
+        model.frozenPlans().getFirst().requireRowCount(1);
+        assertEquals(1, calls.get());
+        assertThrows(IllegalArgumentException.class, () -> new PgModel<>(IDENTITY, List.of(source)));
+        assertEquals(2, calls.get());
+    }
+
+    private static PgEntityPlan<TestModel, TestEntity, Integer, Integer> plan(
+            List<PgColumn> columns, List<PgUnique> unique, no.beint.vev.VevPrimaryKey.Shape shape, List<PgCheck> checks,
+            java.util.function.IntSupplier maximumRows, java.util.function.IntSupplier abi) {
+        return new PgTenantEntityPlan<>() {
+            @Override
+            public int generatedPlanAbi() {
+                return abi == null ? PgTenantEntityPlan.super.generatedPlanAbi() : abi.getAsInt();
+            }
+
+            @Override
+            public int maximumRows() {
+                return maximumRows.getAsInt();
+            }
+
+            @Override
+            public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape() {
+                return shape;
+            }
+
             @Override
             public Class<TestEntity> javaType() {
+                if (columns == null) throw new AssertionError("Incompatible plans must fail before any metadata access");
                 return TestEntity.class;
             }
 
@@ -130,8 +697,18 @@ final class PgModelBoundsTest {
             }
 
             @Override
-            public List<PgIndex<TestModel, TestEntity, Integer, ?>> indexes() {
+            public List<PgQueryIndex<TestModel, TestEntity, Integer, ?>> indexes() {
                 return List.of();
+            }
+
+            @Override
+            public List<PgUnique> uniqueConstraints() {
+                return unique;
+            }
+
+            @Override
+            public List<PgCheck> checkConstraints() {
+                return checks;
             }
 
             @Override
@@ -140,8 +717,8 @@ final class PgModelBoundsTest {
             }
 
             @Override
-            public TestEntity instantiate(Object[] columnValues) {
-                return new TestEntity((Integer) columnValues[0], (Integer) columnValues[1]);
+            public TestEntity readRow(java.sql.ResultSet resultSet, int firstColumn) {
+                throw new UnsupportedOperationException("Metadata-only fixture has no JDBC hydration path");
             }
 
             @Override

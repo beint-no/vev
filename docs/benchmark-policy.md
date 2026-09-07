@@ -11,7 +11,7 @@ The preview comparison baseline is Hibernate ORM `8.0.0.Beta1`, which itself is 
 A benchmark report is publishable only when it records:
 
 - Vev, benchmark, and comparison commit identifiers;
-- JDK vendor and exact JDK 26 version;
+- JDK vendor and exact JDK 27 version;
 - operating system, architecture, CPU, memory, and power mode;
 - PostgreSQL version, JDBC driver version, and database location;
 - Jakarta Persistence and Hibernate versions, including milestone/beta labels;
@@ -57,11 +57,26 @@ A future Vev `EntityAgent`-shaped facade workload should first be compared with 
 
 The current Vev lane measures the native lexical transaction/generated-plan API, while the Hibernate lane obtains `StatelessSession` through `createEntityAgent()` and uses provider selection queries for bounded reads. Vev's immutable generated query objects are constructed once outside timing and reused; a Hibernate selection query is necessarily created and bound against the newly opened agent during each invocation. Both measured transaction envelopes establish and re-attest the same serializable PostgreSQL safety context. This is a comparison of equivalent stateless outcomes where parity checks pass, not a claim that both lanes exercise the same public API, query lifecycle, SQL strategy, object identifier representation, or connection-management implementation.
 
+Point and ordered batch reads use JDBC fetch size zero in both current lanes.
+Bounded page queries set their explicit limit-plus-sentinel fetch size separately.
+The Hibernate lane's former global fetch size of 256 did not match Vev's point
+and batch setting; reports covering that configuration must disclose the mismatch.
+Correcting a benchmark setting requires a separately identified reference build
+and retained original results, rather than silently replacing earlier samples.
+
 Reports for the current lanes must also disclose that Vev reuses its runtime and preconstructed query objects while Hibernate opens and closes an agent and creates/binds each selection query per invocation; Vev maps an immutable record with a tenant-scoped scalar identifier while Hibernate maps a mutable entity with a composite `IdClass`; and, for every bounded page with a sentinel, Vev materializes only the public limit then advances the result set once while Hibernate's list query materializes the sentinel entity too. Those differences are properties of the compared APIs and implementations, not noise to remove from the result.
 
 The [current A–B–B–A bundle](../benchmark-results/final-b0b026d19959b4ca848174e8f2ab4c909363d208/report.md) exercises `@VevIndex` equality queries and the all-or-nothing 32-row update on the frozen implementation commit. Its latency comparison is rejected: post-A2 telemetry showed severe unrelated CPU and storage activity, and without comparable pre-run or in-run telemetry host interference cannot be excluded. Every sample is retained without filtering. Stable normalized-allocation measurements may be interpreted only for the exact published workloads and environment; the campaign supports no latency conclusion. It does not cover typed-array `insertMultiple`. The [earlier bundle](../benchmark-results/final-4b2b23f10d4352d86834c4f43993d1288ba82020/report.md) remains historical read-only evidence and must not be attributed to the current tranche. Hibernate ORM `8.0.0.Beta1` remains a prerelease baseline, not evidence about a final Hibernate ORM 8 release.
 
 ## Interpretation
+
+The [direct-reader campaign](../benchmark-results/hydration-006078b/report.md)
+compares Vev before/after generated JDBC hydration and retains both the original
+and corrected-fetch-size Hibernate reference runs. The 256-key workload (255
+present rows and one missing result) allocated approximately 10.2 KB less per
+operation after the change; point-read allocation was essentially unchanged.
+Incomplete early telemetry and timing drift preclude a latency advantage claim.
+The report includes every run, raw results, environment details, and checksums.
 
 Do not describe Vev as faster, lower-allocation, or more scalable from one machine or one entity shape. Report absolute measurements and uncertainty first. A regression in any representative workload remains part of the result; it must not be hidden behind a favorable aggregate.
 

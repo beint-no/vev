@@ -1,6 +1,6 @@
 # Architecture
 
-> **Status: experimental design contract.** This document describes the direction of Vev 0.2, not a stable public API.
+> **Status: Vev 1.0 native architecture.** Stability covers the documented native API; the generated SPI and optional Jakarta milestone facade have separate compatibility rules.
 
 ## Native stateless kernel
 
@@ -15,20 +15,32 @@ One generated entity plan represents one accepted entity mapping and contains im
 - exact table and column identifiers;
 - typed JDBC binders and row readers;
 - identifier and tenant-key access where applicable;
-- identity-stable typed tokens for generated scalar equality indexes;
+- identity-stable typed tokens for generated scalar equality indexes, including explicit ASC/DESC value/ID ordering and typed composite cursors;
 - schema expectations needed to detect drift.
 
 The PostgreSQL runtime constructs and caches fixed statement shapes from that validated metadata. Raw SQL is not an entity-plan SPI, so a hand-written plan cannot replace a point read with an arbitrary statement.
 
 Generated plans are intended to be reusable because they do not retain a connection, transaction, loaded entity, or mutable query state. The `EntityAgent`-shaped facade, query, transaction, and execution-context lifecycles follow their documented Vev contracts.
 
+Vev invokes only validated canonical construction and direct component access on
+an entity. It compares persisted state column by column using the accepted scalar
+codecs; entity `equals`, `hashCode`, `toString`, and application helper methods do
+not participate in persistence. Helpers are allowed because they run only when
+application code calls them. Constructor transformations, custom component
+accessors, executable record initialization, and lifecycle callbacks remain
+outside the accepted snapshot contract.
+
 A mapped record returned by the facade is an ordinary detached snapshot. Vev does not promise that two reads of the same row return the same Java object. Mutation of that object does not schedule a database update. Writes occur only through explicit operations backed by generated plans.
 
-With the current immutable record profile, the facade can perform assigned-value insert, including a homogeneous bounded batch. Insert is permitted only because the verified schema forbids generated/default values, triggers, and rewrite rules; Vev compares every returned database snapshot with its input and prevents commit on a mismatch. The facade cannot safely discard the replacement state or explicit outcome of update or refresh, so those operations fail before SQL. Physical delete and create-capable upsert are absent from the native API and rejected by the facade. The native typed API returns the verified snapshot from insert and an exhaustive applied/missing/conflict result from a single versioned update.
+With the current immutable record profile, the facade can perform assigned-value insert, including a homogeneous bounded batch. Insert is permitted only because its assigned-ID capability requires explicit identifiers and VALUE components, including columns with declared physical defaults, and the verified schema forbids user triggers and rewrite rules; Vev compares every returned database snapshot with its input and prevents commit on a mismatch. The facade cannot safely discard the replacement state or explicit outcome of update or refresh, so those operations fail before SQL. The facade rejects physical delete and create-capable upsert. The native API additionally exposes opt-in [version-checked deletion](physical-deletion.md) for generated identities, with explicit deleted/conflict/missing outcomes and atomic batches. The native typed API returns the verified snapshot from insert and an exhaustive applied/missing/conflict result from a single versioned update.
 
 Native `insertMultiple` is one fixed set-based PostgreSQL statement: one typed array per column is expanded with ordinality, inserted, returned, restored to input order, and snapshot-verified. Duplicate keys fail before SQL. Native `updateMultiple` uses one fixed typed-array statement too. A materialized preflight must match every tenant, identifier, and expected version before its data-modifying CTE can update any row. Results are restored to input order and every non-version scalar plus the exact one-step version transition is verified. Duplicate keys fail before SQL; a stale, missing, malformed, or unexpectedly returned member poisons and rolls back the complete lexical transaction.
 
 The native execution path is `TransactionExecutor` to a lexical `ReadTx` or `WriteTx`, then `ReadEntities` or `WriteEntities`. The `vev-jakarta4` module adapts its selected `EntityAgent`-shaped operations onto that smaller native contract. It neither conforms to the complete `EntityAgent` contract nor implements the complete Jakarta Persistence provider surface.
+
+## Read-only capabilities
+
+[Read-only mappings](read-only-mappings.md) describe stored rows without granting mutation. Identity-column metadata is separate from creation capability; an optional stored version does not produce an update capability. The generated plan exposes only reads, the runtime compiles no write statements, and bootstrap requires SELECT-only grants with no sequence access. Lexical tenant scope remains mandatory. Explicit [shared reference mappings](shared-reference-mappings.md) separate global read visibility from tenant ownership; only those read-only plans omit tenant predicates and require disabled RLS with no policies. Shared and tenant ownership capabilities are mutually exclusive.
 
 ## Why stateless is the default
 
@@ -74,7 +86,7 @@ Benchmark modules stay outside the runtime graph. In particular, the Hibernate b
 The target runtime contract is:
 
 1. A caller presents an opaque `TenantScope<Model,T>` minted by the generated, single-use authority permanently claimed by that verified `PgVev`, then enters an explicit lexical read or write transaction callback.
-2. A caller selects a generated entity operation, ID-ordered bounded scan, or generated-index equality/nullable page, optionally continuing after a generated type-bound key, and supplies typed inputs. Multiple pages share one database snapshot only when executed in the same lexical transaction; a continuation resumed in another transaction has normal keyset-pagination visibility of intervening writes.
+2. A caller selects a generated entity operation, ID-ordered bounded scan, or generated-index equality/nullable page, optionally continuing after a generated type-bound key or an ordered index's typed value/ID cursor, and supplies typed inputs. Multiple pages share one database snapshot only when executed in the same lexical transaction; a continuation resumed in another transaction has normal keyset-pagination visibility of intervening writes.
 3. The PostgreSQL runtime obtains a pgjdbc connection to the one pinned TCP primary, requires its dedicated pool baseline to already be exact `pg_catalog`/UTF-8 with no retained temporary schema, and configures a bounded `SERIALIZABLE` transaction with synchronous commit, UTC, verified tenant/RLS state, and database/network deadlines.
 4. The runtime verifies that the entity plan belongs to the closed generated model and that a query is a runtime-created safe query, then executes the internally compiled and cached SQL shape with validated bound values.
 5. Immediately before commit the runtime re-attests endpoint, database, role, tenant, encoding, isolation, deadline, and read/write state; it then closes JDBC resources deterministically and translates failures without retrying implicitly.
@@ -98,3 +110,11 @@ One optimistic update is classified atomically against one PostgreSQL command sn
 Selected Jakarta annotations are reused as nonconforming source metadata; they are not evidence that the record is a Jakarta entity and are not Vev's runtime architecture. Future adapters may interpret other metadata formats, but each adapter must produce the same closed intermediate model and the same rejection guarantees.
 
 Hibernate compatibility is a migration concern, not a runtime dependency. Vev does not load Hibernate metadata, implement Hibernate SPIs, or claim session-semantic equivalence.
+
+## Identity creation
+
+[Generated identity inputs](generated-identifiers.md) are separate from persisted snapshots.
+The processor grants either assigned insertion or database-generated creation.
+Creation obtains tenant state from the lexical scope, correlates each generated ID
+with an input ordinal, and returns a new snapshot. Verified sequence OIDs belong to
+each database runtime; a shared immutable model contains no database-local OIDs.

@@ -3,14 +3,67 @@ package no.beint.vev;
 /**
  * Explicit mutations available inside a lexical write transaction.
  *
- * <p>There is deliberately no {@code save}, {@code merge}, dirty checking, cascade, flush, physical delete, or
- * create-capable upsert. Mutable operations accept only generated versioned entity types. Lifecycle retirement must
- * be modeled as an explicit versioned update, so the runtime cannot accidentally make an assigned identifier
- * reusable.</p>
+ * <p>There is deliberately no {@code save}, {@code merge}, dirty checking, cascade, flush, or create-capable upsert.
+ * Mutable operations accept only generated versioned entity types. Physical deletion additionally requires an
+ * explicit {@link VevDelete} capability and a database-generated identity that cannot be reinserted through Vev.</p>
  *
  * @param <M> closed-model marker type
  */
 public interface WriteEntities<M> extends ReadEntities<M> {
+    /**
+     * Deletes exactly the requested version, or returns a recoverable conflict or missing outcome.
+     * No entity payload is read; tenant, identifier, and version are verified against PostgreSQL's returned row.
+     *
+     * @param target type-bound identifier and expected version
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> version-token type
+     * @return explicit deleted, conflict, or missing outcome
+     */
+    <E, K, V> DeleteResult<M, E, K, V> delete(DeleteTarget<M, E, K, V> target);
+
+    /**
+     * Deletes one homogeneous bounded batch in one statement, preserving input order.
+     * Every target must apply. A stale or missing row poisons and rolls back the entire lexical transaction.
+     * Duplicate keys, foreign mapping tokens, and invalid bounds are rejected before SQL; empty batches issue none.
+     *
+     * @param type generated deletion capability shared by every target
+     * @param targets type-bound identifiers and expected versions in input order
+     * @param <E> entity snapshot type
+     * @param <K> primary-key type
+     * @param <V> version-token type
+     * @return one confirmed deletion per target, in input order
+     */
+    <E, K, V> Batch<DeleteResult.Deleted<M, E, K, V>> deleteMultiple(
+            DeletableEntityType<M, E, K, V> type, Batch<DeleteTarget<M, E, K, V>> targets);
+
+    /**
+     * Creates an identified snapshot from application values using the lexical tenant and initial version zero.
+     *
+     * @param type generated identity-creation capability
+     * @param input immutable input without identity, tenant, or version fields
+     * @param <E> persisted snapshot type
+     * @param <K> generated integer primary-key type
+     * @param <N> generated creation-input type
+     * @return newly identified snapshot
+     */
+    <E, K, N> E create(GeneratedEntityType<M, E, K, N> type, N input);
+
+    /**
+     * Creates a bounded batch in one statement and returns identified snapshots in exact input order.
+     *
+     * <p>Any failing row rolls back the complete lexical transaction. Allocated sequence values are not rolled
+     * back and must never be used as gapless business numbering.</p>
+     *
+     * @param type generated identity-creation capability
+     * @param inputs immutable creation inputs in input order
+     * @param <E> persisted snapshot type
+     * @param <K> generated integer primary-key type
+     * @param <N> generated creation-input type
+     * @return identified snapshots in input order
+     */
+    <E, K, N> Batch<E> createMultiple(GeneratedEntityType<M, E, K, N> type, Batch<N> inputs);
+
     /**
      * Inserts one entity and returns the detached snapshot verified against PostgreSQL's {@code RETURNING} row.
      *
@@ -20,7 +73,7 @@ public interface WriteEntities<M> extends ReadEntities<M> {
      * @param <K> primary-key type
      * @return inserted snapshot exactly matching the validated input
      */
-    <E, K> E insert(EntityType<M, E, K> type, E entity);
+    <E, K> E insert(AssignedEntityType<M, E, K> type, E entity);
 
     /**
      * Inserts one bounded batch atomically through one set-based PostgreSQL statement.
@@ -31,7 +84,7 @@ public interface WriteEntities<M> extends ReadEntities<M> {
      * @param <K> primary-key type
      * @return verified inserted snapshots in input order
      */
-    <E, K> Batch<E> insertMultiple(EntityType<M, E, K> type, Batch<E> entities);
+    <E, K> Batch<E> insertMultiple(AssignedEntityType<M, E, K> type, Batch<E> entities);
 
     /**
      * Updates one versioned entity or returns an explicit conflict or missing result.

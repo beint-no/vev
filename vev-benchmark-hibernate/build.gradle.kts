@@ -28,6 +28,6 @@ tasks.register<JavaExec>("prepareBenchmarkData") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass = "no.beint.vev.benchmark.hibernate.HibernateBenchmarkSetup"
     javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(26)
+        languageVersion = JavaLanguageVersion.of(27)
     }
 }

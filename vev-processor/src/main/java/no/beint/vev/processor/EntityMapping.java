@@ -14,8 +14,20 @@ record EntityMapping(
         String tableName,
         String tableSql,
         List<PropertyMapping> properties,
+        List<UniqueMapping> uniqueConstraints,
+        List<CheckMapping> checkConstraints,
         PropertyMapping id,
         PropertyMapping tenant,
         PropertyMapping version,
-        boolean appendOnly) {
+        boolean appendOnly,
+        boolean readOnly,
+        boolean externalIncomingReferences,
+        boolean shared,
+        boolean deletable,
+        String primaryKeyShape,
+        int maximumRows) {
+    PropertyMapping orderingProperty(PropertyMapping index) {
+        return index.indexOrderBy().isEmpty() ? null : properties.stream()
+                .filter(property -> property.columnName().equals(index.indexOrderBy())).findFirst().orElseThrow();
+    }
 }

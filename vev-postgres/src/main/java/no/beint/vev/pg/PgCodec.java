@@ -77,9 +77,37 @@ public final class PgCodec<T> {
         return jdbcType;
     }
 
+    boolean accepts(Object value) {
+        return value.getClass() == javaType
+                || value instanceof Enum<?> constant && constant.getDeclaringClass() == javaType;
+    }
+
+    boolean usesCharacterVarying() {
+        return databaseType.equals("character varying");
+    }
+
     T read(ResultSet resultSet, int index) throws SQLException {
         T value = reader.read(resultSet, index);
         return resultSet.wasNull() ? null : value;
+    }
+
+    /**
+     * Reads and validates one column for an ahead-of-time generated row reader.
+     *
+     * @param resultSet current JDBC row; the generated reader neither retains nor advances it
+     * @param index one-based result column
+     * @param column exact immutable generated metadata using this codec
+     * @return checked value, possibly null only for a nullable column
+     * @throws SQLException if the driver cannot read the column
+     * @throws IllegalArgumentException if metadata or the returned value violates the mapped contract
+     */
+    public T readChecked(ResultSet resultSet, int index, PgColumn column) throws SQLException {
+        if (Objects.requireNonNull(column, "column").codec() != this) {
+            throw new IllegalArgumentException("Generated reader codec does not match its column metadata");
+        }
+        T value = read(resultSet, index);
+        column.validateValue(value);
+        return value;
     }
 
     void bind(PreparedStatement statement, int index, T value) throws SQLException {
@@ -94,7 +122,7 @@ public final class PgCodec<T> {
         if (value == null) {
             return null;
         }
-        if (value.getClass() != javaType) {
+        if (!accepts(value)) {
             throw new IllegalArgumentException("Array value does not match the generated PostgreSQL codec");
         }
         return arrayElement.apply(javaType.cast(value));

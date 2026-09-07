@@ -1,0 +1,44 @@
+[
+  {
+    "file": "telemetry-a1-h1.log",
+    "samples": 80,
+    "minimum_cpu_idle_percent": 83.29,
+    "mean_cpu_idle_percent": 96.45225
+  },
+  {
+    "file": "telemetry-a2-before.log",
+    "samples": 40,
+    "minimum_cpu_idle_percent": 79.92,
+    "mean_cpu_idle_percent": 91.08999999999996
+  },
+  {
+    "file": "telemetry-b1-after.log",
+    "samples": 40,
+    "minimum_cpu_idle_percent": 88.66,
+    "mean_cpu_idle_percent": 91.54925
+  },
+  {
+    "file": "telemetry-b2-after.log",
+    "samples": 40,
+    "minimum_cpu_idle_percent": 81.1,
+    "mean_cpu_idle_percent": 90.87274999999997
+  },
+  {
+    "file": "telemetry-h2-hibernate.log",
+    "samples": 42,
+    "minimum_cpu_idle_percent": 78.58,
+    "mean_cpu_idle_percent": 90.83214285714287
+  },
+  {
+    "file": "telemetry-h3-hibernate-fetch-zero.log",
+    "samples": 42,
+    "minimum_cpu_idle_percent": 76.66,
+    "mean_cpu_idle_percent": 90.31666666666665
+  },
+  {
+    "file": "telemetry-h4-hibernate-fetch-zero.log",
+    "samples": 42,
+    "minimum_cpu_idle_percent": 79.28,
+    "mean_cpu_idle_percent": 90.86285714285715
+  }
+]

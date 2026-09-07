@@ -1,6 +1,7 @@
 package no.beint.vev.processor;
 
 import javax.lang.model.element.Element;
+import java.util.List;
 
 record PropertyMapping(
         Element declaration,
@@ -18,12 +19,26 @@ record PropertyMapping(
         boolean tenant,
         boolean version,
         String indexName,
-        String indexFieldName) {
+        String indexFieldName,
+        String indexOrderBy,
+        String indexDirection,
+        List<String> enumConstants,
+        String referenceName,
+        String referenceTarget,
+        boolean identity,
+        boolean referenceTenantFirst,
+        String lengthCheckName,
+        String defaultExpression,
+        TenantReferenceMapping tenantReference) {
     String quotedColumn() {
         return '"' + columnName + '"';
     }
 
     boolean indexed() {
         return !indexName.isEmpty();
+    }
+
+    boolean reference() {
+        return !referenceName.isEmpty();
     }
 }

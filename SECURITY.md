@@ -1,6 +1,6 @@
 # Security policy
 
-Vev is experimental and not production-ready. There is no supported production release, security SLA, or bug-bounty program.
+Vev 1.x is maintained within its documented persistence and deployment profile. There is no security SLA or bug-bounty program.
 
 ## Reporting a vulnerability
 
@@ -38,8 +38,8 @@ Ordinary unsupported mappings that fail closed are compatibility bugs, not vulne
 
 ## Supported versions
 
-No version is supported for production. Security fixes are developed on the current `main` branch and may be released only as experimental snapshots. Maintainers may decline to backport fixes.
+The latest 1.x release receives security fixes. Upgrade to the latest patch release; older patches and pre-1.0 snapshots have no separate backport commitment. A published version does not extend support to mappings or deployment topologies outside the documented profile.
 
 ## Disclosure
 
-Maintainers will coordinate scope, mitigation, and disclosure with the reporter when possible, but this experimental project makes no response-time commitment. Public disclosure should wait until a fix or documented mitigation is available.
+Maintainers will coordinate scope, mitigation, and disclosure with the reporter when possible, but the project makes no response-time commitment. Public disclosure should wait until a fix or documented mitigation is available.

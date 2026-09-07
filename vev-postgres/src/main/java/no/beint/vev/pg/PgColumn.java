@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
@@ -14,9 +15,10 @@ import java.util.regex.Pattern;
  * @param codec standard Vev codec for the column value
  * @param nullable whether the value column accepts {@code null}; identity, tenant, and version columns never do
  * @param role structural role of the column in its entity plan
- * @param maximumLength maximum Unicode code points for a string column, or zero for other codecs
+ * @param maximumLength maximum Unicode code points for a string or enum-name column, bytes for Binary, or zero for other codecs
  * @param numericPrecision precision for a decimal column, or zero for other codecs
  * @param numericScale exact scale for a decimal column, or zero for other codecs
+ * @param defaultExpression exact verified database-default expression, or empty when no default is declared
  */
 public record PgColumn(
         String name,
@@ -25,7 +27,8 @@ public record PgColumn(
         Role role,
         int maximumLength,
         int numericPrecision,
-        int numericScale) {
+        int numericScale,
+        String defaultExpression) {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final LocalDate MINIMUM_DATE = LocalDate.of(1, 1, 1);
     private static final LocalDate MAXIMUM_DATE = LocalDate.of(9_999, 12, 31);
@@ -42,9 +45,10 @@ public record PgColumn(
      * @param codec standard Vev codec for the column value
      * @param nullable whether the value column accepts {@code null}
      * @param role structural role of the column
-     * @param maximumLength maximum Unicode code points for a string column, or zero
+     * @param maximumLength maximum Unicode code points for a string or enum-name column, bytes for Binary, or zero
      * @param numericPrecision precision for a decimal column, or zero
      * @param numericScale exact scale for a decimal column, or zero
+     * @param defaultExpression exact PostgreSQL expression metadata, or empty for no default
      */
     public PgColumn {
         if (name == null || !IDENTIFIER.matcher(name).matches()) {
@@ -52,15 +56,32 @@ public record PgColumn(
         }
         codec = Objects.requireNonNull(codec, "codec");
         role = Objects.requireNonNull(role, "role");
+        defaultExpression = Objects.requireNonNull(defaultExpression, "defaultExpression");
+        if (!defaultExpression.isEmpty()) {
+            if (role != Role.VALUE || defaultExpression.isBlank()
+                    || defaultExpression.length() > PgCheck.MAXIMUM_EXPRESSION_LENGTH
+                    || defaultExpression.equalsIgnoreCase("NULL")) {
+                throw new IllegalArgumentException("Database defaults require bounded nonempty VALUE-column expression metadata; omit a bare NULL default");
+            }
+            requireWellFormedUnicode(defaultExpression);
+        }
         if ((role == Role.ID || role == Role.TENANT || role == Role.VERSION) && nullable) {
             throw new IllegalArgumentException(role + " columns must be non-null");
         }
-        if (codec == PgCodecs.STRING) {
+        if (codec.usesCharacterVarying()) {
             if (maximumLength < 1 || maximumLength > 65_535) {
-                throw new IllegalArgumentException("String columns require a maximum length from 1 through 65535");
+                throw new IllegalArgumentException("String and enum-name columns require a maximum length from 1 through 65535");
+            }
+        } else if (codec == PgCodecs.TEXT) {
+            if (maximumLength < 1 || maximumLength > no.beint.vev.VevText.MAXIMUM_LENGTH || role != Role.VALUE) {
+                throw new IllegalArgumentException("Text VALUE columns require an explicit code-point bound from 1 through 8388608");
+            }
+        } else if (codec == PgCodecs.BINARY) {
+            if (maximumLength < 1 || maximumLength > no.beint.vev.Binary.MAXIMUM_LENGTH || role != Role.VALUE) {
+                throw new IllegalArgumentException("Binary VALUE columns require an explicit byte bound from 1 through 32 MiB");
             }
         } else if (maximumLength != 0) {
-            throw new IllegalArgumentException("Only String columns may declare a maximum length");
+            throw new IllegalArgumentException("Only String, enum-name, and Binary columns may declare a maximum length");
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
             if (numericPrecision < 1 || numericPrecision > 128
@@ -73,7 +94,24 @@ public record PgColumn(
     }
 
     /**
+     * Creates complete column metadata without a database default.
+     *
+     * @param name safe unquoted identifier
+     * @param codec standard Vev scalar codec
+     * @param nullable whether SQL NULL is allowed
+     * @param role structural column role
+     * @param maximumLength string/code-point or binary/byte bound, or zero
+     * @param numericPrecision decimal precision, or zero
+     * @param numericScale decimal scale, or zero
+     */
+    public PgColumn(String name, PgCodec<?> codec, boolean nullable, Role role,
+            int maximumLength, int numericPrecision, int numericScale) {
+        this(name, codec, nullable, role, maximumLength, numericPrecision, numericScale, "");
+    }
+
+    /**
      * Creates column metadata with a 255-code-point string bound or decimal precision 38 and scale 2.
+     * Binary and text columns require an explicit byte/code-point bound through the complete constructor.
      *
      * @param name safe unquoted PostgreSQL identifier
      * @param codec standard Vev codec for the column value
@@ -90,13 +128,13 @@ public record PgColumn(
                 codec,
                 nullable,
                 role,
-                codec == PgCodecs.STRING ? 255 : 0,
+                codec.usesCharacterVarying() ? 255 : 0,
                 codec == PgCodecs.BIG_DECIMAL ? 38 : 0,
                 codec == PgCodecs.BIG_DECIMAL ? 2 : 0);
     }
 
     int expectedTypeModifier() {
-        if (codec == PgCodecs.STRING) {
+        if (codec.usesCharacterVarying()) {
             return Math.addExact(maximumLength, 4);
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
@@ -106,7 +144,8 @@ public record PgColumn(
     }
 
     long maximumRetainedBytes() {
-        if (codec == PgCodecs.STRING) {
+        if (codec == PgCodecs.BINARY) return Math.addExact(64L, maximumLength);
+        if (codec.usesCharacterVarying() || codec == PgCodecs.TEXT) {
             return Math.addExact(64L, Math.multiplyExact(4L, maximumLength));
         }
         if (codec == PgCodecs.BIG_DECIMAL) {
@@ -122,14 +161,17 @@ public record PgColumn(
             }
             return;
         }
-        if (value.getClass() != codec.javaType()) {
+        if (!codec.accepts(value)) {
             throw new IllegalArgumentException(name + " does not match its generated PostgreSQL codec");
         }
-        if (value instanceof String text) {
+        Object storedValue = value instanceof Enum<?> constant ? constant.name() : value;
+        if (storedValue instanceof String text) {
             requireWellFormedUnicode(text);
             if (text.codePointCount(0, text.length()) > maximumLength) {
                 throw new IllegalArgumentException(name + " exceeds its generated character bound");
             }
+        } else if (value instanceof no.beint.vev.Binary binary && binary.size() > maximumLength) {
+            throw new IllegalArgumentException(name + " exceeds its binary byte bound");
         } else if (value instanceof BigDecimal decimal
                 && (decimal.precision() > numericPrecision || decimal.scale() != numericScale)) {
             throw new IllegalArgumentException(name + " does not match its generated numeric precision and scale");
@@ -141,6 +183,8 @@ public record PgColumn(
                     || instant.isBefore(MINIMUM_INSTANT)
                     || instant.isAfter(MAXIMUM_INSTANT))) {
             throw new IllegalArgumentException(name + " is outside Vev's finite microsecond instant range");
+        } else if (value instanceof LocalTime time && time.getNano() % 1_000 != 0) {
+            throw new IllegalArgumentException(name + " must be a time before 24:00 at exact microsecond precision");
         } else if (value instanceof LocalDateTime dateTime
                 && (dateTime.getNano() % 1_000 != 0
                     || dateTime.isBefore(MINIMUM_DATE_TIME)

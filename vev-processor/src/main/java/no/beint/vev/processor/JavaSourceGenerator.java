@@ -3,7 +3,7 @@ package no.beint.vev.processor;
 import java.util.List;
 
 final class JavaSourceGenerator {
-    String entityPlan(EntityMapping entity) {
+    String entityPlan(EntityMapping entity, String tenantType) {
         StringBuilder source = new StringBuilder();
         if (!entity.packageName().isEmpty()) {
             source.append("package ").append(entity.packageName()).append(";\n\n");
@@ -15,12 +15,7 @@ final class JavaSourceGenerator {
                 .append(" * <p>This class is generated and must not be edited.</p>\n")
                 .append(" */\n")
                 .append("public final class ").append(entity.simpleName()).append("Vev implements ")
-                .append(entity.appendOnly()
-                        ? "no.beint.vev.pg.spi.PgEntityPlan<" + modelMarker + ", " + entity.qualifiedName()
-                                + ", " + entity.id().boxedType() + ", " + entity.tenant().boxedType() + ">"
-                        : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + modelMarker + ", "
-                                + entity.qualifiedName() + ", " + entity.id().boxedType() + ", "
-                                + entity.tenant().boxedType() + ", " + entity.version().boxedType() + ">")
+                .append(planInterfaces(entity, modelMarker, tenantType))
                 .append(" {\n")
                 .append("    /** Singleton generated mapping plan for {@link ")
                 .append(entity.qualifiedName()).append("}. */\n")
@@ -28,33 +23,59 @@ final class JavaSourceGenerator {
                 .append(entity.simpleName()).append("Vev();\n\n")
                 .append("    private ").append(entity.simpleName()).append("Vev() {\n")
                 .append("    }\n\n");
+        if (entity.id().identity() && !entity.readOnly()) {
+            appendCreationInput(source, entity);
+        }
+        for (int index = 0; index < entity.properties().size(); index++) {
+            PropertyMapping property = entity.properties().get(index);
+            if (!property.enumConstants().isEmpty()) {
+                source.append("    private static final no.beint.vev.pg.PgCodec<").append(property.boxedType())
+                        .append("> __VEV_CODEC_").append(index).append(" = ").append(property.codec()).append(";\n\n");
+            }
+        }
         source.append("    private static final java.util.List<no.beint.vev.pg.PgColumn> COLUMNS = java.util.List.of(\n");
         for (int index = 0; index < entity.properties().size(); index++) {
             PropertyMapping property = entity.properties().get(index);
             source.append("            new no.beint.vev.pg.PgColumn(\"")
                     .append(escape(property.columnName())).append("\", ")
-                    .append(property.codec()).append(", ")
+                    .append(readerCodec(property, index)).append(", ")
                     .append(property.nullable()).append(", no.beint.vev.pg.PgColumn.Role.")
                     .append(columnRole(property)).append(", ")
                     .append(property.maximumLength()).append(", ")
                     .append(property.numericPrecision()).append(", ")
-                    .append(property.numericScale()).append(")")
+                    .append(property.numericScale())
+                    .append(property.defaultExpression().isEmpty() ? "" : ", \"" + escape(property.defaultExpression()) + "\"").append(")")
                     .append(index + 1 == entity.properties().size() ? ");\n\n" : ",\n");
         }
         appendIndexTokens(source, entity, modelMarker);
         appendIndexList(source, entity, modelMarker);
+        appendReferences(source, entity);
+        appendUniqueConstraints(source, entity);
+        appendCheckConstraints(source, entity);
+        // Embed this generator's contract, never a runtime version lookup in generated output.
+        method(source, "public int generatedPlanAbi()", "return 7;");
         method(source, "public Class<" + entity.qualifiedName() + "> javaType()", "return " + entity.qualifiedName() + ".class;");
         method(source, "public Class<" + entity.id().boxedType() + "> keyType()", "return " + entity.id().boxedType() + ".class;");
         method(source, "public String logicalName()", "return \"" + escape(entity.qualifiedName()) + "\";");
         method(source, "public no.beint.vev.ModelIdentity modelIdentity()", "return " + entity.modelQualifiedName() + ".IDENTITY;");
+        method(source, "public int maximumRows()", "return " + entity.maximumRows() + ";");
         method(source, "public no.beint.vev.pg.PgCodec<" + entity.id().boxedType() + "> keyCodec()", "return " + entity.id().codec() + ";");
-        method(source, "public no.beint.vev.pg.PgCodec<" + entity.tenant().boxedType() + "> tenantCodec()",
-                "return " + entity.tenant().codec() + ";");
+        if (entity.readOnly()) {
+            method(source, "public boolean externalIncomingReferences()", "return " + entity.externalIncomingReferences() + ";");
+        }
+        if (entity.shared()) {
+            method(source, "public Class<" + tenantType + "> scopeType()", "return " + tenantType + ".class;");
+        } else {
+            method(source, "public no.beint.vev.pg.PgCodec<" + tenantType + "> tenantCodec()",
+                    "return " + entity.tenant().codec() + ";");
+            method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");
+        }
         method(source, "public String schemaName()", "return \"" + escape(entity.schemaName()) + "\";");
         method(source, "public String tableName()", "return \"" + escape(entity.tableName()) + "\";");
-        method(source, "public String tenantColumn()", "return \"" + escape(entity.tenant().columnName()) + "\";");
+        method(source, "public no.beint.vev.VevPrimaryKey.Shape primaryKeyShape()",
+                "return no.beint.vev.VevPrimaryKey.Shape." + entity.primaryKeyShape() + ";");
         method(source, "public java.util.List<no.beint.vev.pg.PgColumn> columns()", "return COLUMNS;");
-        method(source, "public java.util.List<no.beint.vev.pg.PgIndex<" + modelMarker + ", "
+        method(source, "public java.util.List<no.beint.vev.pg.PgQueryIndex<" + modelMarker + ", "
                         + entity.qualifiedName() + ", " + entity.id().boxedType() + ", ?>> indexes()",
                 "return INDEXES;");
         source.append("    @Override\n")
@@ -72,28 +93,136 @@ final class JavaSourceGenerator {
                 .append("    }\n\n")
                 .append("    @Override\n")
                 .append("    public ").append(entity.qualifiedName())
-                .append(" instantiate(Object[] columnValues) {\n")
-                .append("        java.util.Objects.requireNonNull(columnValues, \"columnValues\");\n")
-                .append("        if (columnValues.length != ").append(entity.properties().size()).append(") {\n")
-                .append("            throw new IllegalArgumentException(\"Expected ")
-                .append(entity.properties().size()).append(" column values\");\n")
+                .append(" readRow(java.sql.ResultSet resultSet, int firstColumn) throws java.sql.SQLException {\n")
+                .append("        java.util.Objects.requireNonNull(resultSet, \"resultSet\");\n")
+                .append("        if (firstColumn < 1 || firstColumn > ").append(Integer.MAX_VALUE - entity.properties().size() + 1).append(") {\n")
+                .append("            throw new IllegalArgumentException(\"Mapped result columns require valid one-based positions\");\n")
                 .append("        }\n")
                 .append("        return new ").append(entity.qualifiedName()).append("(\n");
         for (int index = 0; index < entity.properties().size(); index++) {
             PropertyMapping property = entity.properties().get(index);
-            source.append("                ").append(instantiateExpression(property, index));
+            source.append("                ").append(readerCodec(property, index)).append(".readChecked(resultSet, firstColumn")
+                    .append(index == 0 ? "" : " + " + index).append(", COLUMNS.get(").append(index).append("))");
             source.append(index + 1 == entity.properties().size() ? ");\n" : ",\n");
         }
         source.append("    }\n\n");
         method(source, "public " + entity.id().boxedType() + " keyOf(" + entity.qualifiedName() + " entity)",
                 "return entity." + entity.id().name() + "();");
-        method(source, "public " + entity.tenant().boxedType() + " tenantKeyOf(" + entity.qualifiedName() + " entity)",
-                "return entity." + entity.tenant().name() + "();");
-        if (!entity.appendOnly()) {
+        if (!entity.shared()) {
+            method(source, "public " + tenantType + " tenantKeyOf(" + entity.qualifiedName() + " entity)",
+                    "return entity." + entity.tenant().name() + "();");
+        }
+        if (!entity.appendOnly() && !entity.readOnly()) {
             appendVersionedMethods(source, entity);
         }
         source.append("}\n");
         return source.toString();
+    }
+
+    private static String planInterfaces(EntityMapping entity, String modelMarker, String tenantType) {
+        String types = modelMarker + ", " + entity.qualifiedName() + ", " + entity.id().boxedType();
+        String tenantTypes = types + ", " + tenantType;
+        var interfaces = new java.util.ArrayList<String>();
+        if (entity.readOnly()) {
+            if (entity.shared()) interfaces.add("no.beint.vev.pg.spi.PgSharedEntityPlan<" + tenantTypes + ">");
+            else {
+                interfaces.add("no.beint.vev.pg.spi.PgReadOnlyEntityPlan<" + tenantTypes + ">");
+                interfaces.add("no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">");
+            }
+            if (entity.id().identity()) interfaces.add("no.beint.vev.pg.spi.PgIdentityEntityPlan<" + tenantTypes + ">");
+        } else {
+            interfaces.add(entity.appendOnly() ? "no.beint.vev.pg.spi.PgTenantEntityPlan<" + tenantTypes + ">"
+                    : "no.beint.vev.pg.spi.PgVersionedEntityPlan<" + tenantTypes + ", " + entity.version().boxedType() + ">");
+            interfaces.add(entity.id().identity() ? "no.beint.vev.pg.spi.PgGeneratedEntityPlan<" + tenantTypes + ", " + entity.simpleName() + "Vev.New>"
+                    : "no.beint.vev.AssignedEntityType<" + types + ">");
+            if (entity.deletable()) interfaces.add("no.beint.vev.DeletableEntityType<" + types + ", " + entity.version().boxedType() + ">");
+        }
+        return String.join(", ", interfaces);
+    }
+
+    private void appendCreationInput(StringBuilder source, EntityMapping entity) {
+        List<PropertyMapping> values = entity.properties().stream()
+                .filter(property -> !property.id() && !property.tenant() && !property.version()).toList();
+        source.append("    /**\n     * Immutable application values for a new database-identified snapshot.\n     *\n");
+        for (PropertyMapping value : values) {
+            source.append("     * @param ").append(value.name()).append(" value for column ").append(value.columnName()).append("\n");
+        }
+        source.append("     */\n    public record New(")
+                .append(values.stream().map(value -> value.javaType() + " " + value.name())
+                        .collect(java.util.stream.Collectors.joining(", "))).append(") {\n    }\n\n");
+        method(source, "public Class<New> creationType()", "return New.class;");
+        if (values.isEmpty()) {
+            method(source, "public Object creationColumnValue(New input, int columnIndex)",
+                    "throw new IndexOutOfBoundsException(columnIndex);");
+            return;
+        }
+        source.append("    @Override\n    public Object creationColumnValue(New input, int columnIndex) {\n")
+                .append("        java.util.Objects.requireNonNull(input, \"input\");\n")
+                .append("        return switch (columnIndex) {\n");
+        for (PropertyMapping value : values) {
+            source.append("            case ").append(entity.properties().indexOf(value)).append(" -> input.")
+                    .append(value.name()).append("();\n");
+        }
+        source.append("            default -> throw new IndexOutOfBoundsException(columnIndex);\n")
+                .append("        };\n    }\n\n");
+    }
+
+    private void appendCheckConstraints(StringBuilder source, EntityMapping entity) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgCheck> __VEV_CHECKS = java.util.List.of(");
+        for (int index = 0; index < entity.checkConstraints().size(); index++) {
+            CheckMapping check = entity.checkConstraints().get(index);
+            if (check.kind() != CheckMapping.Kind.EXACT) {
+                source.append(index == 0 ? "\n" : ",\n")
+                        .append("            no.beint.vev.pg.PgCheck.")
+                        .append(check.kind() == CheckMapping.Kind.BINARY_MAXIMUM ? "binaryMaximum" : "textMaximum")
+                        .append("(\"").append(escape(check.name()))
+                        .append("\", \"").append(escape(check.boundColumn())).append("\", ").append(check.maximumLength()).append(')');
+                continue;
+            }
+            source.append(index == 0 ? "\n" : ",\n")
+                    .append("            new no.beint.vev.pg.PgCheck(\"").append(escape(check.name()))
+                    .append("\", \"").append(escape(check.expression())).append("\")");
+        }
+        source.append(");\n\n");
+        method(source, "public java.util.List<no.beint.vev.pg.PgCheck> checkConstraints()", "return __VEV_CHECKS;");
+    }
+
+    private void appendUniqueConstraints(StringBuilder source, EntityMapping entity) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgUnique> UNIQUE_CONSTRAINTS = java.util.List.of(");
+        for (int index = 0; index < entity.uniqueConstraints().size(); index++) {
+            UniqueMapping unique = entity.uniqueConstraints().get(index);
+            source.append(index == 0 ? "\n" : ",\n")
+                    .append("            new no.beint.vev.pg.PgUnique(\"").append(escape(unique.name()))
+                    .append("\", java.util.List.of(")
+                    .append(unique.columns().stream().map(column -> Integer.toString(entity.properties().indexOf(column)))
+                            .collect(java.util.stream.Collectors.joining(", "))).append("))");
+        }
+        source.append(");\n\n");
+        method(source, "public java.util.List<no.beint.vev.pg.PgUnique> uniqueConstraints()", "return UNIQUE_CONSTRAINTS;");
+    }
+
+    private void appendReferences(StringBuilder source, EntityMapping entity) {
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgReference> REFERENCES = java.util.List.of(");
+        List<PropertyMapping> references = entity.properties().stream().filter(PropertyMapping::reference).toList();
+        for (int index = 0; index < references.size(); index++) {
+            PropertyMapping property = references.get(index);
+            source.append(index == 0 ? "\n" : ",\n")
+                    .append("            new no.beint.vev.pg.PgReference(\"").append(escape(property.referenceName()))
+                    .append("\", ").append(entity.properties().indexOf(property)).append(", ")
+                    .append(property.referenceTarget()).append(property.referenceTenantFirst() ? ".class)" : ".class, false)");
+        }
+        source.append(");\n\n");
+        method(source, "public java.util.List<no.beint.vev.pg.PgReference> references()", "return REFERENCES;");
+        TenantReferenceMapping tenantReference = entity.tenant() == null ? null : entity.tenant().tenantReference();
+        if (tenantReference != null) {
+            source.append("    private static final java.util.List<no.beint.vev.pg.PgTenantReference> TENANT_REFERENCES = java.util.List.of(\n")
+                    .append("            new no.beint.vev.pg.PgTenantReference(\"").append(escape(tenantReference.name()))
+                    .append("\", \"").append(escape(tenantReference.schema())).append("\", \"").append(escape(tenantReference.table()))
+                    .append("\", \"").append(escape(tenantReference.column()))
+                    .append("\", no.beint.vev.VevTenantReference.OnDelete.").append(tenantReference.onDelete()).append("));\n\n");
+            method(source, "public java.util.List<no.beint.vev.pg.PgTenantReference> tenantReferences()", "return TENANT_REFERENCES;");
+        }
+
     }
 
     private void appendIndexTokens(StringBuilder source, EntityMapping entity, String modelMarker) {
@@ -102,24 +231,28 @@ final class JavaSourceGenerator {
             if (!property.indexed()) {
                 continue;
             }
-            String indexType = property.nullable() ? "PgNullableIndex" : "PgRequiredIndex";
+            PropertyMapping order = entity.orderingProperty(property);
+            String indexType = order == null ? (property.nullable() ? "PgNullableIndex" : "PgRequiredIndex")
+                    : (property.nullable() ? "PgNullableOrderedIndex" : "PgRequiredOrderedIndex");
             source.append("    /** Compile-time query token for PostgreSQL index ")
                     .append(escape(property.indexName())).append(". */\n")
                     .append("    public static final no.beint.vev.pg.").append(indexType).append('<')
                     .append(modelMarker).append(", ")
                     .append(entity.qualifiedName()).append(", ")
                     .append(entity.id().boxedType()).append(", ")
-                    .append(property.boxedType()).append("> ")
+                    .append(property.boxedType()).append(order == null ? "" : ", " + order.boxedType()).append("> ")
                     .append(property.indexFieldName()).append(" = new no.beint.vev.pg.")
                     .append(indexType).append("<>(INSTANCE, \"")
                     .append(escape(property.indexName())).append("\", ")
                     .append(columnIndex).append(", ")
-                    .append(property.boxedType()).append(".class);\n\n");
+                    .append(property.boxedType()).append(".class")
+                    .append(order == null ? "" : ", " + entity.properties().indexOf(order) + ", " + order.boxedType() + ".class, no.beint.vev.VevIndex.Direction." + property.indexDirection())
+                    .append(");\n\n");
         }
     }
 
     private void appendIndexList(StringBuilder source, EntityMapping entity, String modelMarker) {
-        source.append("    private static final java.util.List<no.beint.vev.pg.PgIndex<")
+        source.append("    private static final java.util.List<no.beint.vev.pg.PgQueryIndex<")
                 .append(modelMarker).append(", ")
                 .append(entity.qualifiedName()).append(", ")
                 .append(entity.id().boxedType()).append(", ?>> INDEXES = java.util.List.of(");
@@ -155,15 +288,18 @@ final class JavaSourceGenerator {
                 .append("    public static final no.beint.vev.ModelIdentity IDENTITY = new no.beint.vev.ModelIdentity(\n")
                 .append("            \"").append(escape(model.qualifiedName())).append("\",\n")
                 .append("            \"").append(escape(model.fingerprint())).append("\");\n")
+                .append("    /** Class-output resource describing this model's PostgreSQL schema contract. */\n")
+                .append("    public static final String SCHEMA_MANIFEST = \"")
+                .append(SchemaManifestGenerator.resourceName(model)).append("\";\n")
                 .append("    /** Validated immutable PostgreSQL plan set for this closed model. */\n")
                 .append("    public static final no.beint.vev.pg.PgModel<Model, ")
-                .append(model.entities().getFirst().tenant().boxedType())
+                .append(model.tenantType())
                 .append("> POSTGRES = no.beint.vev.pg.PgModel.of(\n")
                 .append("            IDENTITY");
         for (EntityMapping entity : model.entities()) {
             source.append(",\n            ").append(entity.planQualifiedName()).append(".INSTANCE");
         }
-        String tenantType = model.entities().getFirst().tenant().boxedType();
+        String tenantType = model.tenantType();
         source.append(");\n\n")
                 .append("    /**\n")
                 .append("     * Creates the single-use authority which may be claimed by one verified runtime.\n")
@@ -192,12 +328,8 @@ final class JavaSourceGenerator {
                 "return entity." + entity.version().name() + "();");
     }
 
-    private String instantiateExpression(PropertyMapping property, int index) {
-        String value = "(" + property.boxedType() + ") columnValues[" + index + "]";
-        return property.nullable() && !isPrimitive(property.javaType())
-                ? value
-                : "(" + property.boxedType() + ") java.util.Objects.requireNonNull(columnValues[" + index
-                        + "], \"Database returned NULL for " + escape(property.columnName()) + "\")";
+    private String readerCodec(PropertyMapping property, int index) {
+        return property.enumConstants().isEmpty() ? property.codec() : "__VEV_CODEC_" + index;
     }
 
     private void method(StringBuilder source, String declaration, String statement) {
@@ -205,10 +337,6 @@ final class JavaSourceGenerator {
                 .append("    ").append(declaration).append(" {\n")
                 .append("        ").append(statement).append("\n")
                 .append("    }\n\n");
-    }
-
-    private boolean isPrimitive(String type) {
-        return SetHolder.PRIMITIVES.contains(type);
     }
 
     private String columnRole(PropertyMapping property) {
@@ -225,13 +353,22 @@ final class JavaSourceGenerator {
     }
 
     private String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
-    }
-
-    private static final class SetHolder {
-        private static final java.util.Set<String> PRIMITIVES = java.util.Set.of("boolean", "int", "long", "short");
-
-        private SetHolder() {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            switch (character) {
+                case '\\' -> result.append("\\\\");
+                case '"' -> result.append("\\\"");
+                case '\n' -> result.append("\\n");
+                case '\r' -> result.append("\\r");
+                default -> {
+                    if (character < 32 || character == 127) {
+                        result.append('\\').append(String.format(java.util.Locale.ROOT, "%03o", (int) character));
+                    } else result.append(character);
+                }
+            }
         }
+        return result.toString();
     }
+
 }

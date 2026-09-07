@@ -2,7 +2,6 @@ package no.beint.vev.pg;
 
 import no.beint.vev.EntityType;
 import no.beint.vev.ModelIdentity;
-import no.beint.vev.QueryLimit;
 import no.beint.vev.VevIndex;
 import no.beint.vev.VevModel;
 import no.beint.vev.pg.spi.PgEntityPlan;
@@ -28,14 +27,14 @@ import java.util.regex.Pattern;
  * is inside the generated-plan safety profile.</p>
  *
  * @param <M> closed-model marker type
- * @param <T> tenant-key type shared by every entity
+ * @param <T> lexical tenant-key type shared by every plan in the model
  */
 public final class PgModel<M, T> {
     private static final Pattern IDENTIFIER = Pattern.compile("[a-z][a-z0-9_]{0,62}");
     private static final long MAXIMUM_MATERIALIZED_RESULT_BYTES = 64L * 1_024L * 1_024L;
     private static final Set<String> DATABASE_TYPES = Set.of(
             "boolean", "integer", "bigint", "smallint", "character varying", "uuid", "numeric",
-            "date", "timestamp", "timestamptz");
+            "date", "timestamp", "timestamptz", "time", "bytea", "text");
     private static final Set<Class<?>> KEY_TYPES = Set.of(
             Integer.class, Long.class, Short.class, String.class, java.util.UUID.class);
     private static final Set<PgCodec<?>> VERSION_CODECS = Set.of(
@@ -77,7 +76,20 @@ public final class PgModel<M, T> {
         Set<String> mappedIndexes = new HashSet<>();
         Set<String> logicalNames = new HashSet<>();
         Class<T> discoveredTenantType = null;
+        int expressionCharacters = 0;
         for (PgPlan<M, ?, ?, T> plan : snapshots) {
+            for (PgCheck check : plan.checkConstraints()) {
+                expressionCharacters += check.expression().length();
+                if (expressionCharacters > PgCheck.MAXIMUM_MODEL_CHARACTERS) {
+                    throw new IllegalArgumentException("Closed model exceeds the retained check/default-expression budget");
+                }
+            }
+            for (PgColumn column : plan.columns()) {
+                expressionCharacters += column.defaultExpression().length();
+                if (expressionCharacters > PgCheck.MAXIMUM_MODEL_CHARACTERS) {
+                    throw new IllegalArgumentException("Closed model exceeds the retained check/default-expression budget");
+                }
+            }
             validatePlan(plan);
             plan.installSql(PgSql.compile(plan));
             if (!identity.equals(plan.modelIdentity())) {
@@ -94,7 +106,7 @@ public final class PgModel<M, T> {
                 throw new IllegalArgumentException("Multiple entity plans map the same PostgreSQL table: "
                         + plan.schemaName() + '.' + plan.tableName());
             }
-            for (PgIndex<M, ?, ?, ?> index : plan.indexes()) {
+            for (PgQueryIndex<M, ?, ?, ?> index : plan.indexes()) {
                 String qualifiedIndex = plan.schemaName() + '.' + index.indexName();
                 if (!mappedIndexes.add(qualifiedIndex)) {
                     throw new IllegalArgumentException(
@@ -102,19 +114,28 @@ public final class PgModel<M, T> {
                                     + index.indexName());
                 }
             }
+            for (PgUnique unique : plan.uniqueConstraints()) {
+                if (!mappedIndexes.add(plan.schemaName() + '.' + unique.name())) {
+                    throw new IllegalArgumentException("Duplicate generated unique-constraint backing index: " + unique.name());
+                }
+            }
             if (discoveredTenantType == null) {
-                discoveredTenantType = plan.tenantCodec().javaType();
-            } else if (discoveredTenantType != plan.tenantCodec().javaType()) {
+                discoveredTenantType = plan.scopeType();
+            } else if (discoveredTenantType != plan.scopeType()) {
                 throw new IllegalArgumentException("All entities in one Vev model must use the same tenant key type");
             }
         }
+        for (PgPlan<M, ?, ?, T> plan : snapshots) {
+            validateReferences(plan, byJavaType);
+        }
+        validateTenantRegistry(snapshots, mappedTables);
         for (String mappedIndex : mappedIndexes) {
             if (mappedTables.contains(mappedIndex)) {
                 throw new IllegalArgumentException(
                         "Generated PostgreSQL index collides with a mapped relation: " + mappedIndex);
             }
         }
-        this.tenantType = Objects.requireNonNull(discoveredTenantType, "tenantType");
+        this.tenantType = Objects.requireNonNull(discoveredTenantType, "scopeType");
         if (!KEY_TYPES.contains(tenantType)) {
             throw new IllegalArgumentException(
                     "Tenant keys require an equality-stable Integer, Long, Short, String, or UUID codec");
@@ -129,6 +150,69 @@ public final class PgModel<M, T> {
         this.orderedSources = List.copyOf(sources);
     }
 
+    private static void validateTenantRegistry(List<? extends PgPlan<?, ?, ?, ?>> plans, Set<String> mappedTables) {
+        String registry = null;
+        PgColumn shape = null;
+        for (PgPlan<?, ?, ?, ?> plan : plans) {
+            for (PgTenantReference reference : plan.tenantReferences()) {
+                if (plan.shared()) throw new IllegalArgumentException("Shared mappings have no tenant-registry reference");
+                String table = reference.schemaName() + '.' + reference.tableName();
+                if (mappedTables.contains(table)) throw new IllegalArgumentException("A tenant registry must remain outside the entity model");
+                String key = table + '.' + reference.columnName();
+                PgColumn tenant = plan.columns().stream().filter(column -> column.role() == PgColumn.Role.TENANT).findFirst().orElseThrow();
+                if (registry != null && (!registry.equals(key) || shape.codec() != tenant.codec()
+                        || shape.expectedTypeModifier() != tenant.expectedTypeModifier())) {
+                    throw new IllegalArgumentException("One model must use one tenant registry and exact tenant-key bounds");
+                }
+                registry = key;
+                shape = tenant;
+            }
+        }
+    }
+
+    private static void validateReferences(PgPlan<?, ?, ?, ?> source, Map<Class<?>, ? extends PgPlan<?, ?, ?, ?>> plans) {
+        Set<String> names = new HashSet<>();
+        source.uniqueConstraints().forEach(unique -> names.add(unique.name()));
+        for (PgCheck check : source.checkConstraints()) {
+            if (!names.add(check.name())) {
+                throw new IllegalArgumentException("Duplicate generated constraint name: " + source.logicalName());
+            }
+        }
+        for (PgTenantReference reference : source.tenantReferences()) {
+            if (!names.add(reference.name())) throw new IllegalArgumentException("Duplicate generated tenant-registry constraint name");
+        }
+        Set<Integer> columns = new HashSet<>();
+        for (PgReference reference : source.references()) {
+            if (!names.add(reference.name()) || !columns.add(reference.columnIndex())) {
+                throw new IllegalArgumentException("Duplicate generated reference name or column: " + source.logicalName());
+            }
+            PgPlan<?, ?, ?, ?> target = plans.get(reference.targetType());
+            if (target == null) {
+                throw new IllegalArgumentException("Reference target must belong to the same closed model");
+            }
+            if (source.shared() && !target.shared()) {
+                throw new IllegalArgumentException("Shared rows cannot reference tenant-owned rows");
+            }
+            if (target.shared() && !reference.tenantFirst()) {
+                throw new IllegalArgumentException("References to shared rows have no tenant order");
+            }
+            if (!target.shared() && target.primaryKeyShape() == no.beint.vev.VevPrimaryKey.Shape.ID
+                    && target.uniqueConstraints().stream().noneMatch(target::tenantIdentityUnique)) {
+                throw new IllegalArgumentException("An ID-only reference target requires a tenant-qualified unique constraint");
+            }
+            if (reference.columnIndex() >= source.columns().size()) {
+                throw new IllegalArgumentException("Reference column is outside the generated entity shape");
+            }
+            PgColumn column = source.columns().get(reference.columnIndex());
+            PgColumn targetId = target.columns().stream().filter(value -> value.role() == PgColumn.Role.ID)
+                    .findFirst().orElseThrow();
+            if (column.role() != PgColumn.Role.VALUE || column.codec() != targetId.codec()
+                    || column.maximumLength() != targetId.maximumLength()) {
+                throw new IllegalArgumentException("Reference must use the target's exact scalar identifier mapping");
+            }
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static <M, T> PgPlan<M, ?, ?, T> capture(PgEntityPlan<M, ?, ?, T> source) {
         return (PgPlan<M, ?, ?, T>) PgPlan.capture(source);
@@ -141,7 +225,7 @@ public final class PgModel<M, T> {
         }
         requireIdentifier(plan.schemaName(), "schema", plan.logicalName());
         requireIdentifier(plan.tableName(), "table", plan.logicalName());
-        requireIdentifier(plan.tenantColumn(), "tenant column", plan.logicalName());
+        if (!plan.shared()) requireIdentifier(plan.tenantColumn(), "tenant column", plan.logicalName());
         List<PgColumn> columns = plan.columns();
         if (columns.isEmpty()) {
             throw new IllegalArgumentException("Entity plan has no mapped columns: " + plan.logicalName());
@@ -177,12 +261,23 @@ public final class PgModel<M, T> {
                 }
             }
         }
-        long maximumPageBytes = Math.multiplyExact(maximumRowBytes, Math.addExact(QueryLimit.MAX_VALUE, 1));
+        long maximumPageBytes = Math.multiplyExact(maximumRowBytes, Math.addExact(plan.maximumRows(), 1));
         if (maximumPageBytes > MAXIMUM_MATERIALIZED_RESULT_BYTES) {
             throw new IllegalArgumentException(
                     "Entity plan can exceed Vev's 64 MiB materialized-result safety budget: " + plan.logicalName());
         }
-        if (id == null || tenant == null) {
+        for (PgColumn column : columns) {
+            if ((column.codec() == PgCodecs.BINARY || column.codec() == PgCodecs.TEXT) && plan.checkConstraints().stream()
+                    .filter(check -> check.bounds(column)).count() != 1) {
+                throw new IllegalArgumentException("Column requires one matching generated length check: " + column.name());
+            }
+        }
+        for (PgCheck check : plan.checkConstraints()) {
+            if (check.kind() != PgCheck.Kind.EXACT && columns.stream().noneMatch(check::bounds)) {
+                throw new IllegalArgumentException("Length check does not match its generated column bound");
+            }
+        }
+        if (id == null || (!plan.shared() && tenant == null)) {
             throw new IllegalArgumentException(
                     "Entity plan must have exactly one ID and tenant column: " + plan.logicalName());
         }
@@ -194,14 +289,21 @@ public final class PgModel<M, T> {
             throw new IllegalArgumentException(
                     "Entity IDs require an equality-stable Integer, Long, Short, String, or UUID codec");
         }
-        if (tenant.codec() != plan.tenantCodec() || !tenant.name().equals(plan.tenantColumn())) {
+        if (plan.generatedIdentity() && !Set.of(Short.class, Integer.class, Long.class).contains(plan.keyType())) {
+            throw new IllegalArgumentException("Generated identity requires a Short, Integer, or Long codec");
+        }
+        if (plan.shared() && (tenant != null || !plan.readOnly()
+                || plan.primaryKeyShape() != no.beint.vev.VevPrimaryKey.Shape.ID)) {
+            throw new IllegalArgumentException("Shared read-only plans require no tenant column and an ID-only primary key");
+        }
+        if (!plan.shared() && (tenant.codec() != plan.tenantCodec() || !tenant.name().equals(plan.tenantColumn()))) {
             throw new IllegalArgumentException(
                     "Entity tenant metadata does not match its tenant codec: " + plan.logicalName());
         }
         if (id.codec() == PgCodecs.STRING && id.maximumLength() != 128) {
             throw new IllegalArgumentException("String entity IDs must declare an exact 128-character bound");
         }
-        if (tenant.codec() == PgCodecs.STRING && tenant.maximumLength() != 128) {
+        if (tenant != null && tenant.codec() == PgCodecs.STRING && tenant.maximumLength() != 128) {
             throw new IllegalArgumentException("String tenant keys must declare an exact 128-character bound");
         }
         if (plan instanceof PgVersionPlan<?, ?, ?, ?, ?> versionedPlan) {
@@ -213,17 +315,51 @@ public final class PgModel<M, T> {
                         "Entity version metadata requires Vev's Integer, Long, or Short codec: "
                                 + plan.logicalName());
             }
-        } else if (version != null) {
+        } else if (version != null && !(plan.readOnly() && VERSION_CODECS.contains(version.codec()))) {
             throw new IllegalArgumentException(
-                    "Append-only entity plan must not expose a version column: " + plan.logicalName());
+                    "Only mutable or read-only plans may expose an Integer, Long, or Short version column: " + plan.logicalName());
         }
         validateIndexes(plan, id, tenant);
+        validateUniqueConstraints(plan);
+        if (!plan.shared() && plan.primaryKeyShape() != no.beint.vev.VevPrimaryKey.Shape.TENANT_ID
+                && plan.indexes().stream().noneMatch(index -> plan.columns().get(index.columnIndex()).role() == PgColumn.Role.ID)
+                && plan.uniqueConstraints().stream().noneMatch(unique -> plan.tenantIdentityUnique(unique)
+                        && plan.columns().get(unique.columnIndexes().getFirst()).role() == PgColumn.Role.TENANT)) {
+            throw new IllegalArgumentException("An ID-first primary key requires a declared tenant-leading identifier index for bounded scans");
+        }
+    }
+
+    private static void validateUniqueConstraints(PgPlan<?, ?, ?, ?> plan) {
+        for (PgUnique unique : plan.uniqueConstraints()) {
+            if (!plan.shared() && unique.columnIndexes().size() < 2) {
+                throw new IllegalArgumentException("Tenant unique constraints require at least two columns");
+            }
+            long maximumBytes = 0;
+            boolean tenantIdentity = plan.tenantIdentityUnique(unique);
+            for (int index = 0; index < unique.columnIndexes().size(); index++) {
+                int position = unique.columnIndexes().get(index);
+                if (position >= plan.columns().size()) {
+                    throw new IllegalArgumentException("Unique constraint refers to an unmapped column");
+                }
+                PgColumn column = plan.columns().get(position);
+                if (plan.shared() && column.role() != PgColumn.Role.VALUE) {
+                    throw new IllegalArgumentException("Shared unique constraints require only VALUE columns");
+                }
+                if (!plan.shared() && !tenantIdentity && (index == 0 ? column.role() != PgColumn.Role.TENANT : column.role() != PgColumn.Role.VALUE)) {
+                    throw new IllegalArgumentException("Unique constraints require tenant-first VALUE columns or exactly the ID and tenant columns");
+                }
+                maximumBytes = Math.addExact(maximumBytes, maximumIndexKeyBytes(column));
+            }
+            if (maximumBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
+                throw new IllegalArgumentException("Unique constraint can exceed Vev's conservative B-tree key budget");
+            }
+        }
     }
 
     private static void validateIndexes(PgPlan<?, ?, ?, ?> plan, PgColumn id, PgColumn tenant) {
         Set<String> names = new HashSet<>();
         Set<Integer> indexedColumns = new HashSet<>();
-        for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
+        for (PgQueryIndex<?, ?, ?, ?> index : plan.indexes()) {
             requireIdentifier(index.indexName(), "index", plan.logicalName());
             if (!names.add(index.indexName())) {
                 throw new IllegalArgumentException(
@@ -239,28 +375,44 @@ public final class PgModel<M, T> {
                         "Generated index has an invalid or duplicate component position: " + index.indexName());
             }
             PgColumn value = plan.columns().get(columnIndex);
-            if (value.role() != PgColumn.Role.VALUE) {
+            if (value.role() != PgColumn.Role.VALUE && value.role() != PgColumn.Role.ID) {
                 throw new IllegalArgumentException(
-                        "Generated indexes may target only ordinary value columns: " + index.indexName());
+                        "Generated indexes may target only ID or VALUE columns: " + index.indexName());
             }
             if (index.valueType() != value.codec().javaType()) {
                 throw new IllegalArgumentException(
                         "Generated index value type does not match its PostgreSQL codec: " + index.indexName());
             }
-            boolean nullableToken = index instanceof PgNullableIndex<?, ?, ?, ?>;
+            boolean nullableToken = index instanceof PgNullableIndex<?, ?, ?, ?> || index instanceof PgNullableOrderedIndex<?, ?, ?, ?, ?>;
             if (nullableToken != value.nullable()) {
                 throw new IllegalArgumentException(
                         "Generated index nullability does not match its mapped column: " + index.indexName());
             }
-            if (value.codec() == PgCodecs.STRING
+            if ((value.codec().usesCharacterVarying() || value.codec() == PgCodecs.TEXT)
                     && value.maximumLength() > VevIndex.MAXIMUM_STRING_LENGTH) {
                 throw new IllegalArgumentException(
                         "Indexed String columns must not exceed " + VevIndex.MAXIMUM_STRING_LENGTH
                                 + " code points: " + index.indexName());
             }
             long maximumKeyBytes = Math.addExact(
-                    Math.addExact(maximumIndexKeyBytes(id), maximumIndexKeyBytes(tenant)),
-                    maximumIndexKeyBytes(value));
+                    Math.addExact(maximumIndexKeyBytes(id), tenant == null ? 0 : maximumIndexKeyBytes(tenant)),
+                    value.role() == PgColumn.Role.ID ? 0 : maximumIndexKeyBytes(value));
+            if (index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered) {
+                int orderPosition = ordered.orderColumnIndex();
+                if (orderPosition < 0 || orderPosition >= plan.columns().size() || orderPosition == columnIndex
+                        || value.role() != PgColumn.Role.VALUE) {
+                    throw new IllegalArgumentException("Ordered index requires a distinct mapped ordering column and VALUE filter");
+                }
+                PgColumn order = plan.columns().get(orderPosition);
+                if (order.role() != PgColumn.Role.VALUE || order.nullable() || order.codec().javaType() != ordered.orderType()) {
+                    throw new IllegalArgumentException("Index ordering requires a non-null VALUE column with the exact generated codec type");
+                }
+                if ((order.codec().usesCharacterVarying() || order.codec() == PgCodecs.TEXT)
+                        && order.maximumLength() > VevIndex.MAXIMUM_STRING_LENGTH) {
+                    throw new IllegalArgumentException("Index ordering String columns must not exceed 256 code points");
+                }
+                maximumKeyBytes = Math.addExact(maximumKeyBytes, maximumIndexKeyBytes(order));
+            }
             if (maximumKeyBytes > VevIndex.MAXIMUM_RETAINED_KEY_BYTES) {
                 throw new IllegalArgumentException(
                         "Generated index can exceed Vev's conservative B-tree key budget: " + index.indexName());
@@ -269,7 +421,8 @@ public final class PgModel<M, T> {
     }
 
     private static long maximumIndexKeyBytes(PgColumn column) {
-        if (column.codec() == PgCodecs.STRING) {
+        if (column.codec() == PgCodecs.BINARY) return Math.addExact(32L, column.maximumLength());
+        if (column.codec().usesCharacterVarying() || column.codec() == PgCodecs.TEXT) {
             return Math.multiplyExact(4L, column.maximumLength());
         }
         if (column.codec() == PgCodecs.BIG_DECIMAL) {
@@ -299,7 +452,7 @@ public final class PgModel<M, T> {
      * @param identity generated identity shared by every entity plan
      * @param plans non-empty complete set of generated PostgreSQL plans
      * @param <M> closed-model marker type
-     * @param <T> tenant-key type shared by every entity
+     * @param <T> lexical tenant-key type shared by every plan in the model
      * @return validated immutable PostgreSQL model
      */
     @SafeVarargs
@@ -326,7 +479,7 @@ public final class PgModel<M, T> {
     }
 
     /**
-     * Returns the tenant-key type shared by every plan.
+     * Returns the tenant-key type shared by tenant-owned plans.
      *
      * @return exact boxed tenant-key type
      */

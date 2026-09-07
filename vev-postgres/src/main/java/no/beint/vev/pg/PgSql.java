@@ -15,7 +15,7 @@ final class PgSql {
     private final String insertMultiple;
     private final String update;
     private final String updateMultiple;
-    private final Map<PgIndex<?, ?, ?, ?>, PgIndexSql> indexes;
+    private final Map<PgQueryIndex<?, ?, ?, ?>, PgIndexSql> indexes;
 
     private PgSql(
             String find,
@@ -26,7 +26,7 @@ final class PgSql {
             String insertMultiple,
             String update,
             String updateMultiple,
-            Map<PgIndex<?, ?, ?, ?>, PgIndexSql> indexes) {
+            Map<PgQueryIndex<?, ?, ?, ?>, PgIndexSql> indexes) {
         this.find = find;
         this.findMultiple = findMultiple;
         this.scanById = scanById;
@@ -41,11 +41,12 @@ final class PgSql {
     static PgSql compile(PgPlan<?, ?, ?, ?> plan) {
         List<PgColumn> columns = plan.columns();
         PgColumn id = column(columns, PgColumn.Role.ID);
-        PgColumn tenant = column(columns, PgColumn.Role.TENANT);
+        PgColumn tenant = plan.shared() ? null : column(columns, PgColumn.Role.TENANT);
+        String tenantPredicate = tenant == null ? "" : quoted(tenant.name()) + " = ?";
         String table = quoted(plan.schemaName()) + '.' + quoted(plan.tableName());
         String selectedColumns = columns(columns, "");
         String find = "SELECT " + selectedColumns + " FROM " + table
-                + " WHERE " + quoted(id.name()) + " = ? AND " + quoted(tenant.name()) + " = ?";
+                + " WHERE " + quoted(id.name()) + " = ?" + (plan.shared() ? "" : " AND " + tenantPredicate);
 
         String row = "\"__vev_row\"";
         String requested = "\"__vev_requested\"";
@@ -55,21 +56,21 @@ final class PgSql {
                 + "[]) WITH ORDINALITY AS " + requested + "(\"key\", \"ordinality\")"
                 + " LEFT JOIN " + table + " AS " + row
                 + " ON " + row + "." + quoted(id.name()) + " = " + requested + ".\"key\""
-                + " AND " + row + "." + quoted(tenant.name()) + " = ?"
+                + (plan.shared() ? "" : " AND " + row + "." + tenantPredicate)
                 + " ORDER BY " + requested + ".\"ordinality\"";
 
         String scanById = "SELECT " + selectedColumns + " FROM " + table
-                + " WHERE " + quoted(tenant.name()) + " = ?"
+                + (plan.shared() ? "" : " WHERE " + tenantPredicate)
                 + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
         String scanByIdAfter = "SELECT " + selectedColumns + " FROM " + table
-                + " WHERE " + quoted(tenant.name()) + " = ?"
-                + " AND " + quoted(id.name()) + " > ?"
+                + " WHERE " + (plan.shared() ? "" : tenantPredicate + " AND ")
+                + quoted(id.name()) + " > ?"
                 + " ORDER BY " + quoted(id.name()) + " LIMIT ?";
 
-        String insert = "INSERT INTO " + table + " (" + quotedColumns(columns) + ") VALUES ("
+        String insert = plan.readOnly() ? null : "INSERT INTO " + table + " (" + quotedColumns(columns) + ") VALUES ("
                 + placeholders(columns.size()) + ") RETURNING " + selectedColumns;
-        String insertMultiple = insertMultiple(table, columns, id, tenant);
-        Map<PgIndex<?, ?, ?, ?>, PgIndexSql> indexes = compileIndexes(plan, table, selectedColumns, id, tenant);
+        String insertMultiple = plan.readOnly() ? null : insertMultiple(table, columns, id, tenant);
+        Map<PgQueryIndex<?, ?, ?, ?>, PgIndexSql> indexes = compileIndexes(plan, table, selectedColumns, id, tenant);
 
         if (!(plan instanceof PgVersionPlan<?, ?, ?, ?, ?>)) {
             return new PgSql(
@@ -124,7 +125,7 @@ final class PgSql {
         return updateMultiple;
     }
 
-    PgIndexSql index(PgIndex<?, ?, ?, ?> index) {
+    PgIndexSql index(PgQueryIndex<?, ?, ?, ?> index) {
         PgIndexSql statements = indexes.get(index);
         if (statements == null) {
             throw new IllegalArgumentException("Index token is not from this compiled PostgreSQL plan");
@@ -132,25 +133,34 @@ final class PgSql {
         return statements;
     }
 
-    private static Map<PgIndex<?, ?, ?, ?>, PgIndexSql> compileIndexes(
+    private static Map<PgQueryIndex<?, ?, ?, ?>, PgIndexSql> compileIndexes(
             PgPlan<?, ?, ?, ?> plan,
             String table,
             String selectedColumns,
             PgColumn id,
             PgColumn tenant) {
-        Map<PgIndex<?, ?, ?, ?>, PgIndexSql> compiled = new IdentityHashMap<>();
-        for (PgIndex<?, ?, ?, ?> index : plan.indexes()) {
+        Map<PgQueryIndex<?, ?, ?, ?>, PgIndexSql> compiled = new IdentityHashMap<>();
+        for (PgQueryIndex<?, ?, ?, ?> index : plan.indexes()) {
             PgColumn value = plan.columns().get(index.columnIndex());
-            String equality = quoted(tenant.name()) + " = ? AND " + quoted(value.name()) + " = ?";
-            String nullEquality = quoted(tenant.name()) + " = ? AND " + quoted(value.name()) + " IS NULL";
-            String orderAndLimit = " ORDER BY " + quoted(id.name()) + " LIMIT ?";
+            String tenantPredicate = tenant == null ? "" : quoted(tenant.name()) + " = ? AND ";
+            String equality = tenantPredicate + quoted(value.name()) + " = ?";
+            String nullEquality = tenantPredicate + quoted(value.name()) + " IS NULL";
+            PgColumn order = index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered
+                    ? plan.columns().get(ordered.orderColumnIndex()) : null;
+            String ordering = (order == null ? "" : quoted(order.name()) + ", ") + quoted(id.name());
+            boolean descending = index instanceof PgOrderedIndex<?, ?, ?, ?, ?> ordered
+                    && ordered.direction() == no.beint.vev.VevIndex.Direction.DESC;
+            String orderAndLimit = " ORDER BY " + (descending
+                    ? quoted(order.name()) + " DESC, " + quoted(id.name()) + " DESC" : ordering) + " LIMIT ?";
             String select = "SELECT " + selectedColumns + " FROM " + table + " WHERE ";
-            String after = " AND " + quoted(id.name()) + " > ?";
+            String after = order == null ? " AND " + quoted(id.name()) + " > ?"
+                    : " AND (" + ordering + ") " + (descending ? "<" : ">") + " (?, ?)";
+            boolean nullable = index instanceof PgNullableIndex<?, ?, ?, ?> || index instanceof PgNullableOrderedIndex<?, ?, ?, ?, ?>;
             PgIndexSql statements = new PgIndexSql(
                     select + equality + orderAndLimit,
                     select + equality + after + orderAndLimit,
-                    index instanceof PgNullableIndex<?, ?, ?, ?> ? select + nullEquality + orderAndLimit : null,
-                    index instanceof PgNullableIndex<?, ?, ?, ?>
+                    nullable ? select + nullEquality + orderAndLimit : null,
+                    nullable
                             ? select + nullEquality + after + orderAndLimit
                             : null);
             compiled.put(index, statements);

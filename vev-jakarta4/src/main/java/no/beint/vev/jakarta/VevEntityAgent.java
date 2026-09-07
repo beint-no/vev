@@ -194,14 +194,14 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     public void delete(Object entity) {
         requireOpen();
         throw unsupported(
-                "Physical delete is absent from Vev; model lifecycle retirement as an explicit versioned update");
+                "Physical delete requires the native typed deletion capability and explicit versioned outcome");
     }
 
     @Override
     public void deleteMultiple(List<?> values) {
         requireOpen();
         throw unsupported(
-                "Physical delete is absent from Vev; model lifecycle retirement as an explicit versioned update");
+                "Physical delete requires the native typed deletion capability and explicit versioned outcome");
     }
 
     @Override
@@ -493,7 +493,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
     private <E, K, V> PgVersionedEntityPlan<M, E, K, Tenant, V> versionedPlan(Object entity) {
         PgEntityPlan<M, Object, Object, Tenant> plan = planForEntity(entity);
         if (!(plan instanceof PgVersionedEntityPlan<?, ?, ?, ?, ?> versioned)) {
-            throw new IllegalArgumentException(plan.logicalName() + " is append-only");
+            throw new IllegalArgumentException(plan.logicalName() + " has no versioned mutation capability");
         }
         return (PgVersionedEntityPlan<M, E, K, Tenant, V>) versioned;
     }
@@ -506,22 +506,29 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         return id;
     }
 
+    @SuppressWarnings("unchecked")
     private <E, K> void requireEntityTenant(PgEntityPlan<M, E, K, Tenant> plan, E entity) {
-        Object entityTenant = Objects.requireNonNull(plan.tenantKeyOf(entity), "entity tenant key");
+        if (!(plan instanceof no.beint.vev.pg.spi.PgTenantEntityPlan<?, ?, ?, ?> tenantPlan)) {
+            throw new IllegalArgumentException("Entity mutations require an explicit tenant ownership capability");
+        }
+        var typed = (no.beint.vev.pg.spi.PgTenantEntityPlan<M, E, K, Tenant>) tenantPlan;
+        Object entityTenant = Objects.requireNonNull(typed.tenantKeyOf(entity), "entity tenant key");
         if (!tenantKey.equals(entityTenant)) {
             throw new IllegalArgumentException("Entity tenant does not match the lexical EntityAgent tenant");
         }
     }
 
     private <E, K> void insertTyped(PgEntityPlan<M, E, K, Tenant> plan, Object value) {
+        var assigned = requireAssigned(plan);
         E entity = requireInsertEntity(plan, value);
         insertDidNotCompleteVerified = true;
-        E inserted = entities.insert(plan, entity);
+        E inserted = entities.insert(assigned, entity);
         verifyInsertedSnapshot(plan, entity, inserted);
         insertDidNotCompleteVerified = false;
     }
 
     private <E, K> void insertMultipleTyped(PgEntityPlan<M, E, K, Tenant> plan, List<?> values) {
+        var assigned = requireAssigned(plan);
         List<E> typedValues = new ArrayList<>(values.size());
         for (Object value : values) {
             PgEntityPlan<M, Object, Object, Tenant> valuePlan = planForEntity(value);
@@ -532,7 +539,7 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
         }
         Batch<E> input = Batch.copyOf(typedValues);
         insertDidNotCompleteVerified = true;
-        Batch<E> inserted = entities.insertMultiple(plan, input);
+        Batch<E> inserted = entities.insertMultiple(assigned, input);
         if (input.size() != inserted.size()) {
             throw newInsertSnapshotFailure(plan);
         }
@@ -540,6 +547,17 @@ public final class VevEntityAgent<M, Tenant> implements EntityAgent {
             verifyInsertedSnapshot(plan, input.get(index), inserted.get(index));
         }
         insertDidNotCompleteVerified = false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private <E, K> no.beint.vev.AssignedEntityType<M, E, K> requireAssigned(PgEntityPlan<M, E, K, Tenant> plan) {
+        if (plan instanceof no.beint.vev.pg.spi.PgReadOnlyEntityPlan<?, ?, ?, ?>) {
+            throw new UnsupportedOperationException("Read-only mappings cannot be inserted");
+        }
+        if (!(plan instanceof no.beint.vev.AssignedEntityType<?, ?, ?> assigned)) {
+            throw new UnsupportedOperationException("EntityAgent cannot return an immutable generated-ID snapshot; use native create");
+        }
+        return (no.beint.vev.AssignedEntityType<M, E, K>) assigned;
     }
 
     private <E, K> E requireInsertEntity(PgEntityPlan<M, E, K, Tenant> plan, Object value) {

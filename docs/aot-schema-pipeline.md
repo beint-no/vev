@@ -1,6 +1,6 @@
 # AOT and schema pipeline
 
-> **Status: experimental pipeline contract.** Database migrations remain the application's responsibility.
+> **Status: Vev 1.0 pipeline contract.** Database migrations remain the application's responsibility.
 
 Vev moves mapping discovery, member access, and supported query construction out of runtime execution. At startup the PostgreSQL runtime constructs a closed set of fixed statements from validated generated metadata; request data never supplies a statement shape. The intended pipeline has four gates.
 
@@ -8,11 +8,43 @@ Vev moves mapping discovery, member access, and supported query construction out
 
 The annotation processor reads selected source-level Jakarta Persistence annotations without loading mapped classes. Jakarta Persistence 4 forbids records as entities, so Vev deliberately interprets those annotations on its required immutable records as nonconforming source metadata. It rejects implicit names and access strategies, requires every `@Column` to explicitly state `nullable = true` or `nullable = false`, then resolves record components, identifiers, column flags, Java types, and Vev-specific safety metadata into a closed intermediate model. Jakarta's default nullability is never silently inherited.
 
-`@VevIndex(name = "...")` is accepted only on an ordinary scalar component. The processor validates the explicit PostgreSQL identifier, component and codec type, nullable/required distinction, per-entity index-count bound, generated-token name, schema-wide name uniqueness, and a conservative retained-key budget. It does not infer uniqueness or accept an index on an identifier, tenant key, or version token.
+`@VevIndex(name = "...")` is accepted on an ordinary scalar component or the identifier. The processor validates the explicit PostgreSQL identifier, component and codec type, nullable/required distinction, per-entity index-count bound, generated-token name, schema-wide name uniqueness, and a conservative retained-key budget. It does not infer uniqueness or accept an index on a tenant key or version token. An optional [ordering column](ordered-index-queries.md) must be a distinct non-null VALUE with an exact mapped name and a fixed ASC/DESC direction for both it and the ID tie-breaker; its bytes count toward the same index budget.
 
 The model is valid only when every encountered Jakarta Persistence or Hibernate annotation and every accepted annotation attribute is either implemented or explicitly rejected. Other provider namespaces are not a compatibility surface and must not be assumed to affect generated behavior. Unresolved Java types fail compilation.
 
-The processor intentionally does not advertise Gradle incremental annotation processing. A closed model and every entity it names must be presented as source in the same `javac` invocation so Vev can prove that accessors, canonical constructors, initializer blocks, and static state contain no hidden hydration behavior. Build tools must fully recompile the affected source set when a closed model is processed; accepting previously compiled entity bytecode would weaken this source-level proof and is rejected.
+The processor intentionally does not advertise Gradle incremental annotation processing.
+The closed `@VevModel` declaration is source. Entity records may be source in the
+same invocation or separately compiled records on the ordinary class path. Source
+records retain the constructor/accessor/initialization checks. Compiled records
+are parsed at build time using the JDK Class-File API; application classes are
+never loaded by this verifier. It requires exact direct canonical assignments,
+pure field accessors, no interfaces, and no executable class initializer or
+nonconstant static state. Each class file is bounded to one MiB.
+
+A compiled record may come from a directory or JAR. The verifier checks the
+version-specific class selected from a multi-release JAR and matches its component
+names, types, and order to javac's resolved declaration. Named-module dependency
+records remain unsupported. [Kotlin record mappings](kotlin-records.md) retain
+normal parameter null checks, with exact column/nullability validation and a
+verified non-null path through the selected Kotlin null-check implementation. The runtime still uses generated direct Java access;
+there is no runtime bytecode parsing or reflective hydration fallback.
+
+All annotation-profile checks also apply to compiled declarations, including
+explicit nullability. Identical source and compiled record mappings produce
+identical plans, manifests, and fingerprints. Build tools must rerun processing
+when the model source or a mapping dependency changes; a cached fingerprint does
+not exempt changed bytecode from verification. The integration fixture compiles
+its record dependency before compiling the registry and executes the resulting
+plans against PostgreSQL.
+
+The proof covers operations Vev actually invokes: class initialization, canonical
+construction, and component access. Ordinary helper methods, including equality,
+hashing, rendering, and copying, belong to application behavior and are not
+invoked or interpreted by persistence. Allowing such methods does not permit
+custom accessors, constructor transformations, extra mutable state, or lifecycle
+callbacks. Persistence compares and validates every mapped scalar directly; its
+PostgreSQL fixture verifies reads and writes even when all three entity object
+methods throw. Callers remain responsible for the behavior of helpers they call.
 
 ## 2. Deterministic generation
 
@@ -20,14 +52,45 @@ For each accepted entity, the processor emits deterministic source containing:
 
 - an immutable per-entity plan and a closed model registry consumed by the runtime and Jakarta adapter;
 - stable PostgreSQL identifiers and column roles from which the runtime constructs fixed quoted statements;
-- immutable typed metadata consumed by Vev's closed built-in binders and row readers;
+- immutable typed metadata consumed by Vev's closed built-in binders, plus a direct checked JDBC row reader;
 - identity-stable typed query tokens for each generated scalar equality index, with an `IS NULL` seam only for nullable tokens;
 - a deterministic mapping fingerprint, including declared index identities, and table/tenant metadata used by runtime checks;
 - no environment-specific values or credentials.
 
+The generated `readRow(ResultSet, firstColumn)` evaluates typed codec reads in
+column order and calls the verified canonical constructor directly. Each read
+checks nullability and value bounds against immutable generated metadata; enum
+codecs are initialized once and reused. This removes the intermediate `Object[]`
+row container. Generated readers neither advance nor retain the result set and
+do not create statements or acquire connections. The runtime retains transaction
+ownership, result ordering, tenant/identity/version verification, returned-payload
+comparison, and cleanup/rollback handling. Driver and scalar-validation failures
+follow the same transaction failure paths.
+
+The generation SPI uses `readRow` instead of the former array-based `instantiate`
+method. Each plan embeds its processor's generated-plan ABI as an integer literal.
+`PgModel` checks that version once, before capturing any other plan metadata or
+constructing runtime SQL. Unversioned output (ABI zero) and incompatible versions
+fail with a recompilation diagnostic before a database connection is acquired.
+Recompile application mappings with matching processor/runtime versions; this
+check provides an early failure, not compatibility with stale generated classes.
+It does not attest handwritten or transformed implementations. Incompatible SPI
+changes must increment the runtime and processor ABI together. ABI 2 separates
+common snapshot metadata (`PgEntityPlan`) from explicit tenant ownership
+(`PgTenantEntityPlan`). Tenant-owned mappings declare that ownership,
+including read-only mappings. Explicit `@VevShared` records instead implement
+`PgSharedEntityPlan`, have no tenant column/codec/accessor, and expose no writes. A plan
+with neither ownership capability, or both, fails model construction. The tenant codec and column are
+captured once, while snapshot tenant access remains direct generated code.
+ABI 3 adds the common `PgQueryIndex` metadata parent and distinct ID-ordered versus value/ID-ordered query tokens. ABI 4 adds the explicit `PgSharedEntityPlan.scopeType()` class. Every plan supplies the same lexical tenant type, so a model may contain only shared records when `@VevModel.tenantType` declares its scope type. Shared scope metadata is captured once; it never fabricates row ownership. ABI 5 adds the explicit read-only incoming-reference boundary through `PgReadOnlyEntityPlan.externalIncomingReferences()`. The runtime captures it only after rejecting mutation capabilities. ABI 6 adds exact VALUE-column default metadata and bootstrap expression attestation; application values remain explicitly bound. ABI 7 adds captured tenant-registry references on the actual tenant key, without a registry entity capability. ABI 1 through 6 mappings must be regenerated even if their schema fingerprint is unchanged.
+The mapping
+fingerprint describes the schema, not generator ABI or
+performance. Allocation and latency effects require the benchmark evidence
+specified in the [benchmark policy](benchmark-policy.md).
+
 Generated plan and registry names use a Vev-specific `Vev` suffix instead of Jakarta's static-metamodel `_` suffix. Vev and a Jakarta/Hibernate metamodel processor may coexist in one build only for distinct source types; a Vev record cannot simultaneously be a Jakarta/Hibernate entity. The Vev processor claims only the `@VevModel` trigger annotation; it inspects the listed mapping annotations transitively without taking ownership of them from other processors.
 
-The processor does not emit a DDL manifest, migration, general query AST, or user-extensible SQL plan. Current multi-row queries are the PostgreSQL runtime's bounded ID scan and the generated-index equality/nullable families. Each supports a typed exclusive-key continuation. There is no arbitrary predicate, runtime DSL, `OFFSET`, projection, join, or unbounded query path; arbitrary implementations of the public query interface are rejected at execution.
+The processor emits a deterministic, versioned [schema manifest](schema-manifest.md) in class output alongside the generated model. It does not emit or apply a migration, general query AST, or user-extensible SQL plan. Current multi-row queries are the PostgreSQL runtime's bounded ID scan and the generated-index equality/nullable families. ID-ordered pages support a typed exclusive-key continuation; explicitly ordered indexes require a typed ordering-value/ID cursor bound to the exact index token. There is no arbitrary predicate, runtime DSL, `OFFSET`, projection, join, or unbounded query path; arbitrary implementations of the public query interface are rejected at execution.
 
 Generated output must be reproducible for identical sources, compiler options, and dependency versions. Timestamps, absolute paths, host names, and iteration-order accidents do not belong in generated artifacts.
 
@@ -39,17 +102,18 @@ Compilation proves source consistency, not database consistency. In particular, 
 - an endpoint identity consisting of server address and port, PostgreSQL system identifier, postmaster start time, database name and OID, session user, current role, and recovery state;
 - an application role that is neither superuser nor `BYPASSRLS`, is not a member of a role with either capability, and is not the mapped-table owner or a member of the owner role;
 - `SELECT` access and no data-mutation privilege on `public.vev_schema_fingerprint`, plus exactly one matching migration-installed fingerprint row;
-- an exact generated column set with built-in PostgreSQL types, exact `varchar` and `numeric` modifiers, nullability, deterministic collations whose recorded provider version is current, no defaults, no identity, no generated columns, and no missing-value catalog state; the database-default collation is attested through `pg_database`, while named collations are attested through `pg_collation`;
-- one exact immediate built-in B-tree `(tenant, id)` primary key, which bounds the implemented tenant/ID scan work;
-- the exact generated set of non-unique, immediate, built-in B-tree secondary indexes, each with no predicate, expression, included column, constraint ownership, custom option, or non-default ordering and with keys exactly `(tenant, indexed value, id)` under the expected collation and built-in default operator classes;
-- permanent logged nonpartitioned non-inherited built-in heap tables, with no rewrite rules, foreign keys, check constraints, unique secondary indexes, or undeclared indexes touching a mapped table;
-- schema `USAGE` without `CREATE`, table `SELECT`, exact column-level `INSERT`, exact mutable-value/version column-level `UPDATE`, no table `DELETE`, and no effective `TRUNCATE`, `REFERENCES`, `TRIGGER`, or `MAINTAIN` privilege;
+- an exact generated column set with built-in PostgreSQL types, exact `varchar` and `numeric` modifiers, nullability, deterministic collations whose recorded provider version is current, exact declared VALUE-column defaults with approved expression dependencies, no generated columns and coherent native historical missing-value storage; declared integer identities require their exact internally owned sequence contract; the database-default collation is attested through `pg_database`, while named collations are attested through `pg_collation`;
+- one exact declared immediate built-in B-tree primary key, with a tenant-leading traversal index when a scoped primary key starts with ID; shared reference tables require `(id)`;
+- the exact generated set of non-unique, immediate, built-in B-tree secondary indexes, each with no predicate, expression, included column, constraint ownership, custom option, or undeclared ordering and with keys exactly `(tenant, indexed value, id)`, `(tenant, indexed value, ordering value, id)`, or `(tenant, id)`, omitting the tenant prefix only for shared mappings, under the exact declared per-key direction, default null placement, expected collation, and built-in default operator classes;
+- named `@UniqueConstraint` declarations and their backing B-trees, with exact declared tenant-qualified or shared VALUE-column order, immediate validated/enforced distinct-null semantics, built-in default operator classes, matching collations, and no predicate, expression, included column, custom options, or non-default ordering;
+- permanent logged nonpartitioned non-inherited built-in heap tables, with no rewrite rules, undeclared checks, or undeclared indexes touching a mapped table;
+- schema `USAGE` without `CREATE`, table `SELECT`, exact column-level `INSERT` for writable mappings, exact mutable-value/version column-level `UPDATE`, no write or sequence privileges for `@VevReadOnly`, table `DELETE` exactly when `@VevDelete` opts in (without grant option), and no effective `TRUNCATE`, `REFERENCES`, `TRIGGER`, or `MAINTAIN` privilege;
 - no enabled user trigger; and
-- enabled and forced RLS with exactly one permissive `FOR ALL` policy, restricted to the application role, whose `USING` and `WITH CHECK` expressions exactly compare the tenant column with `vev.tenant_id`.
+- enabled and forced RLS with exactly one permissive `FOR ALL` policy, restricted to the application role, whose `USING` and `WITH CHECK` expressions exactly compare the tenant column with `vev.tenant_id`; explicitly shared tables instead require both RLS flags false and zero policies.
 
 Vev requires a dedicated pgjdbc `DataSource` whose connections already report an exact `pg_catalog` search path, UTF-8 client and server encodings, standard-conforming strings, and integer datetimes. Bootstrap and every runtime checkout fail if that trusted session baseline differs or if PostgreSQL reports a retained temporary schema. Vev deliberately does not toggle `search_path` per transaction: PostgreSQL reports that setting to pgjdbc, whose prepared-query cache is invalidated when it changes. Built-in casts remain schema-qualified as defense in depth. Bootstrap then enters its read-only catalog boundary. Each runtime connection uses `SERIALIZABLE`, enables synchronous commit, installs transaction-local tenant and timeout state, and verifies the pinned endpoint identity, exact generated fingerprint, and session state both after configuration and immediately before commit. The single-use tenant authority is claimed only after bootstrap succeeds.
 
-The verifier does not derive the fingerprint from the live catalog or prove business-level invariants. It accepts only the exact generated non-unique equality indexes and rejects check constraints, unique indexes, and every foreign key rather than pretending to understand their semantics.
+The verifier does not derive the fingerprint from the live catalog or prove business-level invariants. It accepts exact generated non-unique equality indexes, named immediate tenant-scoped unique constraints with distinct-null semantics, and declared tenant-composite foreign keys. It also verifies [declared checks](check-constraints.md) without evaluating their expressions and rejects unapproved database behavior, standalone or undeclared unique indexes, and undeclared references. Each foreign key must reference a tenant-qualified primary or declared alternate unique key inside the closed model, have exact tenant/value column order and matching types/collations, use immediate validated/enforced MATCH SIMPLE and NO ACTION semantics, and retain all four enabled built-in PostgreSQL referential-integrity triggers. Incoming references from outside the closed model are rejected unless a read-only target explicitly declares the external incoming-reference boundary; mapped sources, self-references, and outgoing constraints remain fully verified.
 
 Drift is fatal by default. A missing column or incompatible type must not trigger a reflective fallback, implicit DDL, or best-effort coercion.
 

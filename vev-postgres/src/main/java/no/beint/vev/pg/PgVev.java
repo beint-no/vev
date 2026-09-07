@@ -43,6 +43,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     private final TenantAuthority.Claim<M> tenantClaim;
     private final PgSettings settings;
     private final DatabaseIdentity databaseIdentity;
+    private final java.util.Map<PgPlan<?, ?, ?, ?>, Long> identitySequences;
+
+    private record VerifiedDatabase(DatabaseIdentity identity, java.util.Map<PgPlan<?, ?, ?, ?>, Long> sequences) {
+    }
 
     /**
      * Verifies and creates a runtime using {@link PgSettings#SAFE_DEFAULTS}.
@@ -77,13 +81,14 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             + model.tenantType().getName());
         }
         this.settings = Objects.requireNonNull(settings, "settings");
-        DatabaseIdentity verifiedDatabaseIdentity;
+        VerifiedDatabase verifiedDatabase;
         TenantAuthority.Claim<M> verifiedTenantClaim;
         try (TenantAuthority.Reservation<M> reservation = tenantAuthority.reserve(model.identity())) {
-            verifiedDatabaseIdentity = verifyDatabase();
+            verifiedDatabase = verifyDatabase();
             verifiedTenantClaim = reservation.claim();
         }
-        this.databaseIdentity = verifiedDatabaseIdentity;
+        this.databaseIdentity = verifiedDatabase.identity();
+        this.identitySequences = verifiedDatabase.sequences();
         this.tenantClaim = verifiedTenantClaim;
     }
 
@@ -124,7 +129,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             try {
                 connection = acquireConnection();
                 configure(connection, tenant, readOnly);
-                PgEntities<M, T> entities = new PgEntities<>(connection, model, tenant, guard, settings, !readOnly);
+                PgEntities<M, T> entities = new PgEntities<>(connection, model, tenant, guard, settings, !readOnly, identitySequences);
                 ReadTx<M, T> transaction = readOnly
                         ? new PgReadTransaction<>(tenant, entities, guard)
                         : new PgWriteTransaction<>(tenant, entities, guard);
@@ -253,7 +258,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         }
     }
 
-    private DatabaseIdentity verifyDatabase() {
+    private VerifiedDatabase verifyDatabase() {
         BootstrapStage stage = BootstrapStage.CONNECTION_ACQUISITION;
         try (Connection connection = acquireConnection()) {
             Throwable verificationFailure = null;
@@ -272,9 +277,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 verifyFingerprintValue(connection);
                 stage = BootstrapStage.TENANT_ISOLATION;
                 verifyTenantIsolation(connection);
+                java.util.Map<PgPlan<?, ?, ?, ?>, Long> sequences = PgIdentities.verify(connection, model.frozenPlans());
                 stage = BootstrapStage.BOOTSTRAP_CONTEXT;
                 verifyBootstrapContext(connection, identity);
-                return identity;
+                return new VerifiedDatabase(identity, sequences);
             } catch (SQLException | RuntimeException | Error failure) {
                 verificationFailure = failure;
                 throw failure;
@@ -411,6 +417,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 || !"UTF8".equals(postgres.getParameterStatus("client_encoding"))
                 || !"UTF8".equals(postgres.getParameterStatus("server_encoding"))
                 || !"on".equals(postgres.getParameterStatus("standard_conforming_strings"))
+                || !"ISO, MDY".equals(postgres.getParameterStatus("DateStyle"))
+                || !"postgres".equals(postgres.getParameterStatus("IntervalStyle"))
                 || !"on".equals(postgres.getParameterStatus("integer_datetimes"))) {
             throw new IllegalStateException(
                     "Vev requires a dedicated pgjdbc connection with a trusted immutable session baseline");
@@ -449,6 +457,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             String expectedTenant,
             boolean readOnly,
             DatabaseIdentity identity) throws SQLException {
+        requireTrustedSessionBaseline(connection);
         if (connection.getNetworkTimeout() != Math.toIntExact(settings.networkTimeout().toMillis())) {
             throw new IllegalStateException("PostgreSQL connection escaped Vev's network deadline");
         }
@@ -884,6 +893,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyTenantIsolation(Connection connection) throws SQLException {
+        PgTenantReferences.verify(connection, model);
+        PgCheckCatalog checkCatalog = new PgCheckCatalog(connection);
         String sql = """
                 SELECT c.relkind,
                        c.relpersistence,
@@ -950,20 +961,20 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     if (!"r".equals(resultSet.getString(1))
                             || !"p".equals(resultSet.getString(2))
                             || resultSet.getBoolean(3)
-                            || !resultSet.getBoolean(4)
-                            || !resultSet.getBoolean(5)
+                            || resultSet.getBoolean(4) == plan.shared()
+                            || resultSet.getBoolean(5) == plan.shared()
                             || resultSet.getBoolean(6)
                             || !resultSet.getBoolean(7)
                             || resultSet.getBoolean(8)
                             || !resultSet.getBoolean(9)
                             || resultSet.getBoolean(10)
                             || resultSet.getBoolean(11)
-                            || resultSet.getBoolean(12)
+                            || resultSet.getBoolean(12) != plan.deletable()
                             || resultSet.getBoolean(13)
                             || resultSet.getBoolean(14)
                             || resultSet.getBoolean(15)
                             || resultSet.getBoolean(16)
-                            || !resultSet.getBoolean(17)
+                            || resultSet.getBoolean(17) == plan.readOnly()
                             || resultSet.getBoolean(19)
                             || resultSet.getBoolean(20)
                             || resultSet.getBoolean(21)
@@ -974,7 +985,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                             || resultSet.getBoolean(26)
                             || resultSet.getBoolean(27)
                             || resultSet.getBoolean(28)) {
-                        throw new IllegalStateException("Mapped table must use a least-privilege role and forced row security: "
+                        throw new IllegalStateException("Mapped table must use least privilege and its declared row-security profile: "
                                 + plan.schemaName() + '.' + plan.tableName());
                     }
                     boolean versioned = plan instanceof PgVersionPlan<?, ?, ?, ?, ?>;
@@ -988,9 +999,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     }
                 }
                 verifyColumns(connection, plan);
+                PgDefaults.verify(connection, checkCatalog, plan);
                 verifyColumnPrivileges(connection, plan);
                 verifyPrimaryKey(connection, plan);
-                verifyStructuralConstraints(connection, plan);
+                verifyStructuralConstraints(connection, checkCatalog, plan);
                 verifyPolicy(connection, plan);
             }
         }
@@ -1031,7 +1043,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     boolean updateAllowed = versioned
                             && (column.role() == PgColumn.Role.VALUE || column.role() == PgColumn.Role.VERSION);
                     if (!column.name().equals(resultSet.getString(1))
-                            || !resultSet.getBoolean(2)
+                            || resultSet.getBoolean(2) == plan.readOnly()
                             || resultSet.getBoolean(3) != updateAllowed
                             || resultSet.getBoolean(4)
                             || resultSet.getBoolean(5)
@@ -1071,13 +1083,16 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             }
         }
 
+        // ADD COLUMN may retain a historical datum for physically older tuples. PostgreSQL
+        // reads that datum using the column's verified built-in type; no old expression runs.
+        // Test presence only here: do not fetch/deparse attmissingval or make row data schema metadata.
         String columnSql = """
                 SELECT attribute.attnotnull,
                        attribute.atttypid = pg_catalog.to_regtype(?),
                        attribute.attidentity,
                        attribute.attgenerated,
                        attribute.atthasdef,
-                       NOT attribute.atthasmissing,
+                       NOT attribute.atthasmissing OR attribute.attmissingval IS NOT NULL,
                        attribute.atttypmod = ?,
                        type_namespace.nspname = 'pg_catalog',
                        type.typtype = 'b',
@@ -1121,9 +1136,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                     String generated = resultSet.getString(4);
                     if (resultSet.getBoolean(1) != !column.nullable()
                             || !resultSet.getBoolean(2)
-                            || !identity.isEmpty()
+                            || (plan.generatedIdentity() && column.role() == PgColumn.Role.ID
+                                    ? !identity.equals("a") && !identity.equals("d") : !identity.isEmpty())
                             || !generated.isEmpty()
-                            || resultSet.getBoolean(5)
+                            || resultSet.getBoolean(5) != !column.defaultExpression().isEmpty()
                             || !resultSet.getBoolean(6)
                             || !resultSet.getBoolean(7)
                             || !resultSet.getBoolean(8)
@@ -1140,6 +1156,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
     }
 
     private void verifyPrimaryKey(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
+        List<String> expected = plan.primaryKeyColumns();
         String indexShapeSql = """
                 SELECT pg_catalog.count(*),
                        COALESCE(pg_catalog.bool_and(
@@ -1150,8 +1167,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                            AND mapped_index.indislive
                            AND mapped_index.indexprs IS NULL
                            AND mapped_index.indpred IS NULL
-                           AND mapped_index.indnkeyatts = 2
-                           AND mapped_index.indnatts = 2
+                           AND mapped_index.indnkeyatts = ?
+                           AND mapped_index.indnatts = ?
                            AND primary_constraint.oid IS NOT NULL
                            AND NOT primary_constraint.condeferrable
                            AND primary_constraint.convalidated
@@ -1170,8 +1187,10 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                    AND mapped_index.indisprimary
                 """;
         try (PreparedStatement statement = connection.prepareStatement(indexShapeSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
+            statement.setInt(1, expected.size());
+            statement.setInt(2, expected.size());
+            statement.setString(3, plan.schemaName());
+            statement.setString(4, plan.tableName());
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()
                         || resultSet.getInt(1) != 1
@@ -1196,6 +1215,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                    AND relation.relname = ?
                    AND index.indisprimary
                  ORDER BY key.position
+                 LIMIT 3
                 """;
         List<String> actual = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -1207,13 +1227,8 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
                 }
             }
         }
-        String idColumn = plan.columns().stream()
-                .filter(column -> column.role() == PgColumn.Role.ID)
-                .map(PgColumn::name)
-                .findFirst()
-                .orElseThrow();
-        if (!actual.equals(List.of(plan.tenantColumn(), idColumn))) {
-            throw new IllegalStateException("Mapped table primary key must be exactly (tenant, id): "
+        if (!actual.equals(expected)) {
+            throw new IllegalStateException("Mapped table primary key must match its declared column order: "
                     + plan.schemaName() + '.' + plan.tableName());
         }
 
@@ -1251,41 +1266,15 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         }
     }
 
-    private void verifyStructuralConstraints(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
-        verifySecondaryIndexes(connection, plan);
+    private void verifyStructuralConstraints(Connection connection, PgCheckCatalog checkCatalog, PgPlan<M, ?, ?, T> plan) throws SQLException {
+        PgIndexes.verify(connection, plan);
 
-        String foreignKeySql = """
-                SELECT pg_catalog.count(*)
-                  FROM pg_catalog.pg_constraint constraint_definition
-                  JOIN pg_catalog.pg_class source_relation
-                    ON source_relation.oid = constraint_definition.conrelid
-                  JOIN pg_catalog.pg_namespace source_namespace
-                    ON source_namespace.oid = source_relation.relnamespace
-                  JOIN pg_catalog.pg_class target_relation
-                    ON target_relation.oid = constraint_definition.confrelid
-                  JOIN pg_catalog.pg_namespace target_namespace
-                    ON target_namespace.oid = target_relation.relnamespace
-                 WHERE constraint_definition.contype = 'f'
-                   AND ((source_namespace.nspname = ? AND source_relation.relname = ?)
-                     OR (target_namespace.nspname = ? AND target_relation.relname = ?))
-                """;
-        try (PreparedStatement statement = connection.prepareStatement(foreignKeySql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            statement.setString(3, plan.schemaName());
-            statement.setString(4, plan.tableName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                if (!resultSet.next() || resultSet.getInt(1) != 0 || resultSet.next()) {
-                    throw new IllegalStateException(
-                            "Foreign keys touching mapped tables are outside Vev's closed schema profile: "
-                                    + plan.schemaName() + '.' + plan.tableName());
-                }
-            }
-        }
+        PgReferences.verify(connection, model, plan);
+        if (!plan.checkConstraints().isEmpty()) PgChecks.verify(connection, checkCatalog, plan);
 
         String executableConstraintSql = """
                 SELECT pg_catalog.count(*) FILTER (
-                           WHERE constraint_definition.contype NOT IN ('p', 'n')),
+                           WHERE constraint_definition.contype NOT IN ('p', 'n', 'f', 'u')),
                        pg_catalog.count(*) FILTER (
                            WHERE constraint_definition.contype = 'n'),
                        pg_catalog.count(*) FILTER (
@@ -1307,7 +1296,7 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
             try (ResultSet resultSet = statement.executeQuery()) {
                 long requiredNotNullConstraints = plan.columns().stream().filter(column -> !column.nullable()).count();
                 if (!resultSet.next()
-                        || resultSet.getInt(1) != 0
+                        || resultSet.getInt(1) != plan.checkConstraints().size()
                         || resultSet.getLong(2) != requiredNotNullConstraints
                         || resultSet.getInt(3) != 1
                         || !resultSet.getBoolean(4)
@@ -1320,136 +1309,27 @@ public final class PgVev<M, T> implements TransactionExecutor<M, T> {
         }
     }
 
-    private void verifySecondaryIndexes(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
-        String shapeSql = """
-                SELECT index_relation.relname,
-                       access_method.amname = 'btree',
-                       index_namespace.nspname = namespace.nspname,
-                       index_relation.relkind = 'i',
-                       index_relation.relpersistence = 'p',
-                       NOT index_relation.relispartition,
-                       index_relation.reltablespace = 0,
-                       index_relation.reloptions IS NULL,
-                       NOT mapped_index.indisunique,
-                       NOT mapped_index.indisprimary,
-                       NOT mapped_index.indisexclusion,
-                       mapped_index.indimmediate,
-                       mapped_index.indisvalid,
-                       mapped_index.indisready,
-                       mapped_index.indislive,
-                       NOT mapped_index.indcheckxmin,
-                       NOT mapped_index.indisclustered,
-                       NOT mapped_index.indisreplident,
-                       NOT mapped_index.indnullsnotdistinct,
-                       mapped_index.indexprs IS NULL,
-                       mapped_index.indpred IS NULL,
-                       mapped_index.indnkeyatts = 3,
-                       mapped_index.indnatts = 3,
-                       index_constraint.oid IS NULL
-                  FROM pg_catalog.pg_index mapped_index
-                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
-                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-                  JOIN pg_catalog.pg_class index_relation ON index_relation.oid = mapped_index.indexrelid
-                  JOIN pg_catalog.pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
-                  JOIN pg_catalog.pg_am access_method ON access_method.oid = index_relation.relam
-                  LEFT JOIN pg_catalog.pg_constraint index_constraint
-                    ON index_constraint.conindid = mapped_index.indexrelid
-                 WHERE namespace.nspname = ?
-                   AND relation.relname = ?
-                   AND NOT mapped_index.indisprimary
-                 ORDER BY index_relation.relname
-                """;
-        List<PgIndex<M, ?, ?, ?>> expected = new ArrayList<>(plan.indexes());
-        expected.sort(java.util.Comparator.comparing(PgIndex::indexName));
-        try (PreparedStatement statement = connection.prepareStatement(shapeSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                for (PgIndex<M, ?, ?, ?> index : expected) {
-                    if (!resultSet.next() || !index.indexName().equals(resultSet.getString(1))) {
-                        throw new IllegalStateException("Mapped secondary-index set does not match generated model: "
-                                + plan.schemaName() + '.' + plan.tableName());
-                    }
-                    for (int column = 2; column <= 24; column++) {
-                        if (!resultSet.getBoolean(column)) {
-                            throw new IllegalStateException("Mapped PostgreSQL index shape is unsafe: "
-                                    + plan.schemaName() + '.' + index.indexName());
-                        }
-                    }
-                    verifySecondaryIndexKeys(connection, plan, index);
-                }
-                if (resultSet.next()) {
-                    throw new IllegalStateException("Undeclared PostgreSQL secondary index exists: "
-                            + plan.schemaName() + '.' + resultSet.getString(1));
-                }
-            }
-        }
-    }
-
-    private void verifySecondaryIndexKeys(
-            Connection connection,
-            PgPlan<M, ?, ?, T> plan,
-            PgIndex<M, ?, ?, ?> index) throws SQLException {
-        String keysSql = """
-                SELECT attribute.attname,
-                       operator_namespace.nspname = 'pg_catalog',
-                       operator_class.opcdefault,
-                       (mapped_index.indcollation::pg_catalog.oid[])[key_position.position]
-                           = attribute.attcollation,
-                       (mapped_index.indoption::pg_catalog.int2[])[key_position.position] = 0
-                  FROM pg_catalog.pg_index mapped_index
-                  JOIN pg_catalog.pg_class relation ON relation.oid = mapped_index.indrelid
-                  JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-                  JOIN pg_catalog.pg_class index_relation ON index_relation.oid = mapped_index.indexrelid
-                  JOIN pg_catalog.pg_namespace index_namespace ON index_namespace.oid = index_relation.relnamespace
-                  CROSS JOIN LATERAL pg_catalog.generate_subscripts(
-                      mapped_index.indkey::pg_catalog.int2[], 1) AS key_position(position)
-                  JOIN pg_catalog.pg_attribute attribute
-                    ON attribute.attrelid = relation.oid
-                   AND attribute.attnum = (mapped_index.indkey::pg_catalog.int2[])[key_position.position]
-                  JOIN pg_catalog.pg_opclass operator_class
-                    ON operator_class.oid = (mapped_index.indclass::pg_catalog.oid[])[key_position.position]
-                  JOIN pg_catalog.pg_namespace operator_namespace
-                    ON operator_namespace.oid = operator_class.opcnamespace
-                 WHERE namespace.nspname = ?
-                   AND relation.relname = ?
-                   AND index_namespace.nspname = ?
-                   AND index_relation.relname = ?
-                 ORDER BY key_position.position
-                """;
-        String idColumn = plan.columns().stream()
-                .filter(column -> column.role() == PgColumn.Role.ID)
-                .map(PgColumn::name)
-                .findFirst()
-                .orElseThrow();
-        String valueColumn = plan.columns().get(index.columnIndex()).name();
-        List<String> expectedColumns = List.of(plan.tenantColumn(), valueColumn, idColumn);
-        try (PreparedStatement statement = connection.prepareStatement(keysSql)) {
-            statement.setString(1, plan.schemaName());
-            statement.setString(2, plan.tableName());
-            statement.setString(3, plan.schemaName());
-            statement.setString(4, index.indexName());
-            try (ResultSet resultSet = statement.executeQuery()) {
-                for (String expectedColumn : expectedColumns) {
-                    if (!resultSet.next()
-                            || !expectedColumn.equals(resultSet.getString(1))
-                            || !resultSet.getBoolean(2)
-                            || !resultSet.getBoolean(3)
-                            || !resultSet.getBoolean(4)
-                            || !resultSet.getBoolean(5)) {
-                        throw new IllegalStateException("Mapped PostgreSQL index keys do not match generated query: "
-                                + plan.schemaName() + '.' + index.indexName());
-                    }
-                }
-                if (resultSet.next()) {
-                    throw new IllegalStateException("Mapped PostgreSQL index has undeclared key columns: "
-                            + plan.schemaName() + '.' + index.indexName());
-                }
-            }
-        }
-    }
-
     private void verifyPolicy(Connection connection, PgPlan<M, ?, ?, T> plan) throws SQLException {
+        if (plan.shared()) {
+            // Never deparse a policy on a shared table, even when RLS is disabled.
+            // Unexpected policy constants could invoke an untrusted output routine during pg_get_expr.
+            try (PreparedStatement statement = connection.prepareStatement("""
+                    SELECT pg_catalog.count(*)
+                      FROM pg_catalog.pg_policy policy
+                      JOIN pg_catalog.pg_class relation ON relation.oid = policy.polrelid
+                      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+                     WHERE namespace.nspname = ? AND relation.relname = ?
+                    """)) {
+                statement.setString(1, plan.schemaName());
+                statement.setString(2, plan.tableName());
+                try (ResultSet rows = statement.executeQuery()) {
+                    if (!rows.next() || rows.getLong(1) != 0 || rows.next()) {
+                        throw new IllegalStateException("Shared reference tables must have no row-security policies");
+                    }
+                }
+            }
+            return;
+        }
         String sql = """
                 SELECT pg_catalog.count(*),
                        COALESCE(pg_catalog.bool_and(
