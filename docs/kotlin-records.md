@@ -1,7 +1,7 @@
 # Kotlin record mappings
 
 Vev can compile separately built Kotlin `@JvmRecord` data classes into the same
-typed PostgreSQL plans used for Java records. Kotlin `2.4.10` with its normal
+typed PostgreSQL plans used for Java records. Kotlin `2.4.20` with its normal
 parameter null checks is verified on JDK `27+35-2325`. This is immutable snapshot
 mapping, not support for mutable JPA classes, managed relationships, or dirty
 checking. Jakarta still forbids records as provider-managed entities.
@@ -38,11 +38,11 @@ explicitly. No KAPT, KSP, runtime scanning, reflective hydration, or Hibernate m
 required. The unpublished `vev-kotlin-test-model` and `vev-integration-tests`
 modules demonstrate this dependency order.
 
-Kotlin 2.4.10 currently emits at most JVM 26 bytecode. Use JDK 27 for compilation
+The Kotlin 2.4.20 fixture targets JVM 26 bytecode. Use JDK 27 for compilation
 and execution, select `JvmTarget.JVM_26` for the record module, and align that
 module's Java compiler release to 26. Its Gradle API/runtime attributes must still
 declare JVM 27 because Vev requires that runtime. The fixture build shows the
-exact configuration. This is an input bytecode limitation, not JDK 26 support;
+exact configuration. The fixture bytecode target does not imply JDK 26 support;
 Vev's own published modules and processor target JDK 27.
 
 The build-time verifier permits Kotlin's standard parameter-null-check prelude
