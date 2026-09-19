@@ -1,122 +1,191 @@
 # Vev
 
-Vev 1.0.0 is the first stable release of the documented native persistence API.
-It targets JDK 27 and PostgreSQL 18. The optional Jakarta 4 facade remains
-nonconforming; full Hibernate replacement in ReAI is ongoing. See the
-[release scope and evidence](docs/1.0-release-gates.md) and [installation instructions](docs/releases.md).
+SQL-first persistence for **JDK 27, PostgreSQL 18, and Kotlin**.
 
-Vev provides an ahead-of-time, PostgreSQL-first persistence model for modern JVM applications. It is deliberately not a general ORM or a drop-in Hibernate implementation. Instead of recreating a stateful ORM session, Vev interprets a small selection of Jakarta Persistence annotations as source metadata and compiles them into immutable mapping metadata, closed typed query tokens, and direct bind/read plans used by a stateless persistence API. Unsupported mappings are intended to fail compilation rather than acquire approximate runtime behavior.
+Write PostgreSQL queries. Vev applies your Flyway migrations to a disposable local
+PostgreSQL cluster, asks PostgreSQL to parse and describe each query, and generates
+typed Kotlin functions and result classes. Application queries are never executed
+during generation. There is no entity model, query DSL, reflection-based mapper,
+persistence context, or Jakarta dependency.
 
-The native API is stable within its documented profile. Safety and performance claims remain limited to the published evidence; this release does not establish a general advantage over Hibernate or another persistence implementation.
+## Use
 
-The current baseline is:
+Install PostgreSQL 18 with `postgres`, `initdb`, and `pg_ctl` on `PATH`. Run Gradle
+with JDK 27. SQL-first artifacts use `no.beint.vev:runtime:1.0.0`,
+`no.beint.vev:compiler:1.0.0`, and the `no.beint.vev` Gradle plugin.
 
-- JDK 27, with no compatibility target for older JDKs;
-- exactly PostgreSQL major 18; the current CI fixture is PostgreSQL 18.6;
-- the preview `jakarta.persistence:jakarta.persistence-api:4.0.0-M6` contract;
-- a closed, documented selection of Jakarta Persistence annotations reused as Vev metadata, not a conforming subset of the provider specification.
+```kotlin
+plugins {
+    kotlin("jvm") version "2.4.20"
+    id("no.beint.vev") version "1.0.0"
+}
 
-Jakarta Persistence 4.0.0-M6 is a milestone release. Vev's annotation profile and API may change as the specification changes. Do not infer compatibility with a final Jakarta Persistence 4 release.
+repositories { mavenCentral() }
 
-The Jakarta Persistence 4 [`@Entity` contract](https://jakarta.ee/specifications/persistence/4.0/apidocs/jakarta.persistence/jakarta/persistence/entity) forbids records as entities. Vev deliberately requires immutable records and therefore uses selected Jakarta annotations as **nonconforming source metadata**. A Vev record is not a Jakarta entity, cannot simultaneously be managed by Hibernate or another Jakarta provider, and requires a separate or rewritten record model during migration.
-
-## Design direction
-
-The optional Jakarta-facing facade is shaped like the preview [`EntityAgent`](https://jakarta.ee/specifications/persistence/4.0/apidocs/jakarta.persistence/jakarta/persistence/entityagent), which performs operations without a persistence context and returns detached entities. The current `vev-jakarta4` adapter is deliberately nonconforming: it implements only selected operations and does not yet honor every inherited option, property, lifecycle, or exception contract. It must not be treated as a Jakarta provider implementation. Its selected surface maps onto the native `TransactionExecutor`, lexical `ReadTx`/`WriteTx`, and explicit `ReadEntities`/`WriteEntities` contracts. Generated per-entity plans contain binders, row readers, and mapping metadata; the PostgreSQL runtime constructs and caches the only permitted SQL shapes from that validated metadata.
-
-The current immutable-record facade supports detached `find`/`get`, ordered multiple lookups, assigned-value insert, and homogeneous insert batches. Jakarta's `void` update and refresh operations are rejected before SQL because an immutable snapshot cannot be synchronized in place. The native API supports assigned insertion, generated identity creation, optimistic updates, and opt-in [version-checked physical deletion](docs/physical-deletion.md) for generated identities. The facade continues to reject delete; create-capable upsert remains unavailable.
-
-`insertMultiple` validates every input and rejects duplicate entity keys before SQL, then sends one fixed PostgreSQL statement containing one typed array per column. PostgreSQL expands the arrays with ordinality, inserts the batch, and returns snapshots in input order; every returned column must equal its validated input or the transaction is poisoned. `updateMultiple` uses the same typed-array/ordinality shape in one guarded statement. It rejects duplicate keys before SQL and is all-or-nothing: every tenant, identifier, and expected version must match before any row is changed, while one stale or missing row poisons and rolls back the complete lexical transaction. Every returned non-version value must equal the requested input and every version must advance exactly once.
-
-The first generated query family beyond identifiers is deliberately narrow. `@VevIndex` on an ordinary scalar component generates an exact typed index token for bounded equality pages, with `IS NULL` available only for a nullable component. Pages use primary-key order by default. An explicit [ordered index](docs/ordered-index-queries.md) adds a non-null scalar ordering column and a typed value/ID cursor, with fixed ascending or descending direction. Vev has no arbitrary SQL, runtime query DSL, `OFFSET`, unbounded query, join, or projection surface yet.
-
-Consequently, the initial design has no transparent dirty checking, lazy entity proxies, session identity map, or implicit cascade graph. Loaded entities are detached ordinary objects. Transaction scope, tenant scope, and writes remain visible in application control flow. The current adapter is available only inside a lexical transaction callback, closes automatically, and must not escape or cross a thread boundary.
-
-```java
-@Entity
-@Table(name = "catalog_item", schema = "catalog")
-public record CatalogItem(
-    @Id @Column(name = "id", nullable = false) UUID id,
-    @TenantKey @Column(name = "tenant_id", nullable = false) Integer tenantId,
-    @Version @Column(name = "version", nullable = false) long version,
-    @VevIndex(name = "catalog_item_sku_vev_idx")
-    @Column(name = "sku", nullable = false, length = 64) String sku
-) {}
-
-@VevModel(entities = CatalogItem.class)
-public final class CatalogModel {}
-
-var tenantAuthority = CatalogModelVev.newTenantAuthority();
-var vev = new PgVev<>(dataSource, CatalogModelVev.POSTGRES, tenantAuthority);
-var tenant = tenantAuthority.scope(42);
-var persisted = vev.write(tenant, tx ->
-    tx.entities().insert(CatalogItemVev.INSTANCE, item));
-
-var page = vev.read(tenant, tx -> tx.entities().many(
-    PgQueries.equal(CatalogItemVev.SKU, "SKU-42", new QueryLimit(100))));
+tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+    packageName.set("example.db")
+    className.set("Queries")
+}
 ```
 
-`TenantAuthority<Model,T>` is an application capability, not a value factory to recreate at each call site. The generated factory binds its phantom model type and mapping fingerprint at compile time. `PgVev` exclusively reserves the capability, verifies one database endpoint, and claims it only after verification succeeds. The authority can then mint scopes for that runtime and cannot be reused for another `PgVev`. A cross-model scope does not type-check; erased or foreign scopes are rejected before connection acquisition.
+Add `mavenCentral()` to `pluginManagement.repositories` in settings. The plugin
+adds the runtime dependency and wires generation into Kotlin compilation.
+The application supplies pgjdbc and its connection pool. Kotlin 2.4.20 emits JVM
+26 bytecode; compile and run with JDK 27. Set `JvmTarget.JVM_26` in Kotlin builds
+that otherwise derive their bytecode target from the JDK 27 toolchain.
 
-Explicit [read-only mappings](docs/read-only-mappings.md) expose no mutation capabilities and require SELECT-only table access, even inside write transactions. Stored identity/version metadata remains verifiable without granting writes. An explicit [external incoming reference option](docs/read-only-mappings.md#external-incoming-references) permits unmapped tables to reference a SELECT-only target while retaining exact outgoing and within-model attestation. Explicit [shared reference mappings](docs/shared-reference-mappings.md) combine `@VevShared` with read-only access for rows intentionally visible to every tenant. Models containing only shared records declare `@VevModel(tenantType = ...)` and retain real tenant scopes and the same verified authority.
+Place Flyway migrations in `src/main/resources/db/migration`. For example:
 
-[Tenant-registry references](docs/tenant-registry-references.md) attach to the actual tenant key and preserve its database foreign key without exposing registry data or administration through Vev.
+```sql
+CREATE TABLE customer (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tenant_id integer NOT NULL,
+    name text NOT NULL
+);
+```
 
-[Declared database defaults](docs/column-defaults.md) use `@Column(options = "DEFAULT …")` as exact bootstrap metadata on VALUE columns. Vev never evaluates these expressions or substitutes them for explicit application values; reads and mutation SQL retain their typed behavior.
+Place one named query in each file under `src/main/sql`:
 
-Every mapped component must spell out `@Column(nullable = true)` or `@Column(nullable = false)`; Vev never inherits Jakarta's nullable default. For tenant-owned mappings, the migration must provide the matching schema-qualified table, declared [physical primary key](docs/primary-keys.md), every declared non-unique B-tree index in its exact generated key order and direction, forced row-level security policy, exact column-level `INSERT`/`UPDATE` grants and table-level `DELETE` only for `@VevDelete` entities, and a fingerprint row matching the generated model identity. Named tenant-scoped `@Table(uniqueConstraints = @UniqueConstraint(...))` constraints are verified with immediate `NULLS DISTINCT` enforcement; named [check constraints](docs/check-constraints.md) require exact definitions and approved builtin expression dependencies; undeclared unique indexes remain outside the profile. Explicit `@VevReference` components require verified foreign keys within the closed model, with immediate non-cascading enforcement: tenant-composite keys for tenant-owned targets, scalar keys for explicitly shared targets. The processor packages a deterministic [schema manifest](docs/schema-manifest.md) with each compiled model; Vev does not generate or apply migrations.
+```sql
+-- name: customersAfter :many
+-- tenant: tenantId
+-- type: id CustomerId
+-- type: after CustomerId
+-- rows: 1000
+SELECT id, name FROM customer
+WHERE tenant_id = :tenantId AND id > :after
+ORDER BY id
+LIMIT :limit::integer;
+```
 
-Java records and [Kotlin `@JvmRecord` data classes](docs/kotlin-records.md) may also come from separately compiled class-path dependencies. Their constructor and accessor bytecode is verified at build time without loading application classes.
+The compiler generates a `CustomerId` value class, a result with non-null `id`
+and `name`, and a function taking `TenantSession`, `CustomerId`, and `Int`:
 
-Larger bounded snapshots can declare a smaller batch/page ceiling with [`@VevRows`](docs/row-limits.md), while retaining the compile-verified 64 MiB result estimate.
+```kotlin
+val database = no.beint.vev.Vev(dataSource)
+val customers = database.read(42) { session ->
+    Queries.customersAfter(session, CustomerId(0), 100)
+}
+```
 
-[`Binary`](docs/binary-values.md) provides immutable PostgreSQL `bytea` values with explicit `@VevBinary` byte bounds and verified database length checks. Large values use smaller row limits; small digests support typed indexes and tenant-scoped uniqueness.
+## Query contracts
 
-[`@VevText`](docs/text-values.md) maps bounded String values to PostgreSQL `text`, using explicit Jakarta column lengths and verified character-length checks.
-
-Compilation proves the closed mapping model, not a live database. `PgVev` performs catalog and privilege attestation at startup. It requires a dedicated pgjdbc `DataSource` whose connections already report the exact `pg_catalog` search path, UTF-8, `DateStyle = ISO, MDY`, and `IntervalStyle = postgres` baseline; Vev rejects retained temporary schemas instead of repairing pooled state. Avoiding per-transaction `search_path` changes also preserves pgjdbc's prepared-query cache. Applications must preserve this connection and schema contract during deployment and upgrades.
-
-## Repository layout
-
-| Module | Responsibility |
+| Directive | Meaning |
 |---|---|
-| `vev-core` | Dialect-neutral transaction and entity contracts |
-| `vev-postgres` | PostgreSQL 18 execution and schema behavior (18.6 currently verified) |
-| `vev-processor` | Ahead-of-time mapping validation and source generation |
-| `vev-jakarta4` | Deliberately nonconforming Jakarta Persistence 4.0 milestone `EntityAgent`-shaped facade and annotation adapter |
-| `vev-integration-tests` | Synthetic PostgreSQL integration fixtures |
-| `vev-benchmark-vev` | Isolated Vev JMH workloads |
-| `vev-benchmark-hibernate` | Isolated Hibernate ORM 8.0.0.Beta1 JMH baseline |
+| `-- name: find :many` | Return a bounded list; default maximum 1,000 rows |
+| `-- name: find :one` | Require exactly one row |
+| `-- name: find :optional` | Return one row or `null`; reject multiple rows |
+| `-- name: change :exec` | Return a `Long` affected-row count; no result set |
+| `-- nullable: name, from` | Allow null for the listed input parameters |
+| `-- type: id CustomerId` | Generate a distinct scalar domain type for that input or output name |
+| `-- tenant: tenantId` | Require `TenantSession`; bind this integer parameter from its scope |
+| `-- rows: 500` | Override the materialization ceiling, between 1 and 1,000,000 |
 
-No artifact is currently published. To verify the source tree with JDK 27:
+Directives precede SQL. Parameters and aliases use ASCII identifiers. Result
+properties convert snake_case to camelCase. Use explicit result columns and
+distinct aliases; wildcards, multiple statements, ambiguous parameters, unknown
+types, and duplicate generated names fail the build. Use PostgreSQL casts to
+resolve ambiguous inputs, such as `:name::text IS NULL`. Repeated named inputs must
+have the same PostgreSQL type at each occurrence. Values are always bound;
+SQL literals, quoted identifiers, nested comments, dollar quoting, casts, and
+PostgreSQL `?` operators are lexed without confusing them with parameters.
+Use separate named queries for different identifiers or sort orders; SQL structure
+is not assembled from runtime strings. Public `Session` execution methods are
+generator plumbing: manually supplying SQL to them bypasses build-time checking.
 
-```shell
-./gradlew clean check integrationTest
+**Nullability is conservative.** A plain SELECT can inherit NOT NULL from origin
+columns. Outer joins, set operations, grouping, CTEs, subqueries, and returned DML
+rows default to nullable results. Standalone `EXISTS` and `COUNT(*)` projections
+are recognized as non-null. Other expressions remain nullable when a proof is
+unavailable. There is no unsafe non-null override. Changing a query to an outer
+join therefore changes generated types and makes unsafe application access fail
+compilation. Declaring nullable inputs is an explicit caller contract, not proof
+that every database constraint accepts NULL.
+
+Supported scalars: boolean; smallint/integer/bigint; real/double precision;
+numeric (`BigDecimal`); text/varchar/char/name; UUID; date/time/timestamp/timestamptz
+(`java.time`, with `OffsetDateTime` for timestamptz); bytea (`ByteArray`); json/jsonb
+(`String`). One-dimensional arrays support booleans, numbers, strings and UUIDs,
+retaining nullable elements. Unknown types fail generation; cast deliberately
+where appropriate. Multidimensional arrays and values JDBC cannot represent
+(for example non-finite numeric values as BigDecimal) fail decoding.
+
+## Transactions and tenancy
+
+`Vev.read` and `Vev.write` acquire one connection, execute one lexical callback,
+commit once, and close it. Read transactions are database-enforced read-only.
+The default isolation is READ COMMITTED; constructor configuration also accepts
+REPEATABLE READ and SERIALIZABLE. No implicit retries, cascades, dirty checking,
+or extra entity loads occur. Query errors and cardinality violations poison the
+scope, even if caught inside its callback. Commit failures propagate with their
+SQLState; an uncertain commit must not be blindly retried. A cleanup failure after
+a successful commit is logged without reporting the write as failed.
+
+`Session.borrow(connection) { ... }` joins a caller-owned transaction. It requires
+autocommit off and never commits, rolls back, or closes the connection. The owner
+must roll back on failure. With Spring JDBC, obtain the transaction-bound
+connection through `JdbcTemplate` or `DataSourceUtils`; with Hibernate, use
+`Session.doReturningWork` and flush pending managed changes when necessary.
+Do not open an independent Vev transaction inside an operation that must be atomic
+with an existing framework transaction.
+
+`TenantSession.borrow(connection, tenantId) { ... }` binds a positive tenant
+identifier without additional database statements. For RLS policies using
+`vev.tenant_id`, explicitly wrap the work in `tenant.withRls { scope -> ... }`.
+That scope reads, installs, and restores the transaction-local setting (three
+additional statements). Place it around the whole unit of work, not each query.
+The tenant identifier must be positive. Session use outside its lexical
+scope or thread fails. Tenant-aware generated functions cannot be called with a
+plain session or an arbitrary per-query tenant argument.
+
+**Tenant scope is not authorization or a SQL predicate proof.** Resolve it from
+the authenticated application context. Keep tenant predicates, composite foreign
+keys, least-privilege roles, and PostgreSQL RLS where required. Vev does not add or
+certify policies. The compiler does not prove business correctness, row counts,
+constraint satisfaction, query plans, or concurrent outcomes. Database constraints,
+including deferred constraint triggers, remain authoritative.
+
+## Build and deployment
+
+Generation requires only migrations and installed PostgreSQL binaries, never
+production credentials or customer data. Every run owns a password-protected,
+loopback-only cluster that is stopped and removed on success, failure, or normal
+process termination. `initdb` must run as a non-root user. Migrations are trusted
+build inputs and execute with privileges inside that disposable cluster.
+
+Configure `queries`, `migrations`, `output`, or `postgresBin` on `generateVev` to
+change their defaults. Optional `fixtures` supplies an additional Flyway location
+for synthetic build-only callbacks when historical migrations require rows.
+Keep it outside application resources. Concurrent-index migrations use Flyway
+session locking. The fixture cluster has bounded statement and lock timeouts;
+explicit migration settings can override them.
+
+Gradle tracks query files, migration files, fixtures, compiler classpath, and the
+PostgreSQL binary version. Unchanged generation is up-to-date; configuration cache
+is supported. Shared output caching is disabled because extension installations
+are external state. Regenerate after changing extensions. Generated Kotlin and
+query hashes are under `build/generated/vev`; do not edit or commit them.
+
+The deployment schema and name resolution must match the build schema. Generation
+is not a live production-schema proof. Deploy migrations and application versions
+with an explicit compatibility strategy. Vev leaves indexes, triggers, constraints,
+connection pools, and database recovery under application ownership.
+
+## Verification
+
+```sh
+./gradlew clean check releaseBundle
+./gradlew :benchmarks:jmh
 ```
 
-Integration verification requires an administrator connection to disposable PostgreSQL 18. Tests and examples use synthetic data only.
+Tests include PostgreSQL-backed compiler rejection, independent Kotlin compile
+failures, runtime type round trips, RLS, deferred constraints, transaction failures,
+resource ownership, statement counts, and a Gradle TestKit consumer that verifies
+configuration caching and migration invalidation. JMH compares equivalent generated
+and handwritten JDBC work with result parity and allocation profiling. See
+[performance evidence](docs/performance.md); no general speed advantage is claimed.
 
-The [current reviewed A–B–B–A evidence bundle](benchmark-results/final-b0b026d19959b4ca848174e8f2ab4c909363d208/report.md) covers generated indexed reads and the guarded 32-row update against prerelease Hibernate ORM 8.0.0.Beta1. Its latency comparison is explicitly rejected: post-A2 telemetry showed severe unrelated CPU and storage activity, and without comparable pre-run or in-run telemetry host interference cannot be excluded. The unfiltered raw results remain public; only the narrowly scoped, repeatable normalized-allocation observations are retained. An [earlier read-only bundle](benchmark-results/final-4b2b23f10d4352d86834c4f43993d1288ba82020/report.md) is also preserved. Neither campaign is a general performance claim.
+The runtime has no dependencies. Compiler, Flyway, Kotlin compiler tooling, test
+libraries, and JMH stay outside the application runtime graph.
 
-Verification runs locally with the checked-in wrapper; this repository has no GitHub Actions CI. The JDK 27 baseline is currently verified on Oracle OpenJDK release candidate `27+35-2325` with PostgreSQL 18.6. JDK 27 general availability is scheduled for September 15, 2026; final-distribution verification remains a follow-up before the ReAI production rollout. Preview APIs are permitted only where measured performance or a simpler, safer implementation justifies their use.
-
-## Safety boundary
-
-Vev is not a drop-in Hibernate replacement. Some annotation spellings are reusable, but a Hibernate/Jakarta entity class is not: the current Vev profile requires a separate immutable record that no Jakarta provider may manage as an entity. Annotation reuse does not imply entity-model, lifecycle, transaction, query, locking, or caching compatibility. Hibernate-specific annotations are not part of the initial public profile unless a document names them explicitly.
-
-Read the supported contract and migration boundaries:
-
-- [Architecture](docs/architecture.md)
-- [Supported profile and rejection matrix](docs/supported-profile.md)
-- [AOT and schema pipeline](docs/aot-schema-pipeline.md)
-- [Tenant threat model](docs/tenant-threat-model.md)
-- [Migration expectations](docs/migration.md)
-- [Benchmark policy](docs/benchmark-policy.md)
-- [Limitations](docs/limitations.md)
-- [Roadmap](docs/roadmap.md)
-
-Security reports should follow [SECURITY.md](SECURITY.md). Contributions should follow [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE).
+[Release process](docs/releases.md) · [Design history](history.md) · [Apache 2.0](LICENSE)

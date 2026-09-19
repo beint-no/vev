@@ -1,26 +1,4 @@
-pluginManagement {
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
-}
-
-dependencyResolutionManagement {
-    repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
-    repositories {
-        mavenCentral()
-    }
-}
-
+pluginManagement { repositories { gradlePluginPortal(); mavenCentral() } }
+dependencyResolutionManagement { repositories { mavenCentral() } }
 rootProject.name = "vev"
-
-include(
-    "vev-core",
-    "vev-postgres",
-    "vev-processor",
-    "vev-jakarta4",
-    "vev-integration-tests",
-    "vev-kotlin-test-model",
-    "vev-benchmark-vev",
-    "vev-benchmark-hibernate"
-)
+include("runtime", "compiler", "gradle-plugin", "verification", "benchmarks")

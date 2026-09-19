@@ -1,45 +1,15 @@
-# Security policy
+# Security
 
-Vev 1.x is maintained within its documented persistence and deployment profile. There is no security SLA or bug-bounty program.
+Report suspected vulnerabilities privately through the repository's GitHub
+security reporting channel before publishing sensitive details.
 
-## Reporting a vulnerability
+The supported boundary is generated queries used through lexical sessions on
+JDK 27 and PostgreSQL 18. Application SQL, migrations, connection providers, and
+authentication decisions are trusted inputs. Public runtime execution primitives
+exist for generated code; handwritten use bypasses compile-time query validation.
+Tenant capabilities do not prove authorization or certify SQL/RLS policy contents.
 
-Do not disclose a suspected vulnerability in a public issue, discussion, pull request, benchmark result, or generated-source sample.
-
-Use GitHub's private vulnerability reporting for this repository. If that facility is unavailable, contact a maintainer privately through an established channel. You may open a public issue asking how to establish private contact, but include no technical detail or indication of affected deployments.
-
-Include, when safe:
-
-- the affected commit and module;
-- the smallest synthetic reproduction;
-- expected and observed behavior;
-- impact, preconditions, and whether tenant isolation is involved;
-- any suggested mitigation;
-- whether the report or exploit has been shared elsewhere.
-
-Never send credentials, production data, private schemas, database dumps, real tenant identifiers, or customer information.
-
-## Sensitive classes of defect
-
-Treat the following as security reports:
-
-- cross-tenant reads or writes;
-- SQL injection or unsafe identifier generation;
-- writes that commit after a failed Vev operation;
-- optimistic-version checks that can be omitted or bypassed;
-- schema verification bypass;
-- generated code that exposes secrets or bind values;
-- connection or transaction state leaking across requests or concurrent tasks;
-- malicious annotation-processor input causing execution beyond normal compiler privileges;
-- unbounded query, batch, allocation, or generated-source resource exhaustion;
-- dependency or publication compromise.
-
-Ordinary unsupported mappings that fail closed are compatibility bugs, not vulnerabilities. An unsupported mapping that is silently accepted may be security-relevant when it can weaken a tenant, transaction, or data-integrity invariant.
-
-## Supported versions
-
-The latest 1.x release receives security fixes. Upgrade to the latest patch release; older patches and pre-1.0 snapshots have no separate backport commitment. A published version does not extend support to mappings or deployment topologies outside the documented profile.
-
-## Disclosure
-
-Maintainers will coordinate scope, mitigation, and disclosure with the reporter when possible, but the project makes no response-time commitment. Public disclosure should wait until a fix or documented mitigation is available.
+The build uses disposable synthetic databases. Do not supply production data or
+credentials. Database constraints, grants and row policies remain essential runtime
+controls. Unsupported mappings fail generation; unexpected result values fail
+execution instead of being silently coerced.

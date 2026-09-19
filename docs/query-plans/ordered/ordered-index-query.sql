@@ -1,1 +1,0 @@
-SELECT "id", "tenant_id", "version", "category", "enabled", "rank_value", "order" FROM "vev_it"."ranked_item" WHERE "tenant_id" = ? AND "category" = ? AND ("rank_value", "id") > (?, ?) ORDER BY "rank_value", "id" LIMIT ?;
