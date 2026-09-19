@@ -1,81 +1,28 @@
-# Releases and compatibility
+# Releases
 
-Vev 1.0.0 stabilizes the documented native API in `vev-core` and `vev-postgres`.
-It is distributed as a GitHub release with a versioned Maven repository archive,
-sources, Javadoc, POMs, Gradle module metadata, and SHA-256 checksums. Artifacts are
-not published to Maven Central by this release procedure.
+SQL-first Vev uses `no.beint.vev:runtime`, `no.beint.vev:compiler`, and
+`no.beint.vev:gradle-plugin`, with the Gradle marker `no.beint.vev`. Version 1.0.0
+is tagged `sql-v1.0.0`. Use matching compiler, plugin, and runtime versions and
+regenerate application sources on upgrades.
 
-## Install 1.0.0
+Release gates:
 
-Download `vev-1.0.0-maven.zip` and `SHA256SUMS` from the
-[1.0.0 release](https://github.com/beint-no/vev/releases/tag/v1.0.0).
-Verify the archive's SHA-256 checksum against the release checksum file, then
-extract it into a persistent local directory or your organization's Maven repository.
-No GitHub credentials are needed to consume the downloaded archive.
+1. `./gradlew clean check releaseBundle` on JDK 27 and PostgreSQL 18.
+2. Compile application trials against the generated Maven repository, then verify
+   them against the published artifacts. Inspect the runtime dependency graph.
+3. Run JMH and retain raw output with exact versions and limitations. Performance
+   evidence is descriptive, not a machine-independent pass/fail threshold.
+4. Inspect the complete diff and generated APIs. Commit, merge, and tag the tested
+   source. Publish signed artifacts with `publishAndReleaseToMavenCentral` and
+   attach the Maven repository bundle plus SHA-256 checksums to the GitHub release.
 
-```kotlin
-repositories {
-    maven {
-        url = uri("/absolute/path/to/extracted-vev-repository")
-        content { includeGroup("no.beint.vev") }
-    }
-    mavenCentral()
-}
-dependencies {
-    implementation("no.beint.vev:vev-postgres:1.0.0")
-    annotationProcessor("no.beint.vev:vev-processor:1.0.0")
-    compileOnly("jakarta.persistence:jakarta.persistence-api:4.0.0-M6")
-}
-```
+`releaseBundle` writes `build/distributions/vev-sql-1.0.0-maven.zip`. It is also a
+standalone Maven repository: extract it and add its directory to both
+`pluginManagement.repositories` and application dependency repositories.
+The compiler/runtime jars, sources, Javadoc, POMs, module metadata and plugin
+marker are included. Signing credentials are supplied externally through the
+standard Maven Publish plugin properties; never put secrets in this repository.
 
-Run Gradle, Java compilation, and the application on JDK 27. The release was
-verified on OpenJDK `27+35-2325` and PostgreSQL 18.6. Final JDK distribution
-verification is still required before the ReAI production rollout. Kotlin record
-consumers currently require the [documented bytecode configuration](kotlin-records.md).
-The native runtime needs no Jakarta provider. Add `vev-jakarta4:1.0.0` only when
-using its explicitly limited milestone facade.
-
-## Compatibility promise
-
-Within 1.x, patches preserve documented native source behavior and binary API
-compatibility; minor releases may add opt-in mappings and typed operations. Unsafe
-or incorrectly accepted database shapes may be rejected by a corrective release,
-with a migration note. No release may silently weaken tenant isolation, optimistic
-version checks, or whole-transaction failure semantics to gain compatibility.
-
-Generated plan interfaces are a compiler/runtime SPI, not a handwritten extension
-API. Keep processor, core, and PostgreSQL modules on the same exact version and
-regenerate all mappings on upgrade. ABI 7 is required for 1.0.0. A schema fingerprint
-change requires a reviewed application migration before deployment; regenerating
-an unchanged fingerprint does not itself require a schema change.
-
-The optional Jakarta 4 facade follows a milestone specification and is outside the
-native compatibility promise. It is not TCK compliant. PostgreSQL major versions,
-server topology, schema privileges, and supported mappings remain explicit parts
-of the [profile](supported-profile.md). Upgrade support covers the latest 1.x patch;
-there is no long-term support or incident-response SLA.
-
-## Maintainer procedure
-
-Use a dedicated feature worktree. Set the exact release version, update the scope
-and next-step notes, and run the checked-in wrapper on JDK 27 against a disposable,
-Vev-owned PostgreSQL 18 fixture:
-
-```shell
-VEV_TEST_ADMIN_JDBC_URL=jdbc:postgresql://127.0.0.1:55439/postgres \
-  ./gradlew clean check integrationTest releaseBundle
-```
-
-`check` includes an isolated consumer of the published Maven/JPMS artifacts.
-`releaseBundle` includes only files under the exact version, excluding timestamped
-repository-root metadata and previous versions. Archive timestamps and ordering
-are deterministic. Rebuild the bundle and compare hashes before publication.
-Inspect archive contents, dependency metadata, licenses, and the intended Git diff.
-Record application verification separately from library tests.
-
-Commit and push the verified change, squash the reviewed release PR, fast-forward
-the primary `main` checkout, and tag that exact commit `v1.0.0`. Create the GitHub
-release with the bundle and its SHA-256 checksum file, and verify the remote tag,
-release metadata, downloaded archive hash, and consumer build. Do not overwrite
-released artifact bytes; publish a patch version for corrections. This procedure
-does not deploy ReAI or merge its application migration PR.
+Only the latest 1.x release is maintained. No support is promised for older JDKs
+or PostgreSQL majors. Conservative nullability may become more precise in later
+releases; unsupported type support is added only with compiler and database tests.

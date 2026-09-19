@@ -1,5 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: Report a vulnerability privately
-    url: https://github.com/beint-no/vev/security/advisories/new
-    about: Use a private GitHub Security Advisory for tenant isolation, SQL injection, transaction atomicity, or other security defects.
