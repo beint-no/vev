@@ -7,7 +7,7 @@ regenerate application sources on upgrades.
 
 Release gates:
 
-1. `./gradlew clean check releaseBundle` on JDK 27 and PostgreSQL 18.
+1. `./gradlew clean check releaseBundle` on the latest JDK and PostgreSQL 18.
 2. Compile application trials against the generated Maven repository, then verify
    them against the published artifacts. Inspect the runtime dependency graph.
 3. Run JMH and retain raw output with exact versions and limitations. Performance

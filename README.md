@@ -1,6 +1,6 @@
 # Vev
 
-SQL-first persistence for **JDK 27, PostgreSQL 18, and Kotlin**.
+SQL-first persistence for **the latest JDK, PostgreSQL 18, and Kotlin**.
 
 Write PostgreSQL queries. Vev applies your Flyway migrations to a disposable local
 PostgreSQL cluster, asks PostgreSQL to parse and describe each query, and generates
@@ -11,7 +11,7 @@ persistence context, or Jakarta dependency.
 ## Use
 
 Install PostgreSQL 18 with `postgres`, `initdb`, and `pg_ctl` on `PATH`. Run Gradle
-with JDK 27. SQL-first artifacts use `no.beint.vev:runtime:1.0.0`,
+with the latest JDK. SQL-first artifacts use `no.beint.vev:runtime:1.0.0`,
 `no.beint.vev:compiler:1.0.0`, and the `no.beint.vev` Gradle plugin.
 
 ```kotlin
@@ -31,8 +31,8 @@ tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
 Add `mavenCentral()` to `pluginManagement.repositories` in settings. The plugin
 adds the runtime dependency and wires generation into Kotlin compilation.
 The application supplies pgjdbc and its connection pool. Kotlin 2.4.20 emits JVM
-26 bytecode; compile and run with JDK 27. Set `JvmTarget.JVM_26` in Kotlin builds
-that otherwise derive their bytecode target from the JDK 27 toolchain.
+26 bytecode; compile and run with the latest JDK. Set `JvmTarget.JVM_26` in Kotlin
+builds that otherwise derive their bytecode target from the latest JDK toolchain.
 
 Place Flyway migrations in `src/main/resources/db/migration`. For example:
 

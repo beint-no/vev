@@ -43,7 +43,7 @@ subprojects {
             if (providers.gradleProperty("signingInMemoryKey").isPresent) signAllPublications()
             pom {
                 name.set("Vev ${project.name}")
-                description.set("SQL-first Kotlin persistence for JDK 27 and PostgreSQL 18")
+                description.set("SQL-first Kotlin persistence for the latest JDK and PostgreSQL 18")
                 url.set("https://github.com/beint-no/vev")
                 licenses { license { name.set("Apache-2.0"); url.set("https://www.apache.org/licenses/LICENSE-2.0.txt") } }
                 developers { developer { id.set("beint-no"); name.set("Beint"); url.set("https://github.com/beint-no") } }

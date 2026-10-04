@@ -1,6 +1,6 @@
 # Contributing
 
-Use JDK 27 and PostgreSQL 18. Run `./gradlew clean check releaseBundle` before
+Use the latest JDK and PostgreSQL 18. Run `./gradlew clean check releaseBundle` before
 submitting a change. Add compiler rejection or independent consumer compilation
 tests for type-system changes, and PostgreSQL integration tests for execution
 semantics. Preserve original failures and explicit connection ownership.
