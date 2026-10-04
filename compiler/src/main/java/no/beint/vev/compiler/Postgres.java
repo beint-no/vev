@@ -61,10 +61,12 @@ public final class Postgres implements AutoCloseable {
     public void migrate(Path migrations, Path fixtures) {
         String[] locations = fixtures == null ? new String[] {"filesystem:" + migrations.toAbsolutePath()}
                 : new String[] {"filesystem:" + migrations.toAbsolutePath(), "filesystem:" + fixtures.toAbsolutePath()};
-        org.flywaydb.core.Flyway.configure().dataSource(url(), user(), password)
-                .configuration(java.util.Map.of("flyway.postgresql.transactional.lock", "false"))
+        var configuration = org.flywaydb.core.Flyway.configure().dataSource(url(), user(), password)
                 .locations(locations)
-                .validateMigrationNaming(true).cleanDisabled(true).load().migrate();
+                .validateMigrationNaming(true).cleanDisabled(true);
+        configuration.getConfigurationExtension(org.flywaydb.database.postgresql.PostgreSQLConfigurationExtension.class)
+                .setTransactionalLock(false);
+        configuration.load().migrate();
     }
 
     private String run(Duration timeout, String program, String... arguments) throws IOException, InterruptedException {
