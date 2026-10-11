@@ -1,5 +1,7 @@
 # Vev
 
+> **Abandoned for now.** Vev is not maintained and this repository is archived. Nothing in beint-no depends on it.
+
 SQL-first persistence for **the latest JDK, PostgreSQL 18, and Kotlin**.
 
 Write PostgreSQL queries. Vev applies your Flyway migrations to a disposable local
