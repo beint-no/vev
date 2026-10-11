@@ -14,7 +14,7 @@ class PluginTest {
         Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
         String repository = System.getProperty("vev.repository").replace("\\", "/");
         Files.writeString(project.resolve("build.gradle.kts"), """
-                plugins { kotlin("jvm") version "2.4.20"; id("no.beint.vev") }
+                plugins { kotlin("jvm") version "2.4.21"; id("no.beint.vev") }
                 repositories { maven { url = uri("%s") }; mavenCentral() }
                 kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26) } }
                 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") { packageName.set("sample") }

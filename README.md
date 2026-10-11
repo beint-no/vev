@@ -16,7 +16,7 @@ with the latest JDK. SQL-first artifacts use `no.beint.vev:runtime:1.0.0`,
 
 ```kotlin
 plugins {
-    kotlin("jvm") version "2.4.20"
+    kotlin("jvm") version "2.4.21"
     id("no.beint.vev") version "1.0.0"
 }
 
@@ -30,7 +30,7 @@ tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
 
 Add `mavenCentral()` to `pluginManagement.repositories` in settings. The plugin
 adds the runtime dependency and wires generation into Kotlin compilation.
-The application supplies pgjdbc and its connection pool. Kotlin 2.4.20 emits JVM
+The application supplies pgjdbc and its connection pool. Kotlin 2.4.21 emits JVM
 26 bytecode; compile and run with the latest JDK. Set `JvmTarget.JVM_26` in Kotlin
 builds that otherwise derive their bytecode target from the latest JDK toolchain.
 
