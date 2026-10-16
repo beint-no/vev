@@ -1,5 +1,12 @@
 # Vev
 
+> **Not in use.** Vev works and 2.0.0 is released, but nothing in beint-no depends on it.
+> Evaluated for ReAI in October 2026 and declined: roughly half of that application's read
+> queries return JPA entities that feed Hibernate's write model, so they could not convert
+> without replacing the ORM, and Hibernate 8 plus the JPA and Spring AOT work is expected to
+> close most of the remaining performance gap. The evidence is in beint-no/reai#1407.
+> This repository is archived; see [design history](history.md) before reviving it.
+
 SQL-first persistence for **the latest JDK, PostgreSQL 18, and Kotlin**.
 
 Write PostgreSQL queries. Vev applies your Flyway migrations to a disposable local
