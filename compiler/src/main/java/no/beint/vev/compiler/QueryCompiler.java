@@ -16,8 +16,11 @@ import java.util.Map;
 /** PostgreSQL Parse/Describe validates SQL without executing application queries. */
 public final class QueryCompiler {
     private QueryCompiler() {}
-    record Value(String name, PgType type, boolean nullable, String domain) {
-        String kotlin() { return (domain == null ? type.kotlin() : domain) + (nullable ? "?" : ""); }
+    record Value(String name, PgType type, boolean nullable, String domain, String enumType) {
+        String kotlin() {
+            String declared = enumType != null ? enumType : domain != null ? domain : type.kotlin();
+            return declared + (nullable ? "?" : "");
+        }
     }
     record Query(SqlSource source, List<Value> parameters, List<Value> columns) {}
 
@@ -87,7 +90,8 @@ public final class QueryCompiler {
                 String name = source.parameters().get(i - 1);
                 PgType type = PgType.of(source.path(), parameterMetadata.getParameterTypeName(i));
                 if (name.equals(source.tenant()) && !type.postgres().equals("int4")) throw SqlSource.error(source.path(), "Tenant parameter must be PostgreSQL integer");
-                Value value = new Value(name, type, source.nullable().contains(name), source.domains().get(name));
+                Value value = new Value(name, type, source.nullable().contains(name), source.domains().get(name),
+                        enumType(source, name, type));
                 Value previous = parameters.putIfAbsent(name, value);
                 if (previous != null && !previous.type.equals(type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
             }
@@ -99,18 +103,35 @@ public final class QueryCompiler {
                 for (int i = 1; i <= result.getColumnCount(); i++) {
                     String name = SqlSource.identifier(source.path(), result.getColumnLabel(i));
                     if (!labels.add(KotlinWriter.camel(name))) throw SqlSource.error(source.path(), "Duplicate result property: " + name + "; give columns distinct aliases");
-                    boolean nullable = !source.requiredExpression(i - 1)
+                    PgType type = PgType.of(source.path(), result.getColumnTypeName(i));
+                    boolean nullable = !source.notNull().contains(name)
+                            && !source.requiredExpression(i - 1)
                             && (!source.directNullability() || result.isNullable(i) != ResultSetMetaData.columnNoNulls);
-                    columns.add(new Value(name, PgType.of(source.path(), result.getColumnTypeName(i)), nullable, source.domains().get(name)));
+                    columns.add(new Value(name, type, nullable, source.domains().get(name), enumType(source, name, type)));
                 }
             }
             for (String name : source.domains().keySet()) {
                 if (!parameters.containsKey(name) && columns.stream().noneMatch(c -> c.name.equals(name))) throw SqlSource.error(source.path(), "type names an unknown parameter or result column: " + name);
             }
+            for (String name : source.enums().keySet()) {
+                if (!parameters.containsKey(name) && columns.stream().noneMatch(c -> c.name.equals(name))) throw SqlSource.error(source.path(), "enum names an unknown parameter or result column: " + name);
+            }
+            for (String name : source.notNull()) {
+                if (columns.stream().noneMatch(c -> c.name.equals(name))) throw SqlSource.error(source.path(), "notnull names an unknown result column: " + name);
+            }
             return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns));
         } catch (SQLException exception) {
             throw new SQLException(source.path() + ": PostgreSQL rejected query " + source.name() + ": " + exception.getMessage(), exception.getSQLState(), exception);
         }
+    }
+
+    /** A Kotlin enum constant travels as text, so only textual PostgreSQL types can carry one. */
+    private static String enumType(SqlSource source, String name, PgType type) {
+        String declared = source.enums().get(name);
+        if (declared != null && !type.textual()) {
+            throw SqlSource.error(source.path(), "enum " + name + " requires a textual PostgreSQL type, not " + type.postgres());
+        }
+        return declared;
     }
 
     private static String digest(String value) {

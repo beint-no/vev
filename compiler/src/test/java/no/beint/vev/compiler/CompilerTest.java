@@ -16,7 +16,10 @@ class CompilerTest {
     @BeforeAll void start() throws Exception {
         postgres = new Postgres("");
         try (Connection connection = postgres.connect(); var statement = connection.createStatement()) {
+            statement.execute("CREATE EXTENSION IF NOT EXISTS citext");
             statement.execute("CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL, note text)");
+            statement.execute("CREATE TABLE record(id integer PRIMARY KEY, status varchar(16) NOT NULL,"
+                    + " email citext NOT NULL, document xml, address inet, kind text)");
         }
     }
     @AfterAll void stop() throws Exception { if (postgres != null) postgres.close(); }
@@ -91,6 +94,52 @@ class CompilerTest {
         assertThrows(Exception.class, () -> compile("-- name: query :many\nDELETE FROM item"));
         assertThrows(Exception.class, () -> compile("-- name: query :many\n-- type: absent ItemId\nSELECT id FROM item"));
     }
+    @Test void textualPostgresTypesReachKotlinAsStrings() throws Exception {
+        String result = compile("-- name: query :many\nSELECT email, document, address FROM record");
+        assertTrue(result.contains("val `email`: String,"), result);
+        assertTrue(result.contains("val `document`: String?,"), result);
+        assertTrue(result.contains("val `address`: String?,"), result);
+    }
+
+    @Test void enumColumnsAndParametersUseTheDeclaredKotlinEnum() throws Exception {
+        String result = compile("-- name: query :many\n-- enum: status example.Status\nSELECT status FROM record WHERE status = :status");
+        assertTrue(result.contains("val `status`: example.Status,"), result);
+        assertTrue(result.contains("`status`: example.Status"), result);
+        assertTrue(result.contains("example.Status.valueOf("), result);
+        assertTrue(result.contains("`status`.name"), result);
+    }
+
+    @Test void nullableEnumsDecodeAndBindThroughLet() throws Exception {
+        String result = compile("-- name: query :many\n-- enum: kind example.Kind\n-- nullable: kind\nSELECT kind FROM record WHERE (:kind::text IS NULL OR kind = :kind)");
+        assertTrue(result.contains("val `kind`: example.Kind?,"), result);
+        assertTrue(result.contains("?.let { example.Kind.valueOf(it) }"), result);
+        assertTrue(result.contains("`kind`?.name"), result);
+    }
+
+    @Test void enumDeclarationsMustBeTextualAndKnown() {
+        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- enum: id example.Status\nSELECT id FROM record"));
+        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- enum: absent example.Status\nSELECT id FROM record"));
+        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- enum: status lowercase\nSELECT status FROM record"));
+        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- enum: status example.Status\n-- type: status Wrapped\nSELECT status FROM record"));
+    }
+
+    @Test void notnullOverridesConservativeNullabilityWithAGuardedRead() throws Exception {
+        String conservative = compile("-- name: query :many\nWITH source AS (SELECT id, name FROM item) SELECT id, name FROM source");
+        assertTrue(conservative.contains("val `id`: Int?,"), conservative);
+        assertTrue(conservative.contains("val `name`: String?,"), conservative);
+        String declared = compile("-- name: query :many\n-- notnull: id, name\nWITH source AS (SELECT id, name FROM item) SELECT id, name FROM source");
+        assertTrue(declared.contains("val `id`: Int,"), declared);
+        assertTrue(declared.contains("val `name`: String,"), declared);
+        // A wrong declaration must fail loudly at the row, never decode as a wrong value.
+        assertTrue(declared.contains("requireNotNull("), declared);
+    }
+
+    @Test void notnullMustNameAResultColumn() {
+        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- notnull: absent\nSELECT id FROM item"));
+        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- notnull: id\nSELECT id FROM item WHERE id = :id"));
+        assertThrows(Exception.class, () -> compile("-- name: query :exec\n-- notnull: id\nDELETE FROM item"));
+    }
+
     @Test void schemaChangesFailGeneration() throws Exception {
         compile("-- name: query :many\nSELECT name FROM item");
         try (var connection = postgres.connect(); var statement = connection.createStatement()) {

@@ -1,7 +1,5 @@
 # Vev
 
-> **Abandoned for now.** Vev is not maintained and this repository is archived. Nothing in beint-no depends on it.
-
 SQL-first persistence for **the latest JDK, PostgreSQL 18, and Kotlin**.
 
 Write PostgreSQL queries. Vev applies your Flyway migrations to a disposable local
@@ -13,13 +11,14 @@ persistence context, or Jakarta dependency.
 ## Use
 
 Install PostgreSQL 18 with `postgres`, `initdb`, and `pg_ctl` on `PATH`. Run Gradle
-with the latest JDK. SQL-first artifacts use `no.beint.vev:runtime:1.0.0`,
-`no.beint.vev:compiler:1.0.0`, and the `no.beint.vev` Gradle plugin.
+with the latest JDK. SQL-first artifacts use `no.beint.vev:runtime:2.0.0`,
+`no.beint.vev:compiler:2.0.0`, `no.beint.vev:cluster:2.0.0`, the optional
+`no.beint.vev:spring:2.0.0`, and the `no.beint.vev` Gradle plugin.
 
 ```kotlin
 plugins {
     kotlin("jvm") version "2.4.21"
-    id("no.beint.vev") version "1.0.0"
+    id("no.beint.vev") version "2.0.0"
 }
 
 repositories { mavenCentral() }
@@ -79,7 +78,9 @@ val customers = database.read(42) { session ->
 | `-- name: find :optional` | Return one row or `null`; reject multiple rows |
 | `-- name: change :exec` | Return a `Long` affected-row count; no result set |
 | `-- nullable: name, from` | Allow null for the listed input parameters |
+| `-- notnull: id, total` | Declare listed result columns required where no proof is available |
 | `-- type: id CustomerId` | Generate a distinct scalar domain type for that input or output name |
+| `-- enum: status com.example.Status` | Map a textual input or output to an existing Kotlin enum |
 | `-- tenant: tenantId` | Require `TenantSession`; bind this integer parameter from its scope |
 | `-- rows: 500` | Override the materialization ceiling, between 1 and 1,000,000 |
 
@@ -105,12 +106,20 @@ compilation. Declaring nullable inputs is an explicit caller contract, not proof
 that every database constraint accepts NULL.
 
 Supported scalars: boolean; smallint/integer/bigint; real/double precision;
-numeric (`BigDecimal`); text/varchar/char/name; UUID; date/time/timestamp/timestamptz
-(`java.time`, with `OffsetDateTime` for timestamptz); bytea (`ByteArray`); json/jsonb
-(`String`). One-dimensional arrays support booleans, numbers, strings and UUIDs,
-retaining nullable elements. Unknown types fail generation; cast deliberately
-where appropriate. Multidimensional arrays and values JDBC cannot represent
-(for example non-finite numeric values as BigDecimal) fail decoding.
+numeric (`BigDecimal`); text/varchar/char/name; citext; xml; inet; UUID;
+date/time/timestamp/timestamptz (`java.time`, with `OffsetDateTime` for timestamptz);
+bytea (`ByteArray`); json/jsonb (`String`). PostgreSQL's own text form is preserved for
+xml and inet, so `inet` reads back as `10.0.0.1/32`. One-dimensional arrays support
+booleans, numbers, strings and UUIDs, retaining nullable elements; other element types
+fail generation rather than claim unverified JDBC decoding. Unknown types fail
+generation; cast deliberately where appropriate. Multidimensional arrays and values
+JDBC cannot represent (for example non-finite numeric values as BigDecimal) fail decoding.
+
+`-- enum:` maps a textual column or parameter to an enum the application already owns,
+rather than generating a parallel type. The constant name is what travels, so the
+PostgreSQL type must be text, varchar, char, name or citext. A stored value with no
+matching Kotlin constant raises `IllegalArgumentException` instead of decoding to
+something else.
 
 ## Transactions and tenancy
 
@@ -122,6 +131,24 @@ or extra entity loads occur. Query errors and cardinality violations poison the
 scope, even if caught inside its callback. Commit failures propagate with their
 SQLState; an uncertain commit must not be blindly retried. A cleanup failure after
 a successful commit is logged without reporting the write as failed.
+
+### Spring
+
+`no.beint.vev:spring` provides `VevTemplate`, which runs generated queries on the
+connection bound to the caller's Spring transaction. It never commits, rolls back or
+closes that connection, and it fails rather than silently opening its own transaction
+when none is active. Hibernate's pending changes are invisible to plain SQL until they
+are flushed, so pass `entityManager::flush` as the optional `beforeQuery` hook wherever
+generated queries must observe writes made earlier in the same transaction.
+
+```kotlin
+@Bean fun vev(dataSource: DataSource, entityManager: EntityManager) =
+    VevTemplate(dataSource) { entityManager.flush() }
+
+@Transactional(readOnly = true)
+fun invoices(tenantId: Int): List<InvoiceSummaryRow> =
+    vev.query(tenantId) { Queries.invoiceSummary(it) }
+```
 
 `Session.borrow(connection) { ... }` joins a caller-owned transaction. It requires
 autocommit off and never commits, rolls back, or closes the connection. The owner
@@ -150,10 +177,18 @@ including deferred constraint triggers, remain authoritative.
 ## Build and deployment
 
 Generation requires only migrations and installed PostgreSQL binaries, never
-production credentials or customer data. Every run owns a password-protected,
+production credentials or customer data. Each build owns a password-protected,
 loopback-only cluster that is stopped and removed on success, failure, or normal
 process termination. `initdb` must run as a non-root user. Migrations are trusted
 build inputs and execute with privileges inside that disposable cluster.
+
+One Gradle build starts **one** cluster, shared through a build service, and applies
+each distinct migration set once to a database named after that set's content. Every
+module then describes its queries against that database read-only and concurrently, so
+a repository with forty modules pays for one `initdb` and one migration replay instead
+of forty. Editing a migration changes the name and replays it; unrelated schemas never
+share a database. A module that needs its own cluster can still invoke the compiler
+directly in `--mode standalone`.
 
 Configure `queries`, `migrations`, `output`, or `postgresBin` on `generateVev` to
 change their defaults. Optional `fixtures` supplies an additional Flyway location
