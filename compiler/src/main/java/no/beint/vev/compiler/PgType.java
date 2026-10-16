@@ -35,9 +35,13 @@ record PgType(String postgres, String kotlin, int jdbc, PgType element) {
             case "timestamp" -> scalar(postgres, "java.time.LocalDateTime", java.sql.Types.TIMESTAMP);
             case "timestamptz" -> scalar(postgres, "java.time.OffsetDateTime", java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
             case "bytea" -> scalar(postgres, "ByteArray", java.sql.Types.BINARY);
+            // A void result carries no value; only a :void query may select one.
+            case "void" -> scalar(postgres, "Unit", java.sql.Types.OTHER);
             default -> throw SqlSource.error(source, "Unsupported PostgreSQL type '" + postgres + "'; cast explicitly to a supported type");
         };
     }
+
+    boolean valueless() { return element == null && postgres.equals("void"); }
 
     /** A Kotlin enum is carried as its constant name, so only textual PostgreSQL types can hold one. */
     boolean textual() { return element == null && TEXTUAL.contains(postgres); }

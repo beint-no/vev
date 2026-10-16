@@ -225,4 +225,24 @@ class QueryTest {
         postgres.connect().use { c -> c.createStatement().use { it.execute("INSERT INTO document_record(id,tenant_id,status,email) VALUES (900,7,'UNKNOWN','z@z.no')") } }
         assertThrows(IllegalArgumentException::class.java) { vev.read(7) { Queries.document(it, 900) } }
     }
+
+    @Test fun `a void query takes a real advisory lock for the length of its transaction`() {
+        vev.write(7) { tenant ->
+            Queries.lockTenant(tenant, "registration")
+            postgres.connect().use { other ->
+                other.createStatement().use { s ->
+                    s.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").use { r ->
+                        r.next(); assertEquals(1, r.getInt(1))
+                    }
+                }
+            }
+        }
+        postgres.connect().use { c ->
+            c.createStatement().use { s ->
+                s.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").use { r ->
+                    r.next(); assertEquals(0, r.getInt(1), "the lock must be released when the transaction ends")
+                }
+            }
+        }
+    }
 }

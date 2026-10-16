@@ -96,12 +96,19 @@ public final class QueryCompiler {
                 if (previous != null && !previous.type.equals(type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
             }
             ResultSetMetaData result = statement.getMetaData();
-            if ((result == null) != source.cardinality().equals("exec")) throw SqlSource.error(source.path(), "Declared cardinality does not match the SQL result; use :exec for row counts and :one/:optional/:many for rows");
+            if ((result == null) != source.cardinality().equals("exec")) {
+                throw SqlSource.error(source.path(), "Declared cardinality does not match the SQL result;"
+                        + " use :exec for row counts, :void to call a void function for its effect, and :one/:optional/:many for rows");
+            }
             List<Value> columns = new ArrayList<>();
             HashSet<String> labels = new HashSet<>();
             if (result != null) {
                 for (int i = 1; i <= result.getColumnCount(); i++) {
-                    String name = SqlSource.identifier(source.path(), result.getColumnLabel(i));
+                    String label = result.getColumnLabel(i);
+                    if (label.equals("?column?")) {
+                        throw SqlSource.error(source.path(), "Result column " + i + " has no name; give the expression an alias such as AS present");
+                    }
+                    String name = SqlSource.identifier(source.path(), label);
                     if (!labels.add(KotlinWriter.camel(name))) throw SqlSource.error(source.path(), "Duplicate result property: " + name + "; give columns distinct aliases");
                     PgType type = PgType.of(source.path(), result.getColumnTypeName(i));
                     boolean nullable = !source.notNull().contains(name)
@@ -118,6 +125,12 @@ public final class QueryCompiler {
             }
             for (String name : source.notNull()) {
                 if (columns.stream().noneMatch(c -> c.name.equals(name))) throw SqlSource.error(source.path(), "notnull names an unknown result column: " + name);
+            }
+            boolean valueless = !columns.isEmpty() && columns.stream().allMatch(c -> c.type.valueless());
+            if (source.cardinality().equals("void")) {
+                if (!valueless) throw SqlSource.error(source.path(), ":void requires every result column to be a void function call; use :many, :one or :optional to read values");
+            } else if (columns.stream().anyMatch(c -> c.type.valueless())) {
+                throw SqlSource.error(source.path(), "A void result carries no value; declare the query :void to call it for its effect");
             }
             return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns));
         } catch (SQLException exception) {

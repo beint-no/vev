@@ -35,8 +35,8 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             if (text.startsWith("name:")) {
                 if (name != null) throw error(path, "Duplicate name directive");
                 String[] parts = text.substring(5).strip().split("\\s+");
-                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":exec").contains(parts[1])) {
-                    throw error(path, "Use -- name: queryName :many|:one|:optional|:exec");
+                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":exec", ":void").contains(parts[1])) {
+                    throw error(path, "Use -- name: queryName :many|:one|:optional|:exec|:void");
                 }
                 name = identifier(path, parts[0]);
                 cardinality = parts[1].substring(1);
@@ -157,7 +157,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         for (String required : notNull) {
             if (parameters.contains(required)) throw error(path, "notnull applies to result columns, not parameter " + required);
         }
-        if (!notNull.isEmpty() && cardinality.equals("exec")) throw error(path, "notnull requires a result set");
+        if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
         if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "tenant must name a required, unwrapped integer parameter");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
         return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),

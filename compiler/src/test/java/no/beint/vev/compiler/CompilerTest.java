@@ -140,6 +140,25 @@ class CompilerTest {
         assertThrows(Exception.class, () -> compile("-- name: query :exec\n-- notnull: id\nDELETE FROM item"));
     }
 
+    @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
+        String result = compile("-- name: lock :void\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
+        assertTrue(result.contains("fun `lock`(session: no.beint.vev.Session, `key`: String): Unit ="), result);
+        assertTrue(result.contains("session.call("), result);
+        assertFalse(result.contains("LockRow"), result);
+    }
+
+    @Test void voidResultsMustBeDeclaredVoidAndVoidQueriesMustBeValueless() {
+        assertThrows(Exception.class, () -> compile("-- name: lock :one\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0)) AS locked"));
+        assertThrows(Exception.class, () -> compile("-- name: lock :void\nSELECT id FROM item"));
+        assertThrows(Exception.class, () -> compile("-- name: lock :void\nDELETE FROM item"));
+    }
+
+    @Test void unnamedResultColumnsSayToAddAnAlias() {
+        var failure = assertThrows(Exception.class, () -> compile("-- name: query :one\nSELECT count(*) > 0 FROM item"));
+        assertTrue(failure.getMessage().contains("has no name"), failure.getMessage());
+        assertTrue(failure.getMessage().contains("alias"), failure.getMessage());
+    }
+
     @Test void schemaChangesFailGeneration() throws Exception {
         compile("-- name: query :many\nSELECT name FROM item");
         try (var connection = postgres.connect(); var statement = connection.createStatement()) {
