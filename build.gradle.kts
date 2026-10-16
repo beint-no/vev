@@ -7,7 +7,7 @@ plugins {
 
 allprojects {
     group = "no.beint.vev"
-    version = "1.0.0"
+    version = "2.0.0"
 }
 
 subprojects {
@@ -36,7 +36,7 @@ subprojects {
             }
         }
     }
-    if (name in setOf("runtime", "compiler", "gradle-plugin")) {
+    if (name in setOf("cluster", "runtime", "compiler", "spring", "gradle-plugin")) {
         apply(plugin = "com.vanniktech.maven.publish")
         extensions.configure<com.vanniktech.maven.publish.MavenPublishBaseExtension> {
             publishToMavenCentral()
@@ -59,10 +59,12 @@ subprojects {
 }
 tasks.named("check") { dependsOn(subprojects.map { "${it.path}:check" }) }
 tasks.register<Zip>("releaseBundle") {
-    dependsOn(":runtime:publishAllPublicationsToReleaseRepository", ":compiler:publishAllPublicationsToReleaseRepository", ":gradle-plugin:publishAllPublicationsToReleaseRepository")
+    dependsOn(":cluster:publishAllPublicationsToReleaseRepository", ":runtime:publishAllPublicationsToReleaseRepository",
+            ":compiler:publishAllPublicationsToReleaseRepository", ":spring:publishAllPublicationsToReleaseRepository",
+            ":gradle-plugin:publishAllPublicationsToReleaseRepository")
     from(layout.buildDirectory.dir("repository"))
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))
-    archiveFileName.set("vev-sql-1.0.0-maven.zip")
+    archiveFileName.set("vev-sql-2.0.0-maven.zip")
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }

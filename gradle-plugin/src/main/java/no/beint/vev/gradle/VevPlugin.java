@@ -11,7 +11,10 @@ public final class VevPlugin implements Plugin<Project> {
     @Override public void apply(Project project) {
         var compiler = project.getConfigurations().create("vevCompiler");
         compiler.setCanBeConsumed(false);
-        project.getDependencies().add(compiler.getName(), "no.beint.vev:compiler:1.0.0");
+        project.getDependencies().add(compiler.getName(), "no.beint.vev:compiler:2.0.0");
+        var postgresBin = project.getObjects().property(String.class).convention("");
+        var cluster = project.getGradle().getSharedServices().registerIfAbsent("vevCluster", VevCluster.class,
+                service -> service.getParameters().getPostgresBin().set(postgresBin));
         var task = project.getTasks().register("generateVev", GenerateSql.class, generate -> {
             generate.setGroup("build");
             generate.setDescription("Validate SQL against migrations and generate typed Kotlin APIs");
@@ -19,7 +22,8 @@ public final class VevPlugin implements Plugin<Project> {
             generate.getMigrations().convention(project.getLayout().getProjectDirectory().dir("src/main/resources/db/migration"));
             generate.getOutput().convention(project.getLayout().getBuildDirectory().dir("generated/vev"));
             generate.getClassName().convention("Queries");
-            generate.getPostgresBin().convention("");
+            generate.getPostgresBin().convention(postgresBin);
+            generate.usesService(cluster);
             generate.getPostgresVersion().convention(project.getProviders().of(PostgresVersion.class,
                     specification -> specification.getParameters().getBin().set(generate.getPostgresBin())));
             generate.getCompilerClasspath().from(compiler);
@@ -30,7 +34,7 @@ public final class VevPlugin implements Plugin<Project> {
             var toolchains = project.getExtensions().getByType(JavaToolchainService.class);
             task.configure(generate -> generate.getJavaExecutable().convention(toolchains.launcherFor(spec -> spec.getLanguageVersion().set(JavaLanguageVersion.of(27)))
                     .map(launcher -> launcher.getExecutablePath().getAsFile().getAbsolutePath())));
-            project.getDependencies().add("implementation", "no.beint.vev:runtime:1.0.0");
+            project.getDependencies().add("implementation", "no.beint.vev:runtime:2.0.0");
         });
     }
 }

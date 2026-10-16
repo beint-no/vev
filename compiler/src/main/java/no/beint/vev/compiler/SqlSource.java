@@ -13,8 +13,9 @@ import java.util.regex.Pattern;
 /** Lexes bind parameters without interpreting SQL semantics; PostgreSQL owns SQL validation. */
 public record SqlSource(Path path, String name, String cardinality, int maxRows, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
-                        List<String> tokens, String tenant) {
+                        Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|tenant):.*";
 
     public static SqlSource parse(Path path, String source) {
         String name = null;
@@ -22,23 +23,32 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         String tenant = null;
         int maxRows = 1000;
         Set<String> nullable = new LinkedHashSet<>();
+        Set<String> notNull = new LinkedHashSet<>();
         Map<String, String> domains = new LinkedHashMap<>();
+        Map<String, String> enums = new LinkedHashMap<>();
         for (String line : source.lines().toList()) {
             String text = line.strip();
             if (text.isEmpty()) continue;
             if (!text.startsWith("--")) break;
             text = text.substring(2).strip();
-            if (!text.matches("(?:name|nullable|type|rows|tenant):.*")) continue;
+            if (!text.matches(DIRECTIVES)) continue;
             if (text.startsWith("name:")) {
                 if (name != null) throw error(path, "Duplicate name directive");
                 String[] parts = text.substring(5).strip().split("\\s+");
-                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":exec").contains(parts[1])) {
-                    throw error(path, "Use -- name: queryName :many|:one|:optional|:exec");
+                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":exec", ":void").contains(parts[1])) {
+                    throw error(path, "Use -- name: queryName :many|:one|:optional|:exec|:void");
                 }
                 name = identifier(path, parts[0]);
                 cardinality = parts[1].substring(1);
             } else if (text.startsWith("nullable:")) {
                 for (String value : text.substring(9).strip().split("[ ,]+")) nullable.add(identifier(path, value));
+            } else if (text.startsWith("notnull:")) {
+                for (String value : text.substring(8).strip().split("[ ,]+")) notNull.add(identifier(path, value));
+            } else if (text.startsWith("enum:")) {
+                String[] parts = text.substring(5).strip().split("\\s+");
+                if (parts.length != 2) throw error(path, "Use -- enum: parameterOrColumn fully.qualified.KotlinEnum");
+                String previous = enums.put(identifier(path, parts[0]), enumName(path, parts[1]));
+                if (previous != null) throw error(path, "Duplicate enum declaration: " + parts[0]);
             } else if (text.startsWith("type:")) {
                 String[] parts = text.substring(5).strip().split("\\s+");
                 if (parts.length != 2) throw error(path, "Use -- type: parameterOrColumn DomainType");
@@ -54,6 +64,9 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             }
         }
         if (name == null) throw error(path, "Missing -- name: queryName :cardinality");
+        for (String both : enums.keySet()) {
+            if (domains.containsKey(both)) throw error(path, "Declare either type or enum for " + both + ", not both");
+        }
         List<String> parameters = new ArrayList<>();
         List<String> tokens = new ArrayList<>();
         StringBuilder sql = new StringBuilder();
@@ -64,7 +77,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             if (source.startsWith("--", i)) {
                 int end = source.indexOf('\n', i);
                 String comment = source.substring(i + 2, end < 0 ? source.length() : end).strip();
-                if (!tokens.isEmpty() && comment.matches("(?:name|nullable|type|rows|tenant):.*")) throw error(path, "Query directives must precede SQL");
+                if (!tokens.isEmpty() && comment.matches(DIRECTIVES)) throw error(path, "Query directives must precede SQL");
                 i = end < 0 ? source.length() : end;
                 sql.append(' ');
                 continue;
@@ -141,10 +154,15 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             }
         }
         if (!new LinkedHashSet<>(parameters).containsAll(nullable)) throw error(path, "nullable names an unknown parameter");
+        for (String required : notNull) {
+            if (parameters.contains(required)) throw error(path, "notnull applies to result columns, not parameter " + required);
+        }
+        if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
         if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "tenant must name a required, unwrapped integer parameter");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
         return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
-                List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), List.copyOf(tokens), tenant);
+                List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
+                Set.copyOf(notNull), List.copyOf(tokens), tenant);
     }
 
     static String identifier(Path path, String name) {
@@ -154,6 +172,15 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
 
     static IllegalArgumentException error(Path path, String message) {
         return new IllegalArgumentException(path + ": " + message);
+    }
+
+    /** A reference to an existing Kotlin enum, which Vev imports rather than generates. */
+    static String enumName(Path path, String name) {
+        String[] segments = name.split("\\.", -1);
+        for (String segment : segments) identifier(path, segment);
+        String simple = segments[segments.length - 1];
+        if (!Character.isUpperCase(simple.charAt(0))) throw error(path, "Enum types must start uppercase: " + name);
+        return name;
     }
 
     static String typeName(Path path, String name) {

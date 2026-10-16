@@ -83,6 +83,22 @@ public final class Session {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
+    /**
+     * Call a void-returning function for its effect, such as an advisory lock, discarding any
+     * result set. Nothing is read, so there is no value to map.
+     */
+    public void call(String sql, Bind bind) throws SQLException {
+        check();
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             Bindings bindings = new Bindings(connection, statement)) {
+            bind.apply(bindings);
+            statement.execute();
+        } catch (SQLException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
+    }
+
     /** Execute an explicit SQL mutation and return its affected-row count. */
     public long execute(String sql, Bind bind) throws SQLException {
         check();

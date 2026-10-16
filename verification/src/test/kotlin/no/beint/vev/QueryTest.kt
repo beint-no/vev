@@ -29,7 +29,7 @@ class QueryTest {
     }
     @AfterAll fun stop() { if (::postgres.isInitialized) postgres.close() }
     @BeforeEach fun reset() {
-        postgres.connect().use { c -> c.createStatement().use { it.execute("TRUNCATE customer,invoice,posting,scalar_values RESTART IDENTITY CASCADE") } }
+        postgres.connect().use { c -> c.createStatement().use { it.execute("TRUNCATE customer,invoice,posting,scalar_values,document_record RESTART IDENTITY CASCADE") } }
     }
 
     @Test fun `typed queries retain nulls and tenant predicates`() {
@@ -197,5 +197,52 @@ class QueryTest {
         assertEquals(BigDecimal("1.25"), row.precise)
         assertEquals(5_000_000_000L, row.large)
         assertEquals(true, row.active); assertEquals("æøå", row.label)
+    }
+
+    @Test fun `Kotlin enums and textual PostgreSQL types round trip through generated readers`() {
+        val id = vev.write(7) { Queries.createDocument(it, DocumentStatus.SENT, ReviewState.PENDING, "Post@ReAI.no", "<n>1</n>", "10.0.0.1") }.id
+        val row = vev.read(7) { Queries.document(it, id) }!!
+        assertEquals(DocumentStatus.SENT, row.status)
+        assertEquals(ReviewState.PENDING, row.review)
+        assertEquals("Post@ReAI.no", row.email)
+        assertEquals("<n>1</n>", row.body)
+        assertEquals("10.0.0.1/32", row.address, "inet keeps PostgreSQL's own text form")
+        val nulls = vev.read(7) { Queries.document(it, vev.write(7) { w -> Queries.createDocument(w, DocumentStatus.DRAFT, null, "x@y.no", null, null) }.id) }!!
+        assertNull(nulls.review); assertNull(nulls.body); assertNull(nulls.address)
+        // citext compares case-insensitively, so the generated String binding must reach the real column type.
+        assertEquals(1, vev.read(7) { Queries.documentsByEmail(it, "POST@reai.NO") }.size)
+    }
+
+    @Test fun `notnull restores required types a CTE would otherwise hide`() {
+        vev.write(7) { Queries.createDocument(it, DocumentStatus.PAID, null, "a@b.no", null, null) }
+        vev.write(7) { Queries.createDocument(it, DocumentStatus.PAID, null, "c@d.no", null, null) }
+        val states = vev.read(7) { Queries.documentStates(it) }
+        assertEquals(listOf(DocumentStatus.PAID), states.map { it.status })
+        assertEquals(listOf(2L), states.map { it.total })
+    }
+
+    @Test fun `an enum constant absent from Kotlin fails loudly rather than decoding wrongly`() {
+        postgres.connect().use { c -> c.createStatement().use { it.execute("INSERT INTO document_record(id,tenant_id,status,email) VALUES (900,7,'UNKNOWN','z@z.no')") } }
+        assertThrows(IllegalArgumentException::class.java) { vev.read(7) { Queries.document(it, 900) } }
+    }
+
+    @Test fun `a void query takes a real advisory lock for the length of its transaction`() {
+        vev.write(7) { tenant ->
+            Queries.lockTenant(tenant, "registration")
+            postgres.connect().use { other ->
+                other.createStatement().use { s ->
+                    s.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").use { r ->
+                        r.next(); assertEquals(1, r.getInt(1))
+                    }
+                }
+            }
+        }
+        postgres.connect().use { c ->
+            c.createStatement().use { s ->
+                s.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").use { r ->
+                    r.next(); assertEquals(0, r.getInt(1), "the lock must be released when the transaction ends")
+                }
+            }
+        }
     }
 }

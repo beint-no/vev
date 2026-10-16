@@ -1,9 +1,10 @@
 # Releases
 
-SQL-first Vev uses `no.beint.vev:runtime`, `no.beint.vev:compiler`, and
-`no.beint.vev:gradle-plugin`, with the Gradle marker `no.beint.vev`. Version 1.0.0
-is tagged `sql-v1.0.0`. Use matching compiler, plugin, and runtime versions and
-regenerate application sources on upgrades.
+SQL-first Vev uses `no.beint.vev:cluster`, `no.beint.vev:runtime`,
+`no.beint.vev:compiler`, `no.beint.vev:spring`, and `no.beint.vev:gradle-plugin`,
+with the Gradle marker `no.beint.vev`. Version 1.0.0 is tagged `sql-v1.0.0` and
+2.0.0 is tagged `sql-v2.0.0`. Use matching cluster, compiler, plugin, and runtime
+versions and regenerate application sources on upgrades.
 
 Release gates:
 
@@ -16,13 +17,18 @@ Release gates:
    source. Publish signed artifacts with `publishAndReleaseToMavenCentral` and
    attach the Maven repository bundle plus SHA-256 checksums to the GitHub release.
 
-`releaseBundle` writes `build/distributions/vev-sql-1.0.0-maven.zip`. It is also a
+`releaseBundle` writes `build/distributions/vev-sql-2.0.0-maven.zip`. It is also a
 standalone Maven repository: extract it and add its directory to both
 `pluginManagement.repositories` and application dependency repositories.
 The compiler/runtime jars, sources, Javadoc, POMs, module metadata and plugin
 marker are included. Signing credentials are supplied externally through the
 standard Maven Publish plugin properties; never put secrets in this repository.
 
-Only the latest 1.x release is maintained. No support is promised for older JDKs
+Only the latest 2.x release is maintained. No support is promised for older JDKs
 or PostgreSQL majors. Conservative nullability may become more precise in later
 releases; unsupported type support is added only with compiler and database tests.
+
+2.0.0 changes generated output and the plugin's build contract. Queries written for
+1.0.0 still compile, but `-- notnull:`, `-- enum:` and `:void` are new, generation
+now shares one cluster per build, and `no.beint.vev:cluster` is a new required
+artifact. Regenerate rather than mixing 1.x and 2.x artifacts.
