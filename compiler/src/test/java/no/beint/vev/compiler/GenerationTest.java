@@ -8,6 +8,38 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class GenerationTest {
     @TempDir Path directory;
+    @Test void groupedEditsRetainStableSignaturesAndFailurePreservesPreviousOutputs() throws Exception {
+        try (var postgres = new Postgres("")) {
+            Path queries = Files.createDirectory(directory.resolve("grouped"));
+            Path output = directory.resolve("output");
+            Path file = queries.resolve("numbers.sql");
+            String first = "-- vev.name: first :one\n-- vev.scope: global\nSELECT 1::int AS value;\n";
+            String second = "-- vev.name: second :one\n-- vev.scope: global\nSELECT 2::int AS value;\n";
+            Files.writeString(file, first + second);
+            try (var connection = postgres.connect()) {
+                QueryCompiler.compile(connection, queries, output, "sample", "Queries");
+                Path facade = output.resolve("Queries.kt"), unchanged = output.resolve("Queries_second_Sql.kt");
+                var facadeTime = Files.getLastModifiedTime(facade);
+                var unchangedTime = Files.getLastModifiedTime(unchanged);
+                Files.writeString(file, first.replace("SELECT 1", "SELECT 3") + second);
+                QueryCompiler.compile(connection, queries, output, "sample", "Queries");
+                assertEquals(facadeTime, Files.getLastModifiedTime(facade));
+                assertEquals(unchangedTime, Files.getLastModifiedTime(unchanged));
+                String previous = Files.readString(output.resolve("Queries_first_Sql.kt"));
+                Files.writeString(file, first + second.replace("2::int", "missing_column"));
+                assertThrows(java.sql.SQLException.class,
+                        () -> QueryCompiler.compile(connection, queries, output, "sample", "Queries"));
+                assertEquals(previous, Files.readString(output.resolve("Queries_first_Sql.kt")));
+                Files.writeString(file, first + first);
+                assertThrows(IllegalArgumentException.class,
+                        () -> QueryCompiler.compile(connection, queries, output, "sample", "Queries"));
+                Files.writeString(file, first);
+                QueryCompiler.compile(connection, queries, output, "sample", "Queries");
+                assertFalse(Files.exists(unchanged));
+            }
+        }
+    }
+
     @Test void sourceEditsPreserveOtherFilesAndRemovedQueriesCannotLeaveStaleImplementations() throws Exception {
         try(var postgres=new Postgres("")) {
             Path queries=Files.createDirectory(directory.resolve("queries"));

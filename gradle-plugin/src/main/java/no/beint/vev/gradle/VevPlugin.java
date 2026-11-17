@@ -7,9 +7,10 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension;
 /** Generates main-source Kotlin query APIs before Kotlin compilation. */
 public final class VevPlugin implements Plugin<Project> {
     @Override public void apply(Project project) {
+        String version = version();
         var compiler = project.getConfigurations().create("vevCompiler");
         compiler.setCanBeConsumed(false);
-        project.getDependencies().add(compiler.getName(), "no.beint.vev:compiler:2.1.0");
+        project.getDependencies().add(compiler.getName(), "no.beint.vev:compiler:" + version);
         var cluster = project.getGradle().getSharedServices().registerIfAbsent("vevCluster", VevCluster.class,
                 service -> {});
         var task = project.getTasks().register("generateVev", GenerateSql.class, generate -> {
@@ -28,7 +29,17 @@ public final class VevPlugin implements Plugin<Project> {
         project.getPluginManager().withPlugin("org.jetbrains.kotlin.jvm", ignored -> {
             var kotlin = project.getExtensions().getByType(KotlinJvmProjectExtension.class);
             kotlin.getSourceSets().getByName("main").getKotlin().srcDir(task.flatMap(GenerateSql::getOutput));
-            project.getDependencies().add("implementation", "no.beint.vev:runtime:2.1.0");
+            project.getDependencies().add("implementation", "no.beint.vev:runtime:" + version);
         });
     }
+
+    private static String version() {
+        try (var input = VevPlugin.class.getResourceAsStream("/vev-version.txt")) {
+            if (input == null) throw new IllegalStateException("Missing Vev plugin version resource");
+            return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).strip();
+        } catch (java.io.IOException failure) {
+            throw new java.io.UncheckedIOException(failure);
+        }
+    }
+
 }

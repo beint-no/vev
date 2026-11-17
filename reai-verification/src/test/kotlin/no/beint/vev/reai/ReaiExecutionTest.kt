@@ -114,6 +114,55 @@ class ReaiExecutionTest {
         }
     }
 
+    @Test fun `posting group reports and voucher search execute with real tenant constraints`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit = false
+            try {
+                connection.createStatement().use { it.execute("""
+                    INSERT INTO persons(id,tenant_id,name) VALUES (950,1,'Synthetic party'),(950,2,'Other tenant');
+                    INSERT INTO suppliers(id,tenant_id,person_id) VALUES (950,1,950),(950,2,950);
+                    INSERT INTO customers(id,tenant_id,person_id) VALUES (950,1,950),(950,2,950);
+                    INSERT INTO employees(id,tenant_id,person_id) VALUES (950,1,950);
+                    INSERT INTO posting_groups(id,tenant_id,origin) VALUES (950,1,'LEDGER_CLOSE'),(950,2,'LEDGER_CLOSE'),(951,1,'LEDGER_CLOSE');
+                    UPDATE postings SET account_number='2400',supplier_id=950 WHERE tenant_id IN (1,2) AND voucher_id IN (1,2) AND account_number='1920';
+                    INSERT INTO posting_group_postings(posting_id,posting_group_id,tenant_id)
+                        SELECT id,950,tenant_id FROM postings WHERE tenant_id IN (1,2) AND voucher_id IN (1,2) AND account_number='2400';
+                    UPDATE postings SET account_number='2910',employee_id=950 WHERE tenant_id=1 AND voucher_id=3 AND account_number='3000';
+                    UPDATE postings SET account_number='1500',customer_id=950 WHERE tenant_id=1 AND voucher_id=4 AND account_number='3000';
+                    INSERT INTO posting_group_postings(posting_id,posting_group_id,tenant_id)
+                        SELECT id,951,tenant_id FROM postings WHERE tenant_id=1 AND voucher_id IN (3,4) AND account_number IN ('2910','1500');
+                    UPDATE vouchers SET voucher_type='INCOME' WHERE tenant_id=1 AND id=4;
+                """) }
+                Session.borrow(connection, 1) {
+                    val suppliers = Queries.supplierPostingGroupCounts(listOf(950, 951), "2400")
+                    assertEquals(1, suppliers.size)
+                    assertEquals(2L, suppliers.single().postingCount)
+                    assertEquals(950, suppliers.single().postingGroupId)
+                    assertEquals(1L, Queries.employeePostingGroupCounts(listOf(950,951)).single().postingCount)
+                    assertEquals(1L, Queries.customerPostingGroupCounts(listOf(950,951),"1500").single().postingCount)
+                    val dates = Queries.postingSettlementDates(listOf("2400"),LocalDate.of(2026,1,2))
+                    assertEquals(1, dates.size)
+                    assertEquals(LocalDate.of(2026,1,3),dates.single().settlementDate)
+                    assertTrue(Queries.postingSettlementDates(emptyList(),LocalDate.of(2026,1,2)).isEmpty())
+                    assertTrue(Queries.supplierPostingGroupCounts(emptyList(),"2400").isEmpty())
+                    val sources = Queries.voucherSearchSources(listOf(1,2,3,4))
+                    assertEquals(1,sources.size)
+                    assertEquals("INCOME",sources.single().kind)
+                    assertEquals(4L,sources.single().voucherId)
+                    assertEquals(4L,sources.single().sourceId)
+                    assertNull(sources.single().number)
+                    assertTrue(Queries.voucherSearchSources(emptyList()).isEmpty())
+                }
+                Session.borrow(connection, 2) {
+                    assertEquals(2L,Queries.supplierPostingGroupCounts(listOf(950),"2400").single().postingCount)
+                    assertTrue(Queries.employeePostingGroupCounts(listOf(951)).isEmpty())
+                    assertTrue(Queries.customerPostingGroupCounts(listOf(951),"1500").isEmpty())
+                    assertTrue(Queries.voucherSearchSources(listOf(4)).isEmpty())
+                }
+            } finally { connection.rollback() }
+        }
+    }
+
     @Test fun `same object IDs are isolated by tenant on read and update`() {
         vev.write(1) { assertEquals(1L,Queries.renameDepartment("Tenant One",1)) }
         assertEquals("Tenant One",vev.read(1) { Queries.department(1)!!.name })
