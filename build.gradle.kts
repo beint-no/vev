@@ -7,7 +7,7 @@ plugins {
 
 allprojects {
     group = "no.beint.vev"
-    version = "2.1.0"
+    version = providers.gradleProperty("vevVersion").get()
 }
 
 subprojects {
@@ -68,7 +68,7 @@ tasks.register<Zip>("releaseBundle") {
             ":gradle-plugin:publishAllPublicationsToReleaseRepository")
     from(layout.buildDirectory.dir("repository"))
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))
-    archiveFileName.set("vev-sql-2.1.0-maven.zip")
+    archiveFileName.set("vev-sql-${project.version}-maven.zip")
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
 }

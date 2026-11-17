@@ -17,7 +17,32 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|scope):.*";
 
+    private record Parsed(SqlSource query, int end) {}
+
     public static SqlSource parse(Path path, String source) {
+        return parseQuery(path, source, 0, false).query();
+    }
+
+    /** Related queries may share a file; each statement has its own complete contract. */
+    public static List<SqlSource> parseAll(Path path, String source) {
+        List<SqlSource> queries = new ArrayList<>();
+        int offset = 0;
+        do {
+            Parsed parsed = parseQuery(path, source, offset, true);
+            queries.add(parsed.query());
+            offset = parsed.end();
+        } while (offset < source.length());
+        return List.copyOf(queries);
+    }
+
+    private static String directive(Path path, String comment) {
+        if (!comment.startsWith("vev.")) return comment;
+        String value = comment.substring(4);
+        if (!value.matches(DIRECTIVES)) throw error(path, "Unknown Vev directive: " + comment);
+        return value;
+    }
+
+    private static Parsed parseQuery(Path path, String source, int startOffset, boolean grouped) {
         String name = null;
         String cardinality = null;
         String tenant = "tenantId";
@@ -27,12 +52,22 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         Set<String> notNull = new LinkedHashSet<>();
         Map<String, String> domains = new LinkedHashMap<>();
         Map<String, String> enums = new LinkedHashMap<>();
-        for (String line : source.lines().toList()) {
+        Set<String> singletonDirectives = new LinkedHashSet<>();
+        int lineStart = startOffset;
+        while (lineStart < source.length()) {
+            int lineEnd = source.indexOf('\n', lineStart);
+            if (lineEnd < 0) lineEnd = source.length();
+            String line = source.substring(lineStart, lineEnd);
+            lineStart = lineEnd + 1;
             String text = line.strip();
             if (text.isEmpty()) continue;
             if (!text.startsWith("--")) break;
-            text = text.substring(2).strip();
+            text = directive(path, text.substring(2).strip());
             if (!text.matches(DIRECTIVES)) continue;
+            String key = text.substring(0, text.indexOf(':'));
+            if (Set.of("name", "rows", "scope").contains(key) && !singletonDirectives.add(key)) {
+                throw error(path, "Duplicate " + key + " directive");
+            }
             if (text.startsWith("name:")) {
                 if (name != null) throw error(path, "Duplicate name directive");
                 String[] parts = text.substring(5).strip().split("\\s+");
@@ -73,12 +108,18 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         List<String> tokens = new ArrayList<>();
         StringBuilder sql = new StringBuilder();
         boolean terminated = false;
-        for (int i = 0; i < source.length();) {
+        int endOfQuery = source.length();
+        for (int i = startOffset; i < source.length();) {
             char c = source.charAt(i);
             if (Character.isWhitespace(c)) { sql.append(c); i++; continue; }
             if (source.startsWith("--", i)) {
                 int end = source.indexOf('\n', i);
-                String comment = source.substring(i + 2, end < 0 ? source.length() : end).strip();
+                String comment = directive(path, source.substring(i + 2, end < 0 ? source.length() : end).strip());
+                if (grouped && !tokens.isEmpty() && comment.startsWith("name:")) {
+                    if (!terminated) throw error(path, "Terminate a query with ; before the next name directive");
+                    endOfQuery = i;
+                    break;
+                }
                 if (!tokens.isEmpty() && comment.matches(DIRECTIVES)) throw error(path, "Query directives must precede SQL");
                 i = end < 0 ? source.length() : end;
                 sql.append(' ');
@@ -159,9 +200,9 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
         if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- scope: global for global SQL");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
-        return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
+        return new Parsed(new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant);
+                Set.copyOf(notNull), List.copyOf(tokens), tenant), endOfQuery);
     }
 
     static String identifier(Path path, String name) {

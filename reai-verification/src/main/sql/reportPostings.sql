@@ -1,6 +1,6 @@
--- name: reportPostings :many
--- rows: 100000
--- notnull: id,voucher_id,posting_date,account_number,name,amount
+-- vev.name: reportPostings :many
+-- vev.rows: 100000
+-- vev.notnull: id,voucher_id,posting_date,account_number,name,amount
 
 -- Manual vouchers infer parties only within a balanced same-date debit/credit row.
 -- Invoice vouchers may use their sole counterparty across rows. Retain booked reversals.

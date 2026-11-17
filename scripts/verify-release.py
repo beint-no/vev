@@ -7,7 +7,8 @@ import tempfile
 import zipfile
 
 root = Path(__file__).resolve().parents[1]
-bundle = root / "build/distributions/vev-sql-2.1.0-maven.zip"
+version = next(line.split("=", 1)[1] for line in (root / "gradle.properties").read_text().splitlines() if line.startswith("vevVersion="))
+bundle = root / f"build/distributions/vev-sql-{version}-maven.zip"
 with tempfile.TemporaryDirectory(prefix="vev-release-consumer-") as temporary:
     consumer = Path(temporary)
     repository = consumer / "repository"
@@ -22,10 +23,10 @@ pluginManagement {{ repositories {{ maven {{ url = uri({repository_url}) }}; gra
 rootProject.name = "release-consumer"
 """)
     (consumer / "build.gradle.kts").write_text(f"""
-plugins {{ kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") version "2.1.0"; application }}
+plugins {{ kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") version "{version}"; application }}
 repositories {{ maven {{ url=uri({repository_url}) }}; mavenCentral() }}
 kotlin {{ jvmToolchain(27); compilerOptions {{ jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }} }}
-dependencies {{ implementation("org.postgresql:postgresql:42.7.14"); implementation("no.beint.vev:compiler:2.1.0") }}
+dependencies {{ implementation("org.postgresql:postgresql:42.7.14"); implementation("no.beint.vev:compiler:{version}") }}
 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {{ packageName.set("sample") }}
 application {{ mainClass.set("sample.ConsumerKt") }}
 """)
@@ -35,7 +36,7 @@ application {{ mainClass.set("sample.ConsumerKt") }}
     queries = consumer / "src/main/sql"
     queries.mkdir(parents=True)
     (queries / "create.sql").write_text("-- name: create :exec\nINSERT INTO customer(id,tenant_id,name) VALUES(:id,:tenantId,:name);")
-    (queries / "find.sql").write_text("-- name: find :optional\nSELECT id,name FROM customer WHERE tenant_id=:tenantId AND id=:id;")
+    (queries / "create.sql").write_text((queries / "create.sql").read_text() + "\n" + "-- name: find :optional\nSELECT id,name FROM customer WHERE tenant_id=:tenantId AND id=:id;")
     kotlin = consumer / "src/main/kotlin/sample"
     kotlin.mkdir(parents=True)
     (kotlin / "Consumer.kt").write_text("""

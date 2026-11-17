@@ -37,21 +37,22 @@ public final class QueryCompiler {
         Map<String, PgType> domains = new java.util.TreeMap<>();
         try (var files = Files.walk(queries)) {
             for (Path path : files.filter(p -> p.toString().endsWith(".sql")).sorted().toList()) {
-                SqlSource source = SqlSource.parse(path, Files.readString(path));
-                if (!names.add(source.name())) throw SqlSource.error(path, "Duplicate query name: " + source.name());
-                Query query = describe(connection, source);
-                for (Value value : java.util.stream.Stream.concat(query.parameters.stream(), query.columns.stream()).toList()) {
-                    if (value.domain != null) {
-                        if (value.type.element() != null || value.type.kotlin().equals("ByteArray")) {
-                            throw SqlSource.error(path, "Domain wrappers require a scalar value type");
-                        }
-                        PgType previous = domains.putIfAbsent(value.domain, value.type);
-                        if (previous != null && !previous.kotlin().equals(value.type.kotlin())) {
-                            throw SqlSource.error(path, "Domain " + value.domain + " has conflicting underlying types");
+                for (SqlSource source : SqlSource.parseAll(path, Files.readString(path))) {
+                    if (!names.add(source.name())) throw SqlSource.error(path, "Duplicate query name: " + source.name());
+                    Query query = describe(connection, source);
+                    for (Value value : java.util.stream.Stream.concat(query.parameters.stream(), query.columns.stream()).toList()) {
+                        if (value.domain != null) {
+                            if (value.type.element() != null || value.type.kotlin().equals("ByteArray")) {
+                                throw SqlSource.error(path, "Domain wrappers require a scalar value type");
+                            }
+                            PgType previous = domains.putIfAbsent(value.domain, value.type);
+                            if (previous != null && !previous.kotlin().equals(value.type.kotlin())) {
+                                throw SqlSource.error(path, "Domain " + value.domain + " has conflicting underlying types");
+                            }
                         }
                     }
+                    compiled.add(query);
                 }
-                compiled.add(query);
             }
         }
         if (compiled.isEmpty()) throw SqlSource.error(queries, "No .sql queries found");

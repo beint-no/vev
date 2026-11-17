@@ -13,3 +13,9 @@ tasks.test {
     dependsOn(":compiler:publishAllPublicationsToReleaseRepository", ":runtime:publishAllPublicationsToReleaseRepository", ":cluster:publishAllPublicationsToReleaseRepository")
     systemProperty("vev.repository", rootProject.layout.buildDirectory.dir("repository").get().asFile.absolutePath)
 }
+
+tasks.processResources {
+    val releaseVersion = project.version.toString()
+    inputs.property("vevVersion", releaseVersion)
+    filesMatching("vev-version.txt") { expand("version" to releaseVersion) }
+}

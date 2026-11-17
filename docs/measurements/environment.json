@@ -1,17 +1,11 @@
 {
-  "version": "2.1.0",
-  "date": "2026-11-17",
+  "version": "2.2.0",
   "os": "macOS-27.2.1-arm64-arm-64bit",
   "jdk": "27.0.1.0.3+1-2",
   "postgres": "18.6",
-  "pgjdbc": "42.7.14",
   "kotlin": "2.5.0-Beta2",
+  "pgjdbc": "42.7.14",
   "hibernate": "7.4.14.Final",
-  "schemaCommit": "1ce39c16a3c05ba6d0490a6297598135bcd17494",
-  "schemaSha256": "004abf89ec5220fd7af5ce450149151c07b99b1d077a7de833210f34c1bfe1f0",
-  "runtimeBytes": 15397,
-  "hibernateCoreBytes": 15350391,
-  "longRun": "3 forks, 3x2s warmup, 5x2s measurement, one thread, GC profiling",
-  "quickRun": "2 forks, 2x500ms warmup, 3x500ms measurement; all 24 variants",
-  "limits": "local disposable PostgreSQL with durability disabled; no other build/application checks launched by this session; not production throughput"
+  "configuration": "2 forks,2x500ms warmup,3x500ms measurement; full 24-variant matrix",
+  "schemaCommit": "1ce39c16a3c05ba6d0490a6297598135bcd17494"
 }
