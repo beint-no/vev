@@ -13,10 +13,12 @@ FROM vouchers v
 LEFT JOIN postings p ON p.voucher_id=v.id AND p.tenant_id=v.tenant_id
 LEFT JOIN company_bank cb ON cb.id=p.company_bank_id AND cb.tenant_id=v.tenant_id
 LEFT JOIN suppliers s ON s.id=p.supplier_id AND s.tenant_id=v.tenant_id
-LEFT JOIN companies sc ON sc.id=s.company_id AND sc.tenant_id=v.tenant_id
+LEFT JOIN companies supplier_company ON supplier_company.id=s.company_id AND supplier_company.tenant_id=v.tenant_id
+LEFT JOIN company_details sc ON sc.id=supplier_company.id
 LEFT JOIN persons sp ON sp.id=s.person_id AND sp.tenant_id=v.tenant_id
 LEFT JOIN customers c ON c.id=p.customer_id AND c.tenant_id=v.tenant_id
-LEFT JOIN companies cc ON cc.id=c.company_id AND cc.tenant_id=v.tenant_id
+LEFT JOIN companies customer_company ON customer_company.id=c.company_id AND customer_company.tenant_id=v.tenant_id
+LEFT JOIN company_details cc ON cc.id=customer_company.id
 LEFT JOIN persons cp ON cp.id=c.person_id AND cp.tenant_id=v.tenant_id
 LEFT JOIN employees e ON e.id=p.employee_id AND e.tenant_id=v.tenant_id
 LEFT JOIN persons ep ON ep.id=e.person_id AND ep.tenant_id=v.tenant_id

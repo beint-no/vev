@@ -244,6 +244,32 @@ class ReaiExecutionTest {
         }
     }
 
+    @Test fun `voucher overview uses registry company names when local overrides are absent`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit=false
+            try {
+                connection.createStatement().use { it.execute("""
+                    INSERT INTO brreg_legal_forms(id,code) VALUES(960,'AS');
+                    INSERT INTO brreg_companies_compact(org_number,legal_form_id,legal_form_description_missing,name)
+                        VALUES(123456789,960,false,'Synthetic registry name');
+                    INSERT INTO companies(id,tenant_id,created_at,updated_at,country_code,organization_number,registry_org_number)
+                        VALUES(961,1,'2026-01-01Z','2026-01-01Z','NO','123456789',123456789);
+                    INSERT INTO suppliers(id,tenant_id,company_id) VALUES(961,1,961);
+                    INSERT INTO customers(id,tenant_id,company_id) VALUES(961,1,961);
+                    UPDATE postings SET account_number='1500',customer_id=961 WHERE tenant_id=1 AND voucher_id=1 AND account_number='3000';
+                    UPDATE postings SET account_number='2400',supplier_id=961 WHERE tenant_id=1 AND voucher_id=2 AND account_number='1920';
+                """) }
+                Session.borrow(connection,1) {
+                    val rows=Queries.voucherOverview(listOf(1,2))
+                    assertEquals("Synthetic Registry Name",rows.single { it.accountNumber=="1500" }.subsidiaryLedgerName)
+                    val supplier=rows.single { it.accountNumber=="2400" }
+                    assertEquals("Synthetic Registry Name",supplier.subsidiaryLedgerName)
+                    assertEquals("Synthetic Registry Name",supplier.supplierName)
+                }
+            } finally { connection.rollback() }
+        }
+    }
+
     @Test fun `same object IDs are isolated by tenant on read and update`() {
         vev.write(1) { assertEquals(1L,Queries.renameDepartment("Tenant One",1)) }
         assertEquals("Tenant One",vev.read(1) { Queries.department(1)!!.name })
