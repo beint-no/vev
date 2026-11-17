@@ -41,7 +41,7 @@ public class QueryBenchmark {
     }
 
     @Benchmark public List<CustomersRow> generated() throws Exception {
-        var rows = Session.borrow(connection, session -> Queries.INSTANCE.customers(session, 7, null));
+        var rows = Session.borrow(connection, 7, session -> Queries.customers(null));
         connection.commit();
         return rows;
     }

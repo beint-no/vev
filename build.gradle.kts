@@ -1,6 +1,6 @@
 plugins {
     base
-    kotlin("jvm") version "2.4.21" apply false
+    kotlin("jvm") version "2.5.0-Beta2" apply false
     id("com.vanniktech.maven.publish") version "0.37.0" apply false
     id("me.champeau.jmh") version "0.7.3" apply false
 }
@@ -36,7 +36,7 @@ subprojects {
             }
         }
     }
-    if (name in setOf("cluster", "runtime", "compiler", "spring", "gradle-plugin")) {
+    if (name in setOf("cluster", "runtime", "compiler", "gradle-plugin")) {
         apply(plugin = "com.vanniktech.maven.publish")
         extensions.configure<com.vanniktech.maven.publish.MavenPublishBaseExtension> {
             publishToMavenCentral()
@@ -60,7 +60,7 @@ subprojects {
 tasks.named("check") { dependsOn(subprojects.map { "${it.path}:check" }) }
 tasks.register<Zip>("releaseBundle") {
     dependsOn(":cluster:publishAllPublicationsToReleaseRepository", ":runtime:publishAllPublicationsToReleaseRepository",
-            ":compiler:publishAllPublicationsToReleaseRepository", ":spring:publishAllPublicationsToReleaseRepository",
+            ":compiler:publishAllPublicationsToReleaseRepository",
             ":gradle-plugin:publishAllPublicationsToReleaseRepository")
     from(layout.buildDirectory.dir("repository"))
     destinationDirectory.set(layout.buildDirectory.dir("distributions"))

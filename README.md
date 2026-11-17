@@ -1,235 +1,180 @@
-# Vev
+# Vev 2.0.0
 
-> **Not in use.** Vev works and 2.0.0 is released, but nothing in beint-no depends on it.
-> Evaluated for ReAI in October 2026 and declined: roughly half of that application's read
-> queries return JPA entities that feed Hibernate's write model, so they could not convert
-> without replacing the ORM, and Hibernate 8 plus the JPA and Spring AOT work is expected to
-> close most of the remaining performance gap. The evidence is in beint-no/reai#1407.
-> This repository is archived; see [design history](history.md) before reviving it.
+Kotlin-first, tenant-scoped SQL for JDK 27 and PostgreSQL 18.
 
-SQL-first persistence for **the latest JDK, PostgreSQL 18, and Kotlin**.
-
-Write PostgreSQL queries. Vev applies your Flyway migrations to a disposable local
-PostgreSQL cluster, asks PostgreSQL to parse and describe each query, and generates
-typed Kotlin functions and result classes. Application queries are never executed
-during generation. There is no entity model, query DSL, reflection-based mapper,
-persistence context, or Jakarta dependency.
+Write PostgreSQL SQL. Vev applies Flyway migrations to a disposable build database,
+asks PostgreSQL to parse and describe queries, and generates typed Kotlin APIs and
+JDBC mappings. Application queries are not executed during generation. There is no
+ORM, query DSL, persistence context, reflective mapper, JPA, or Spring adapter.
 
 ## Use
 
-Install PostgreSQL 18 with `postgres`, `initdb`, and `pg_ctl` on `PATH`. Run Gradle
-with the latest JDK. SQL-first artifacts use `no.beint.vev:runtime:2.0.0`,
-`no.beint.vev:compiler:2.0.0`, `no.beint.vev:cluster:2.0.0`, the optional
-`no.beint.vev:spring:2.0.0`, and the `no.beint.vev` Gradle plugin.
+Install PostgreSQL 18 (`postgres`, `initdb`, `pg_ctl`) and run Gradle on JDK 27.
+The GitHub release bundle is a standalone Maven repository: extract it and add its
+directory to both `pluginManagement.repositories` and dependency repositories.
+Use Maven Central only once the matching artifacts have actually been published there.
 
 ```kotlin
 plugins {
-    kotlin("jvm") version "2.4.21"
+    kotlin("jvm") version "2.5.0-Beta2"
     id("no.beint.vev") version "2.0.0"
 }
-
-repositories { mavenCentral() }
-
+kotlin {
+    jvmToolchain(27)
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }
+}
 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
     packageName.set("example.db")
-    className.set("Queries")
+    migrations.set(rootProject.layout.projectDirectory.dir("db/src/main/resources/db/migration"))
 }
 ```
 
-Add `mavenCentral()` to `pluginManagement.repositories` in settings. The plugin
-adds the runtime dependency and wires generation into Kotlin compilation.
-The application supplies pgjdbc and its connection pool. Kotlin 2.4.21 emits JVM
-26 bytecode; compile and run with the latest JDK. Set `JvmTarget.JVM_26` in Kotlin
-builds that otherwise derive their bytecode target from the latest JDK toolchain.
-
-Place Flyway migrations in `src/main/resources/db/migration`. For example:
+The plugin adds Vev's dependency-free runtime. Supply pgjdbc and your connection
+pool. Compiler dependencies, including Flyway, do not enter the runtime graph.
+The default migration location is `src/main/resources/db/migration`.
+Place one named query per file in `src/main/sql`:
 
 ```sql
-CREATE TABLE customer (
-    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    tenant_id integer NOT NULL,
-    name text NOT NULL
-);
-```
-
-Place one named query in each file under `src/main/sql`:
-
-```sql
--- name: customersAfter :many
--- tenant: tenantId
--- type: id CustomerId
--- type: after CustomerId
--- rows: 1000
+-- name: customers :many
 SELECT id, name FROM customer
 WHERE tenant_id = :tenantId AND id > :after
-ORDER BY id
-LIMIT :limit::integer;
+ORDER BY id LIMIT :limit::int;
 ```
-
-The compiler generates a `CustomerId` value class, a result with non-null `id`
-and `name`, and a function taking `TenantSession`, `CustomerId`, and `Int`:
 
 ```kotlin
-val database = no.beint.vev.Vev(dataSource)
-val customers = database.read(42) { session ->
-    Queries.customersAfter(session, CustomerId(0), 100)
-}
+val db = no.beint.vev.Vev(dataSource)
+val customers = db.read(42) { Queries.customers(after = 0, limit = 100) }
+// A separately declared UPDATE query:
+val changed = db.write(42) { Queries.renameCustomer(id = 123, name = "Example") }
 ```
+
+Generated functions resolve the active transaction through a JDK `ScopedValue` and
+bind `:tenantId` from it. No session or tenant argument appears in query calls.
+Kotlin retains data classes, named arguments, nullability and scalar value classes.
+Static JVM methods support Java; value-class parameters use their underlying JVM
+representation in Java. The Kotlin compiler owns all Kotlin metadata and bytecode.
+
+## Tenant scope
+
+`read(tenantId)` and `write(tenantId)` require positive integer IDs. Queries are
+tenant-scoped by default and must contain a required integer `:tenantId` parameter.
+Global SQL explicitly opts out:
+
+```sql
+-- name: exchangeRate :optional
+-- scope: global
+SELECT rate FROM exchange_rate WHERE currency = :currency;
+```
+
+Use `db.readGlobal { ... }` or `db.writeGlobal { ... }` for global-only work.
+Global reference queries may also run in a tenant transaction. Tenant queries in a
+global transaction fail before preparing SQL. Calls outside transactions fail.
+Nested Vev transactions are rejected before acquiring another connection.
+
+**Binding is not authorization or proof of a correct tenant predicate.** Obtain
+the tenant from authenticated context. Write explicit tenant predicates and tenant
+equality in joins. Keep composite foreign keys, least-privilege roles and RLS where
+required. Vev does not inject predicates, rewrite joins, or certify tenant isolation.
+
+For RLS, construct `Vev(dataSource, isolation, true)`. It installs transaction-local
+`vev.tenant_id` once per transaction, clearing it for global work and adding one statement. PostgreSQL resets
+it on commit/rollback. Policies should fail closed for a missing setting, for example
+`nullif(current_setting('vev.tenant_id', true), '')::int`. Use a nonowner,
+non-superuser application role; owners ordinarily bypass RLS. Ordinary parameter
+binding adds no context-management statements.
+
+Transactions are synchronous and confined to their owning thread. Virtual threads
+are supported. Do not suspend/dispatch coroutine work inside the callback, or share
+sessions with child threads. Scoped values are not coroutine context propagation.
+Escaped and cross-thread sessions fail closed.
 
 ## Query contracts
 
-| Directive | Meaning |
+| Directive | Contract |
 |---|---|
-| `-- name: find :many` | Return a bounded list; default maximum 1,000 rows |
-| `-- name: find :one` | Require exactly one row |
-| `-- name: find :optional` | Return one row or `null`; reject multiple rows |
-| `-- name: change :exec` | Return a `Long` affected-row count; no result set |
-| `-- nullable: name, from` | Allow null for the listed input parameters |
-| `-- notnull: id, total` | Declare listed result columns required where no proof is available |
-| `-- type: id CustomerId` | Generate a distinct scalar domain type for that input or output name |
-| `-- enum: status com.example.Status` | Map a textual input or output to an existing Kotlin enum |
-| `-- tenant: tenantId` | Require `TenantSession`; bind this integer parameter from its scope |
-| `-- rows: 500` | Override the materialization ceiling, between 1 and 1,000,000 |
+| `-- name: query :many` | Bounded materialized list, default maximum 1,000 rows |
+| `-- name: query :one` | Exactly one row; missing/extra rows fail |
+| `-- name: query :optional` | Zero or one row; extra rows fail |
+| `-- name: query :exec` | Affected-row count as `Long` |
+| `-- name: query :void` | Execute a void-returning function for its effect |
+| `-- scope: global` | Explicit opt-out from automatic tenant binding |
+| `-- nullable: name, note` | Nullable inputs |
+| `-- notnull: id, total` | Non-null result assertion, checked on returned rows |
+| `-- type: id CustomerId` | Distinct Kotlin scalar value class |
+| `-- enum: status example.Status` | Existing textual Kotlin enum |
+| `-- rows: 500` | Materialization ceiling, from 1 to 1,000,000 |
 
-Directives precede SQL. Parameters and aliases use ASCII identifiers. Result
-properties convert snake_case to camelCase. Use explicit result columns and
-distinct aliases; wildcards, multiple statements, ambiguous parameters, unknown
-types, and duplicate generated names fail the build. Use PostgreSQL casts to
-resolve ambiguous inputs, such as `:name::text IS NULL`. Repeated named inputs must
-have the same PostgreSQL type at each occurrence. Values are always bound;
-SQL literals, quoted identifiers, nested comments, dollar quoting, casts, and
-PostgreSQL `?` operators are lexed without confusing them with parameters.
-Use separate named queries for different identifiers or sort orders; SQL structure
-is not assembled from runtime strings. Public `Session` execution methods are
-generator plumbing: manually supplying SQL to them bypasses build-time checking.
+Values are bound. Use casts for ambiguous inputs (`:name::text IS NULL`) and real
+arrays for `= ANY(:ids::int[])`. List result columns explicitly. Wildcards, multiple
+statements, unsupported types, ambiguous parameters, duplicate names and incompatible
+result contracts fail generation. Snake-case result names become camelCase properties.
 
-**Nullability is conservative.** A plain SELECT can inherit NOT NULL from origin
-columns. Outer joins, set operations, grouping, CTEs, subqueries, and returned DML
-rows default to nullable results. Standalone `EXISTS` and `COUNT(*)` projections
-are recognized as non-null. Other expressions remain nullable when a proof is
-unavailable. There is no unsafe non-null override. Changing a query to an outer
-join therefore changes generated types and makes unsafe application access fail
-compilation. Declaring nullable inputs is an explicit caller contract, not proof
-that every database constraint accepts NULL.
+Nullability is conservative for outer joins, CTEs, grouping, set operations,
+expressions and returned DML. `notnull` is a runtime-checked assertion, not a static
+proof. Constraints, cardinality, enum contents, concurrent outcomes and business
+rules still require runtime checks. The compiler does not execute function bodies
+or prove application permissions, execution plans or production schema equivalence.
 
-Supported scalars: boolean; smallint/integer/bigint; real/double precision;
-numeric (`BigDecimal`); text/varchar/char/name; citext; xml; inet; UUID;
-date/time/timestamp/timestamptz (`java.time`, with `OffsetDateTime` for timestamptz);
-bytea (`ByteArray`); json/jsonb (`String`). PostgreSQL's own text form is preserved for
-xml and inet, so `inet` reads back as `10.0.0.1/32`. One-dimensional arrays support
-booleans, numbers, strings and UUIDs, retaining nullable elements; other element types
-fail generation rather than claim unverified JDBC decoding. Unknown types fail
-generation; cast deliberately where appropriate. Multidimensional arrays and values
-JDBC cannot represent (for example non-finite numeric values as BigDecimal) fail decoding.
+Supported scalars: boolean, smallint/int/bigint, real/double precision, numeric,
+text/varchar/char/name/citext, XML, inet, UUID, date/time/timestamp/timestamptz,
+bytea, JSON and JSONB. Numeric uses `BigDecimal`; temporal types use `java.time`,
+with `OffsetDateTime` for timestamptz. JSON and text-like special types use `String`.
+One-dimensional boolean/number/string/UUID arrays retain nullable elements.
+Unsupported types fail; cast deliberately where appropriate. Multidimensional
+arrays and values not representable by the JVM type fail decoding.
 
-`-- enum:` maps a textual column or parameter to an enum the application already owns,
-rather than generating a parallel type. The constant name is what travels, so the
-PostgreSQL type must be text, varchar, char, name or citext. A stored value with no
-matching Kotlin constant raises `IllegalArgumentException` instead of decoding to
-something else.
+SQL structure is static. Use separate queries for different identifiers/sort orders.
+Bulk work can use set-based SQL and typed arrays, without a runtime query builder.
 
-## Transactions and tenancy
+## Transactions
 
-`Vev.read` and `Vev.write` acquire one connection, execute one lexical callback,
-commit once, and close it. Read transactions are database-enforced read-only.
-The default isolation is READ COMMITTED; constructor configuration also accepts
-REPEATABLE READ and SERIALIZABLE. No implicit retries, cascades, dirty checking,
-or extra entity loads occur. Query errors and cardinality violations poison the
-scope, even if caught inside its callback. Commit failures propagate with their
-SQLState; an uncertain commit must not be blindly retried. A cleanup failure after
-a successful commit is logged without reporting the write as failed.
+One pooled connection, one callback, one commit and one close. Reads are
+database-enforced read-only. READ COMMITTED is the default; REPEATABLE READ and
+SERIALIZABLE are configurable. Query failures poison a transaction even when caught
+inside the callback. Commit failures preserve SQLState and are never automatically
+retried. Cleanup errors are suppressed on the original error. Cleanup failure after
+a successful commit is logged without reporting the committed write as failed.
 
-### Spring
+`Session.borrow(connection, tenantId) { ... }` participates in caller-owned JDBC
+transactions without committing, rolling back or closing them. The caller must
+roll back on failure and manage any RLS setting. Public Session execution methods
+are generator plumbing; manually supplying SQL bypasses build-time validation.
 
-`no.beint.vev:spring` provides `VevTemplate`, which runs generated queries on the
-connection bound to the caller's Spring transaction. It never commits, rolls back or
-closes that connection, and it fails rather than silently opening its own transaction
-when none is active. Hibernate's pending changes are invisible to plain SQL until they
-are flushed, so pass `entityManager::flush` as the optional `beforeQuery` hook wherever
-generated queries must observe writes made earlier in the same transaction.
+## Builds and verification
 
-```kotlin
-@Bean fun vev(dataSource: DataSource, entityManager: EntityManager) =
-    VevTemplate(dataSource) { entityManager.flush() }
+One lazy Gradle build service owns one disposable PostgreSQL cluster and one
+migration replay per distinct schema. Modules share it. Reusable isolated Gradle
+classloaders avoid compiler JVM launches per module. Generated implementations are
+split per query with a stable public facade; SQL-only edits leave unrelated files
+untouched. Removed queries remove owned generated files. Gradle skips unchanged
+generation entirely. Configuration cache is tested. Shared output caching is disabled
+because installed extensions are external state. No database daemon is retained
+between builds. `initdb` must run as a non-root user.
 
-@Transactional(readOnly = true)
-fun invoices(tenantId: Int): List<InvoiceSummaryRow> =
-    vev.query(tenantId) { Queries.invoiceSummary(it) }
-```
-
-`Session.borrow(connection) { ... }` joins a caller-owned transaction. It requires
-autocommit off and never commits, rolls back, or closes the connection. The owner
-must roll back on failure. With Spring JDBC, obtain the transaction-bound
-connection through `JdbcTemplate` or `DataSourceUtils`; with Hibernate, use
-`Session.doReturningWork` and flush pending managed changes when necessary.
-Do not open an independent Vev transaction inside an operation that must be atomic
-with an existing framework transaction.
-
-`TenantSession.borrow(connection, tenantId) { ... }` binds a positive tenant
-identifier without additional database statements. For RLS policies using
-`vev.tenant_id`, explicitly wrap the work in `tenant.withRls { scope -> ... }`.
-That scope reads, installs, and restores the transaction-local setting (three
-additional statements). Place it around the whole unit of work, not each query.
-The tenant identifier must be positive. Session use outside its lexical
-scope or thread fails. Tenant-aware generated functions cannot be called with a
-plain session or an arbitrary per-query tenant argument.
-
-**Tenant scope is not authorization or a SQL predicate proof.** Resolve it from
-the authenticated application context. Keep tenant predicates, composite foreign
-keys, least-privilege roles, and PostgreSQL RLS where required. Vev does not add or
-certify policies. The compiler does not prove business correctness, row counts,
-constraint satisfaction, query plans, or concurrent outcomes. Database constraints,
-including deferred constraint triggers, remain authoritative.
-
-## Build and deployment
-
-Generation requires only migrations and installed PostgreSQL binaries, never
-production credentials or customer data. Each build owns a password-protected,
-loopback-only cluster that is stopped and removed on success, failure, or normal
-process termination. `initdb` must run as a non-root user. Migrations are trusted
-build inputs and execute with privileges inside that disposable cluster.
-
-One Gradle build starts **one** cluster, shared through a build service, and applies
-each distinct migration set once to a database named after that set's content. Every
-module then describes its queries against that database read-only and concurrently, so
-a repository with forty modules pays for one `initdb` and one migration replay instead
-of forty. Editing a migration changes the name and replays it; unrelated schemas never
-share a database. A module that needs its own cluster can still invoke the compiler
-directly in `--mode standalone`.
-
-Configure `queries`, `migrations`, `output`, or `postgresBin` on `generateVev` to
-change their defaults. Optional `fixtures` supplies an additional Flyway location
-for synthetic build-only callbacks when historical migrations require rows.
-Keep it outside application resources. Concurrent-index migrations use Flyway
-session locking. The fixture cluster has bounded statement and lock timeouts;
-explicit migration settings can override them.
-
-Gradle tracks query files, migration files, fixtures, compiler classpath, and the
-PostgreSQL binary version. Unchanged generation is up-to-date; configuration cache
-is supported. Shared output caching is disabled because extension installations
-are external state. Regenerate after changing extensions. Generated Kotlin and
-query hashes are under `build/generated/vev`; do not edit or commit them.
-
-The deployment schema and name resolution must match the build schema. Generation
-is not a live production-schema proof. Deploy migrations and application versions
-with an explicit compatibility strategy. Vev leaves indexes, triggers, constraints,
-connection pools, and database recovery under application ownership.
-
-## Verification
+Build/deployment PostgreSQL majors, extensions, search path and relevant settings
+must match. Build checks do not attest production schema or permissions and do not
+remove PostgreSQL's runtime query preparation/planning.
 
 ```sh
-./gradlew clean check releaseBundle
-./gradlew :benchmarks:jmh
+./gradlew clean check releaseBundle :benchmarks:jmhClasses
+./gradlew :benchmarks:buildPerformance :benchmarks:jmh
+python3 scripts/check-performance.py
 ```
 
-Tests include PostgreSQL-backed compiler rejection, independent Kotlin compile
-failures, runtime type round trips, RLS, deferred constraints, transaction failures,
-resource ownership, statement counts, and a Gradle TestKit consumer that verifies
-configuration caching and migration invalidation. JMH compares equivalent generated
-and handwritten JDBC work with result parity and allocation profiling. See
-[performance evidence](docs/performance.md); no general speed advantage is claimed.
+The schema-only ReAI corpus contains 432 tables including one unlogged table, plus
+views, functions, triggers, indexes and constraints. Provenance is pinned in
+`test-fixtures/reai/provenance.txt`. No production rows are included. Execution
+fixtures are independently synthetic: three tenants with overlapping identifiers,
+900 vouchers and 1,800 postings.
 
-The runtime has no dependencies. Compiler, Flyway, Kotlin compiler tooling, test
-libraries, and JMH stay outside the application runtime graph.
+Thousands of database-backed checks exercise column contracts and SQL rejections.
+Execution covers generated scalar/array readers, Unicode, NULLs, empty arrays,
+joins, CTEs, windows, lateral joins, composite foreign keys, deferred triggers,
+tenant cascades, RLS, failures and virtual threads. Independent Kotlin/Java consumers
+and Gradle TestKit verify the actual API. CI checks Linux/macOS correctness and
+paired JDBC benchmarks with allocations and separate build-phase timings.
 
-[Release process](docs/releases.md) · [Design history](history.md) · [Apache 2.0](LICENSE)
+Performance gates detect gross regressions, not production SLAs. No benchmark
+establishes a Hibernate speedup or predicts application throughput/startup gains.
+See [current analysis](docs/analysis.md), [performance](docs/performance.md), and
+[release procedure](docs/releases.md).

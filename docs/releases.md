@@ -1,34 +1,23 @@
-# Releases
+# Releasing Vev 2.0.0
 
-SQL-first Vev uses `no.beint.vev:cluster`, `no.beint.vev:runtime`,
-`no.beint.vev:compiler`, `no.beint.vev:spring`, and `no.beint.vev:gradle-plugin`,
-with the Gradle marker `no.beint.vev`. Version 1.0.0 is tagged `sql-v1.0.0` and
-2.0.0 is tagged `sql-v2.0.0`. Use matching cluster, compiler, plugin, and runtime
-versions and regenerate application sources on upgrades.
+Publish matching `no.beint.vev:cluster`, `runtime`, `compiler`, `gradle-plugin` and
+Gradle marker `no.beint.vev` artifacts. Regenerate sources with matching versions.
+Supported: JDK 27, Kotlin 2.5.0-Beta2, PostgreSQL 18 and matching pgjdbc.
 
-Release gates:
+1. Run `./gradlew clean check releaseBundle :benchmarks:jmhClasses`.
+2. Run `./gradlew :benchmarks:buildPerformance :benchmarks:jmh`, retain raw JSON and
+   environment information, and run `python3 scripts/check-performance.py`.
+3. Run `python3 scripts/verify-release.py` for independent Kotlin/Java consumers from
+   the bundled Maven repository, without injected classpaths. Inspect the runtime
+   dependency graph and release repository.
+4. Review and require Linux/macOS correctness plus performance CI on the tested revision.
+5. Tag the tested merge as `sql-v2.0.0`. Published Maven Central coordinates are
+   immutable and must not be overwritten.
+6. Publish signed artifacts with externally supplied credentials using
+   `publishAndReleaseToMavenCentral` when available.
+7. Attach `build/distributions/vev-sql-2.0.0-maven.zip` and SHA-256 checksum to the
+   GitHub release. Verify tag, POMs and assets describe the same tested revision.
 
-1. `./gradlew clean check releaseBundle` on the latest JDK and PostgreSQL 18.
-2. Compile application trials against the generated Maven repository, then verify
-   them against the published artifacts. Inspect the runtime dependency graph.
-3. Run JMH and retain raw output with exact versions and limitations. Performance
-   evidence is descriptive, not a machine-independent pass/fail threshold.
-4. Inspect the complete diff and generated APIs. Commit, merge, and tag the tested
-   source. Publish signed artifacts with `publishAndReleaseToMavenCentral` and
-   attach the Maven repository bundle plus SHA-256 checksums to the GitHub release.
-
-`releaseBundle` writes `build/distributions/vev-sql-2.0.0-maven.zip`. It is also a
-standalone Maven repository: extract it and add its directory to both
-`pluginManagement.repositories` and application dependency repositories.
-The compiler/runtime jars, sources, Javadoc, POMs, module metadata and plugin
-marker are included. Signing credentials are supplied externally through the
-standard Maven Publish plugin properties; never put secrets in this repository.
-
-Only the latest 2.x release is maintained. No support is promised for older JDKs
-or PostgreSQL majors. Conservative nullability may become more precise in later
-releases; unsupported type support is added only with compiler and database tests.
-
-2.0.0 changes generated output and the plugin's build contract. Queries written for
-1.0.0 still compile, but `-- notnull:`, `-- enum:` and `:void` are new, generation
-now shares one cluster per build, and `no.beint.vev:cluster` is a new required
-artifact. Regenerate rather than mixing 1.x and 2.x artifacts.
+The bundle is a standalone Maven repository. GitHub assets and Maven Central are
+separate distribution channels. Never claim Central publication from a local bundle.
+Keep all signing/publishing secrets outside Git and CI artifacts.

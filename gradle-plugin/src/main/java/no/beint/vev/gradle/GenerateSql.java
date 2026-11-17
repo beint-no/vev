@@ -23,7 +23,7 @@ import org.gradle.api.tasks.OutputDirectory;
 import org.gradle.api.tasks.PathSensitive;
 import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.api.tasks.TaskAction;
-import org.gradle.process.ExecOperations;
+import org.gradle.workers.WorkerExecutor;
 import org.gradle.work.DisableCachingByDefault;
 
 /** Generation is incremental locally; external PostgreSQL binaries intentionally disable shared caching. */
@@ -37,10 +37,9 @@ public abstract class GenerateSql extends DefaultTask {
     @Input public abstract Property<String> getClassName();
     @Input public abstract Property<String> getPostgresBin();
     @Input public abstract Property<String> getPostgresVersion();
-    @Input public abstract Property<String> getJavaExecutable();
     @Classpath public abstract ConfigurableFileCollection getCompilerClasspath();
     @ServiceReference("vevCluster") public abstract Property<VevCluster> getCluster();
-    @Inject protected abstract ExecOperations getExecOperations();
+    @Inject protected abstract WorkerExecutor getWorkerExecutor();
 
     @TaskAction public void generate() {
         VevCluster cluster = getCluster().get();
@@ -63,12 +62,9 @@ public abstract class GenerateSql extends DefaultTask {
     private void compiler(List<String> arguments) {
         List<String> all = new ArrayList<>(arguments);
         if (getFixtures().isPresent()) { all.add("--fixtures"); all.add(getFixtures().get().getAsFile().toString()); }
-        getExecOperations().javaexec(spec -> {
-            spec.setExecutable(getJavaExecutable().get());
-            spec.setClasspath(getCompilerClasspath());
-            spec.getMainClass().set("no.beint.vev.compiler.Main");
-            spec.args(all);
-        }).assertNormalExitValue();
+        var queue = getWorkerExecutor().classLoaderIsolation(spec -> spec.getClasspath().from(getCompilerClasspath()));
+        queue.submit(CompileSql.class, parameters -> parameters.getArguments().set(all));
+        queue.await();
     }
 
     /**

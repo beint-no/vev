@@ -65,17 +65,27 @@ public final class QueryCompiler {
                 throw SqlSource.error(query.source.path(), "Generated row type name collision");
             }
         }
-        String generated = KotlinWriter.write(packageName, className, compiled, domains);
+        Map<String, String> generated = new java.util.TreeMap<>();
+        generated.put(className + ".kt", KotlinWriter.facade(packageName, className, compiled, domains));
+        for (Query query : compiled) {
+            String name = KotlinWriter.implementationName(className, query);
+            if (!types.add(name)) throw SqlSource.error(query.source.path(), "Generated implementation name collision: " + name);
+            generated.put(name + ".kt", KotlinWriter.write(packageName, name, List.of(query), Map.of())
+                    .replace("\nobject `" + name + "`", "\ninternal object `" + name + "`"));
+        }
         Files.createDirectories(output);
-        Path file = output.resolve(className + ".kt");
         Path owner = output.resolve(".vev-output");
         if (Files.exists(owner)) {
-            String previous = Files.readString(owner).strip();
-            if (!previous.matches("[A-Za-z][A-Za-z0-9_]*\\.kt")) throw new IOException("Invalid Vev output ownership marker");
-            if (!previous.equals(file.getFileName().toString())) Files.deleteIfExists(output.resolve(previous));
+            for (String previous : Files.readAllLines(owner)) {
+                if (!previous.matches("[A-Za-z][A-Za-z0-9_]*\\.kt")) throw new IOException("Invalid Vev output ownership marker");
+                if (!generated.containsKey(previous)) Files.deleteIfExists(output.resolve(previous));
+            }
         }
-        Files.writeString(file, generated, StandardCharsets.UTF_8);
-        Files.writeString(owner, file.getFileName().toString(), StandardCharsets.UTF_8);
+        for (var entry : generated.entrySet()) {
+            Path file = output.resolve(entry.getKey());
+            if (!Files.exists(file) || !Files.readString(file).equals(entry.getValue())) Files.writeString(file, entry.getValue(), StandardCharsets.UTF_8);
+        }
+        Files.writeString(owner, String.join("\n", generated.keySet()) + "\n", StandardCharsets.UTF_8);
         String manifest = compiled.stream().map(q -> q.source.path().getFileName() + " " + q.source.name()
                 + " " + q.source.cardinality() + " " + digest(q.source.sql())).collect(java.util.stream.Collectors.joining("\n"));
         Files.writeString(output.resolve("queries.sha256"), manifest + "\n", StandardCharsets.UTF_8);

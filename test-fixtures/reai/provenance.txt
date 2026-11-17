@@ -1,0 +1,7 @@
+Source: https://github.com/beint-no/reai
+Commit: 1ce39c16a3c05ba6d0490a6297598135bcd17494
+Path: db/src/main/resources/db/migration/V1__reai_schema_init.sql
+Imported: 2026-11-17 with repository owner's authorization.
+Schema only: 432 tables (including one unlogged table), functions, indexes, triggers, constraints; no production rows.
+Test data is generated independently, never obtained from a production dump.
+SHA-256: 004abf89ec5220fd7af5ce450149151c07b99b1d077a7de833210f34c1bfe1f0

@@ -1,0 +1,9 @@
+{
+  "date": "2026-11-17",
+  "os": "macOS-27.2.1-arm64-arm-64bit",
+  "postgres": "postgres (PostgreSQL) 18.6 (Homebrew)",
+  "pgjdbc": "42.7.14",
+  "kotlin": "2.5.0-Beta2",
+  "schemaCommit": "1ce39c16a3c05ba6d0490a6297598135bcd17494",
+  "workloads": "five-row projection and 600-row ledger; three forks, 3x2s warmup, 5x2s measurement; one benchmark thread; no competing builds"
+}

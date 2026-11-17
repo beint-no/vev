@@ -3,13 +3,13 @@ package no.beint.vev.compiler;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import no.beint.vev.cluster.Cluster;
 
 /** Connects to a disposable Vev cluster and prepares the schema the compiler describes against. */
 public final class Postgres implements AutoCloseable {
+    private static final java.sql.Driver DRIVER = new org.postgresql.Driver();
     private final Cluster cluster;
 
     /** Owns a fresh cluster for an isolated single-module run. */
@@ -22,7 +22,12 @@ public final class Postgres implements AutoCloseable {
     public Connection connect() throws SQLException { return connect(url(), user(), password()); }
 
     public static Connection connect(String url, String user, String password) throws SQLException {
-        return DriverManager.getConnection(url, user, password);
+        var properties = new java.util.Properties();
+        properties.setProperty("user", user);
+        properties.setProperty("password", password);
+        Connection connection = DRIVER.connect(url, properties);
+        if (connection == null) throw new SQLException("Vev requires a PostgreSQL JDBC URL");
+        return connection;
     }
 
     /** Create an empty database to migrate. Identifiers are generated, never taken from user SQL. */
@@ -51,7 +56,7 @@ public final class Postgres implements AutoCloseable {
     public static void migrate(String url, String user, String password, Path migrations, Path fixtures) {
         String[] locations = fixtures == null ? new String[] {"filesystem:" + migrations.toAbsolutePath()}
                 : new String[] {"filesystem:" + migrations.toAbsolutePath(), "filesystem:" + fixtures.toAbsolutePath()};
-        var configuration = org.flywaydb.core.Flyway.configure().dataSource(url, user, password)
+        var configuration = org.flywaydb.core.Flyway.configure(Postgres.class.getClassLoader()).dataSource(url, user, password)
                 .locations(locations)
                 .validateMigrationNaming(true).cleanDisabled(true);
         configuration.getConfigurationExtension(org.flywaydb.database.postgresql.PostgreSQLConfigurationExtension.class)

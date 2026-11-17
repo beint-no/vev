@@ -26,11 +26,18 @@ public final class Main {
                 throw new IllegalArgumentException("Expected unique options from " + OPTIONS);
             }
         }
-        switch (options.getOrDefault("--mode", "standalone")) {
-            case "standalone" -> standalone(options);
-            case "migrate" -> migrate(options);
-            case "compile" -> compile(options);
-            default -> throw new IllegalArgumentException("Use --mode standalone, migrate or compile");
+        try {
+            switch (options.getOrDefault("--mode", "standalone")) {
+                case "standalone" -> standalone(options);
+                case "migrate" -> migrate(options);
+                case "compile" -> compile(options);
+                default -> throw new IllegalArgumentException("Use --mode standalone, migrate or compile");
+            }
+        } finally {
+            // DriverManager otherwise pins Gradle's isolated compiler classloader after the build.
+            synchronized (org.postgresql.Driver.class) {
+                if (org.postgresql.Driver.isRegistered()) org.postgresql.Driver.deregister();
+            }
         }
     }
 

@@ -1,0 +1,4 @@
+-- name: typeCase26 :one
+-- scope: global
+-- nullable: value
+SELECT :value::float4[] AS value;
