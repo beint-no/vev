@@ -270,6 +270,44 @@ class ReaiExecutionTest {
         }
     }
 
+    @Test fun `company detail views preserve tenant isolation when company IDs overlap`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit=false
+            try {
+                connection.createStatement().use { it.execute("""
+                    INSERT INTO companies(id,tenant_id,created_at,updated_at,name,country_code,company_type_code)
+                    VALUES (990,1,'2026-01-01Z','2026-01-01Z','Synthetic Alpha','SE','AB'),
+                           (990,2,'2026-01-01Z','2026-01-01Z','Synthetic Other Tenant','SE','AB');
+                    INSERT INTO suppliers(id,tenant_id,company_id) VALUES(990,1,990);
+                    INSERT INTO customers(id,tenant_id,company_id) VALUES(990,1,990);
+                    UPDATE postings SET account_number='1500',customer_id=990 WHERE tenant_id=1 AND voucher_id=1 AND account_number='1920';
+                    UPDATE postings SET account_number='2400',supplier_id=990 WHERE tenant_id=1 AND voucher_id=2 AND account_number='1920';
+                    UPDATE vouchers SET voucher_type='CUSTOMER_INVOICE' WHERE tenant_id=1 AND id=1;
+                    UPDATE vouchers SET voucher_type='SUPPLIER_INVOICE' WHERE tenant_id=1 AND id=2;
+                """) }
+                Session.borrow(connection,1) {
+                    val start=LocalDate.of(2026,1,1)
+                    val end=LocalDate.of(2026,1,31)
+                    val totals=Queries.reportTotals(start,end,listOf("3000"),false).filter { it.partyId==990 }
+                    assertEquals(1,totals.size)
+                    assertEquals("Synthetic Alpha",totals.single().name)
+                    assertEquals(BigDecimal("-1.00"),totals.single().amount)
+                    val postings=Queries.reportPostings(start,end,listOf("3000"),false,990)
+                    assertEquals(1,postings.size)
+                    assertEquals("Synthetic Alpha",postings.single().name)
+                    val costs=Queries.reportSupplierCosts(start,end,listOf("3000"),true,990)
+                    assertEquals(1,costs.size)
+                    assertEquals("Synthetic Alpha",costs.single().supplierName)
+                    assertEquals(BigDecimal("2.00"),costs.single().amount)
+                    val overview=Queries.voucherOverview(listOf(1,2))
+                    assertEquals(4,overview.size)
+                    assertTrue(overview.filter { it.subsidiaryLedgerName!=null }.all { it.subsidiaryLedgerName=="Synthetic Alpha" })
+                    assertTrue(overview.filter { it.supplierName!=null }.all { it.supplierName=="Synthetic Alpha" })
+                }
+            } finally { connection.rollback() }
+        }
+    }
+
     @Test fun `same object IDs are isolated by tenant on read and update`() {
         vev.write(1) { assertEquals(1L,Queries.renameDepartment("Tenant One",1)) }
         assertEquals("Tenant One",vev.read(1) { Queries.department(1)!!.name })
