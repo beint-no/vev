@@ -34,7 +34,9 @@ class SqlSourceTest {
     @Test void innerJoinsPreserveOriginNullability() { assertTrue(parse("SELECT t.id FROM t JOIN u ON u.id=t.id").directNullability()); }
     @ParameterizedTest @ValueSource(strings = {
         "SELECT * FROM t", "SELECT ALL * FROM t", "SELECT DISTINCT ON (id) * FROM t",
-        "SELECT t.* FROM t", "SELECT (t).* FROM t", "DELETE FROM t RETURNING *"
+        "SELECT t.* FROM t", "SELECT (t).* FROM t", "DELETE FROM t RETURNING *",
+        "DELETE FROM t RETURNING WITH (OLD AS previous) *",
+        "INSERT INTO t SELECT id FROM u RETURNING WITH (OLD AS previous, NEW AS current) *"
     }) void rejectsUnstableWildcardResults(String sql) { assertThrows(IllegalArgumentException.class, () -> parse(sql)); }
     @ParameterizedTest @ValueSource(strings = {
         "WITH selected AS (SELECT t.* FROM t) SELECT id FROM selected",

@@ -15,7 +15,9 @@ provenance. Generate synthetic data independently. Review fixture updates for pr
 literals, external effects and credentials, update catalog-size expectations, and
 run the full execution suite.
 
-Performance claims require equivalent results/SQL/statement counts, warmup,
-independent forks, allocation profiling, raw output, toolchains and limitations.
+Mapper comparisons require equivalent SQL, results and statement counts. Comparisons
+of application operations must state changed query counts and retain a same-SQL JDBC
+baseline, including unchanged writes. Record warmup, independent forks, allocation
+profiling, raw output, toolchains and limitations.
 Measure SQL analysis separately from generated Kotlin compilation. Do not hide
 unsupported cases or weaken assertions to improve results.

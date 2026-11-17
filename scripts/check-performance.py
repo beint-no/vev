@@ -17,12 +17,17 @@ for result in results:
 indexed = {(r["benchmark"].rsplit(".", 1)[-1], tuple(sorted(r.get("params", {}).items()))): r for r in results}
 pairs = [("generated", "jdbc"), ("generatedLedger", "jdbcLedger"),
          ("generatedPage", "jdbcPage"), ("generatedInsert", "jdbcInsert"), ("generatedBulk", "jdbcBulk"),
-         ("singleRow", "legacyListSingleRow")]
+         ("singleRow", "legacyListSingleRow"), ("generatedSettingsSave", "jdbcSettingsSave")]
 for generated, jdbc in pairs:
     variants = [(params, value) for (name, params), value in indexed.items() if name == generated]
     expected_rows = {"generatedPage": {"1", "100", "600"}, "generatedBulk": {"1", "32", "512"},
                      "singleRow": {"0", "1"}}
-    if generated in expected_rows:
+    if generated == "generatedSettingsSave":
+        expected = {(operation, value) for operation in ("insert", "update", "unchanged") for value in ("null", "12.50")}
+        actual = {(dict(params).get("operation"), dict(params).get("value")) for params, _ in variants}
+        if actual != expected:
+            failures.append(f"Missing settings write variants: {actual}")
+    elif generated in expected_rows:
         actual_rows = {dict(params).get("rows") for params, _ in variants}
         if actual_rows != expected_rows[generated]:
             failures.append(f"Missing or unexpected parameter variants for {generated}: {actual_rows}")
@@ -50,6 +55,10 @@ for generated, jdbc in pairs:
 for name in ("vevNative", "hibernateNative"):
     if (name, ()) not in indexed:
         failures.append(f"Missing Hibernate comparison: {name}")
+hibernate_settings = {tuple(sorted({"operation": operation, "value": value}.items()))
+                      for operation in ("insert", "update", "unchanged") for value in ("null", "12.50")}
+if {params for name, params in indexed if name == "hibernateSettingsSave"} != hibernate_settings:
+    failures.append("Missing Hibernate settings entity-save variants")
 build = json.loads((root / "benchmarks/build/reports/build-performance.json").read_text())
 for sample in build["samples"]:
     if sample["generationSeconds"] > 10:

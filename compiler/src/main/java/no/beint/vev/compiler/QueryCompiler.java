@@ -106,6 +106,11 @@ public final class QueryCompiler {
                 Value previous = parameters.putIfAbsent(name, value);
                 if (previous != null && !previous.type.equals(type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
             }
+            // The binding lambda captures each API argument and the scoped tenant. Its method handle
+            // also needs the Bindings argument and receiver; Kotlin compilation alone misses overflow.
+            int bindingSlots = parameters.values().stream().mapToInt(QueryCompiler::jvmSlots).sum() + 2;
+            if (bindingSlots > 255) throw SqlSource.error(source.path(), "Query bindings require " + bindingSlots
+                    + " JVM parameter slots; at most 255 are supported. Use a PostgreSQL array or fewer parameters");
             ResultSetMetaData result = statement.getMetaData();
             if ((result == null) != source.cardinality().equals("exec")) {
                 throw SqlSource.error(source.path(), "Declared cardinality does not match the SQL result;"
@@ -144,8 +149,7 @@ public final class QueryCompiler {
                 throw SqlSource.error(source.path(), "A void result carries no value; declare the query :void to call it for its effect");
             }
             if (!source.cardinality().equals("void")) {
-                int valueSlots = columns.stream().mapToInt(column -> !column.nullable
-                        && Set.of("Long", "Double").contains(column.type.kotlin()) ? 2 : 1).sum();
+                int valueSlots = columns.stream().mapToInt(QueryCompiler::jvmSlots).sum();
                 // copy$default adds its row receiver, one mask per 32 properties, and a marker.
                 int copySlots = valueSlots + (columns.size() + 31) / 32 + 2;
                 if (copySlots > 255) throw SqlSource.error(source.path(), "Result has " + columns.size()
@@ -155,6 +159,10 @@ public final class QueryCompiler {
         } catch (SQLException exception) {
             throw new SQLException(source.path() + ": PostgreSQL rejected query " + source.name() + " [SQLSTATE " + exception.getSQLState() + "]: " + exception.getMessage(), exception.getSQLState(), exception);
         }
+    }
+
+    private static int jvmSlots(Value value) {
+        return !value.nullable && Set.of("Long", "Double").contains(value.type.kotlin()) ? 2 : 1;
     }
 
     /** A Kotlin enum constant travels as text, so only textual PostgreSQL types can carry one. */

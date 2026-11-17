@@ -38,7 +38,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.4.0"
+    id("no.beint.vev") version "2.5.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -115,6 +115,8 @@ explicitly; internal CTEs and subqueries may use wildcards. Result names in snak
 Nullability is conservative for expressions, joins, CTEs and aggregates; `notnull`
 is a checked assertion rather than an inference. Unsupported types and result rows
 exceeding Kotlin’s JVM parameter limit fail generation with a query-local diagnostic.
+The same check covers captured query arguments; use PostgreSQL arrays instead of hundreds
+of separate binds.
 
 Keep one query per file so agents can discover, read and change its complete contract
 without loading neighboring queries. Multiple statements or named queries in a file
@@ -135,7 +137,8 @@ JDBC isolation override. Configure the pool with auto-commit enabled for owned s
 `Session.borrow(connection, tenantId) { ... }` participates in an existing transaction;
 its connection must have auto-commit disabled. The caller owns commit, rollback and
 close, and must propagate failures to its transaction manager. Flush pending ORM writes
-before borrowing a connection while migrating an application incrementally.
+before borrowing a connection while migrating an application incrementally. The caller also
+enforces framework read-only policies; a framework hint need not make PostgreSQL read-only.
 
 For PostgreSQL RLS, `Vev(dataSource, Vev.DEFAULT_ISOLATION, true)` sets transaction-local
 `vev.tenant_id`. Global work clears the value. Policies can read

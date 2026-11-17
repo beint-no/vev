@@ -1,0 +1,9 @@
+{
+  "jdk": "27.0.1.0.3+1-2",
+  "architecture": "aarch64",
+  "samples": [
+    {"queries": 10, "bootstrapSeconds": 1.501618, "generationSeconds": 0.020444, "kotlinCompilationSeconds": 1.756446},
+    {"queries": 100, "bootstrapSeconds": 1.501618, "generationSeconds": 0.042837, "kotlinCompilationSeconds": 1.387060},
+    {"queries": 1000, "bootstrapSeconds": 1.501618, "generationSeconds": 0.199448, "kotlinCompilationSeconds": 4.025464}
+  ]
+}
