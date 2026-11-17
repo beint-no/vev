@@ -44,7 +44,7 @@ public abstract class GenerateSql extends DefaultTask {
     @TaskAction public void generate() {
         VevCluster cluster = getCluster().get();
         String database = "vev_" + schemaDigest();
-        cluster.withSchema(database, (details, name) -> compiler(List.of(
+        cluster.withSchema(database, getPostgresBin().get(), (details, name) -> compiler(List.of(
                 "--mode", "migrate",
                 "--migrations", getMigrations().get().getAsFile().toString(),
                 "--url", details.url(), "--user", details.user(), "--password", details.password(),

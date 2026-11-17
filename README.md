@@ -143,7 +143,9 @@ are generator plumbing; manually supplying SQL bypasses build-time validation.
 
 ## Builds and verification
 
-One lazy Gradle build service owns one disposable PostgreSQL cluster and one
+The task's optional `postgresBin` selects its PostgreSQL binary directory; all modules
+in a build must select the same directory. One lazy Gradle build service owns one
+disposable PostgreSQL cluster and one
 migration replay per distinct schema. Modules share it. Reusable isolated Gradle
 classloaders avoid compiler JVM launches per module. Generated implementations are
 split per query with a stable public facade; SQL-only edits leave unrelated files

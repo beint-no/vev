@@ -46,6 +46,17 @@ class PluginTest {
         var failure = runner().buildAndFail();
         assertTrue(failure.getOutput().contains("find.sql"));
         assertTrue(failure.getOutput().contains("PostgreSQL rejected query"));
+        Path bin = Files.createDirectory(project.resolve("custom-postgres"));
+        Path version = bin.resolve("postgres"), init = bin.resolve("initdb");
+        Files.writeString(version, "#!/bin/sh\nprintf 'postgres (PostgreSQL) 18.99\\n'\n");
+        Files.writeString(init, "#!/bin/sh\nprintf 'vev-custom-initdb-sentinel\\n'\nexit 42\n");
+        assertTrue(version.toFile().setExecutable(true));
+        assertTrue(init.toFile().setExecutable(true));
+        Files.writeString(project.resolve("build.gradle.kts"),
+                "\ntasks.named<no.beint.vev.gradle.GenerateSql>(\"generateVev\") { postgresBin.set(\""
+                        + bin.toString().replace("\\", "/") + "\") }\n", java.nio.file.StandardOpenOption.APPEND);
+        assertTrue(runner().buildAndFail().getOutput().contains("vev-custom-initdb-sentinel"),
+                "The shared cluster must use the task's configured binaries, not PATH");
     }
 
     /** A repository with many modules must pay for one cluster and one migration replay, not one per module. */
