@@ -4,13 +4,14 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import javax.sql.DataSource;
 
-/** Explicit standalone transactions. Use Session.borrow for framework-owned transactions. */
+/** Explicit JDBC transactions; the connection pool owns the default isolation configuration. */
 public final class Vev {
+    public static final int DEFAULT_ISOLATION = -1;
     private final DataSource source;
     private final int isolation;
     private final boolean rowLevelSecurity;
 
-    public Vev(DataSource source) { this(source, Connection.TRANSACTION_READ_COMMITTED); }
+    public Vev(DataSource source) { this(source, DEFAULT_ISOLATION); }
 
     public Vev(DataSource source, int isolation) {
         this(source, isolation, false);
@@ -19,7 +20,8 @@ public final class Vev {
     public Vev(DataSource source, int isolation, boolean rowLevelSecurity) {
         this.rowLevelSecurity = rowLevelSecurity;
         this.source = java.util.Objects.requireNonNull(source);
-        if (isolation != Connection.TRANSACTION_READ_COMMITTED
+        if (isolation != DEFAULT_ISOLATION
+                && isolation != Connection.TRANSACTION_READ_COMMITTED
                 && isolation != Connection.TRANSACTION_REPEATABLE_READ
                 && isolation != Connection.TRANSACTION_SERIALIZABLE) {
             throw new IllegalArgumentException("Unsupported PostgreSQL transaction isolation");
@@ -46,7 +48,7 @@ public final class Vev {
         try {
             if (!connection.getAutoCommit()) throw new IllegalStateException("Vev requires a fresh connection");
             owned = true;
-            connection.setTransactionIsolation(isolation);
+            if (isolation != DEFAULT_ISOLATION) connection.setTransactionIsolation(isolation);
             connection.setReadOnly(readOnly);
             connection.setAutoCommit(false);
             if (rowLevelSecurity) {

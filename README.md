@@ -76,7 +76,7 @@ the tenant from authenticated context. Write explicit tenant predicates and tena
 equality in joins. Keep composite foreign keys, least-privilege roles and RLS where
 required. Vev does not inject predicates, rewrite joins, or certify tenant isolation.
 
-For RLS, construct `Vev(dataSource, isolation, true)`. It installs transaction-local
+For RLS, construct `Vev(dataSource, Vev.DEFAULT_ISOLATION, true)`. It installs transaction-local
 `vev.tenant_id` once per transaction, clearing it for global work and adding one statement. PostgreSQL resets
 it on commit/rollback. Policies should fail closed for a missing setting, for example
 `nullif(current_setting('vev.tenant_id', true), '')::int`. Use a nonowner,
@@ -129,8 +129,9 @@ Bulk work can use set-based SQL and typed arrays, without a runtime query builde
 ## Transactions
 
 One pooled connection, one callback, one commit and one close. Reads are
-database-enforced read-only. READ COMMITTED is the default; REPEATABLE READ and
-SERIALIZABLE are configurable. Query failures poison a transaction even when caught
+database-enforced read-only. Isolation inherits the pool configuration (PostgreSQL
+defaults to READ COMMITTED). Explicit READ COMMITTED, REPEATABLE READ and SERIALIZABLE
+overrides are available; an override adds pgjdbc's isolation-setting SQL statement. Query failures poison a transaction even when caught
 inside the callback. Commit failures preserve SQLState and are never automatically
 retried. Cleanup errors are suppressed on the original error. Cleanup failure after
 a successful commit is logged without reporting the committed write as failed.

@@ -88,4 +88,12 @@ class TransactionTest {
         assertThrows(IllegalArgumentException.class, () -> new Vev(f.source, Connection.TRANSACTION_NONE));
         assertDoesNotThrow(() -> new Vev(f.source, Connection.TRANSACTION_SERIALIZABLE));
     }
+    @Test void defaultIsolationDoesNotIssueRedundantDatabaseCommands() throws Exception {
+        Fixture f = new Fixture();
+        new Vev(f.source).read(7, s -> 1);
+        assertFalse(f.calls.contains("setTransactionIsolation"));
+        Fixture explicit = new Fixture();
+        new Vev(explicit.source, Connection.TRANSACTION_SERIALIZABLE).read(7, s -> 1);
+        assertEquals(1, explicit.calls.stream().filter("setTransactionIsolation"::equals).count());
+    }
 }

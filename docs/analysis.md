@@ -71,3 +71,8 @@ The tests use ReAI's real schema and independently generated data. Runtime JMH
 comparisons hold SQL/results/fetching/transactions constant against JDBC. Library
 benchmarks do not prove ReAI-wide speedups. Removing entity mapping and repository
 initialization should remove startup work, but this needs application measurement.
+
+Default transaction isolation inherits the pool configuration. pgjdbc unconditionally
+sends `SET SESSION CHARACTERISTICS` when `setTransactionIsolation` is called, so Vev
+does not issue that call for the default. Explicit isolation overrides retain their
+required database statement. PostgreSQL itself defaults to READ COMMITTED.

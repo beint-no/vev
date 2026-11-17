@@ -215,4 +215,14 @@ class QueryTest {
             assertEquals("",scoped.readGlobal { setting() })
         }
     }
+    @Test fun `default isolation inherits configured connections and explicit overrides remain available`() {
+        val configured=PGSimpleDataSource().apply {
+            setURL(postgres.url());user=postgres.user();password=postgres.password()
+            options="-c default_transaction_isolation=serializable"
+        }
+        fun level() = Session.current().one("SHOW transaction_isolation", {}, { it.getString(1) })
+        assertEquals("serializable",Vev(configured).read(7) { level() })
+        assertEquals("read committed",Vev(configured,Connection.TRANSACTION_READ_COMMITTED).read(7) { level() })
+        assertEquals("serializable",Vev(configured).read(7) { level() })
+    }
 }
