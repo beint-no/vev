@@ -163,6 +163,87 @@ class ReaiExecutionTest {
         }
     }
 
+    @Test fun `VAT and voucher projections preserve signed amounts dates nulls and attachment isolation`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit = false
+            try {
+                connection.createStatement().use { it.execute("""
+                    UPDATE postings SET vat_code='87' WHERE tenant_id=1 AND account_number='3000';
+                    INSERT INTO persons(id,tenant_id,name) VALUES(960,1,'Synthetic supplier');
+                    INSERT INTO suppliers(id,tenant_id,person_id) VALUES(960,1,960);
+                    INSERT INTO supplier_invoice(id,tenant_id,date,supplier_id,number,currency)
+                        VALUES(960,1,'2026-01-06',960,'SYNTHETIC-960','NOK');
+                    UPDATE vouchers SET voucher_type='SUPPLIER_INVOICE' WHERE id=5 AND tenant_id=1;
+                    UPDATE postings SET supplier_invoice_id=960 WHERE voucher_id=5 AND tenant_id=1 AND account_number='3000';
+                    INSERT INTO attachments(id,tenant_id,file_data,filename,mimetype) VALUES
+                        (960,1,'\x01','synthetic.pdf','application/pdf'),
+                        (961,1,'\x02','synthetic.txt','text/plain'),
+                        (962,1,'\x03','synthetic.png','image/png'),
+                        (960,2,'\x04','other.pdf','application/pdf');
+                    INSERT INTO voucher_attachments(id,tenant_id,voucher_id,attachment_id) VALUES
+                        (960,1,1,960),(961,1,1,962),(962,1,1,961),(963,2,1,960);
+                    INSERT INTO supplier_invoice_attachments(id,tenant_id,supplier_invoice_id,attachment_id) VALUES(960,1,960,960);
+                """) }
+                val start = LocalDate.of(2026,1,1)
+                val end = LocalDate.of(2026,1,31)
+                Session.borrow(connection,1) {
+                    val basis = Queries.vatBasis(start,end).associate { it.vatCode to it.basisAmount }
+                    assertEquals(BigDecimal("45150.00"),basis["87"])
+                    assertEquals(BigDecimal("-45150.00"),basis["0"])
+                    assertEquals(BigDecimal.ZERO.setScale(2),basis.values.sumOf { it })
+                    val monthly = Queries.vatBasisByMonth(start,end)
+                    assertEquals(basis,monthly.associate { it.vatCode to it.basisAmount })
+                    assertTrue(monthly.all { it.monthNumber==1 })
+                    assertEquals(listOf(LocalDate.of(2026,1,28)),Queries.reverseChargeQuarters(start,end.plusDays(1)).map { it.lastPostingDate })
+                    assertTrue(Queries.reverseChargeQuarters(start,start).isEmpty())
+                    val overview = Queries.voucherOverview(listOf(1,5))
+                    assertEquals(4,overview.size)
+                    assertEquals(listOf(5L,5L,1L,1L),overview.map { it.voucherId })
+                    assertEquals(BigDecimal.ZERO.setScale(2),overview.sumOf { it.amount!! })
+                    assertEquals("SYNTHETIC-960",overview.single { it.postingSupplierInvoiceId!=null }.supplierInvoiceNumber)
+                    assertTrue(Queries.voucherOverview(emptyList()).isEmpty())
+                    val documents = Queries.voucherDocuments(listOf(1,5)).associateBy { it.voucherId }
+                    assertEquals(961,documents.getValue(1).voucherAttachmentId)
+                    assertEquals(960,documents.getValue(5).supplierInvoiceId)
+                    assertEquals(960,documents.getValue(5).supplierInvoiceAttachmentId)
+                    assertNull(documents.getValue(1).supplierInvoiceId)
+                    assertTrue(Queries.voucherDocuments(emptyList()).isEmpty())
+                    assertTrue(Queries.creditNoteAppliedInvoices(emptyList()).isEmpty())
+                    assertTrue(Queries.creditNoteAppliedInvoices(listOf(960)).isEmpty())
+                }
+                Session.borrow(connection,2) {
+                    assertEquals(963,Queries.voucherDocuments(listOf(1)).single().voucherAttachmentId)
+                    assertTrue(Queries.voucherDocuments(listOf(5)).all { it.supplierInvoiceId==null })
+                    assertTrue(Queries.vatBasis(start,end).none { it.vatCode=="87" })
+                }
+            } finally { connection.rollback() }
+        }
+    }
+
+    @Test fun `credit note references retain invoice order and tenant ownership`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit=false
+            try {
+                connection.createStatement().use { it.execute("""
+                    INSERT INTO invoices_ar(id,tenant_id,number,reference,issue_date,voucher_id) VALUES
+                        (970,1,'SYNTHETIC-A','REF-A','2026-01-02',10),
+                        (971,1,'SYNTHETIC-B','REF-B','2026-01-01',11),
+                        (972,1,'SYNTHETIC-CREDIT','REF-CREDIT','2026-01-03',12);
+                    INSERT INTO invoice_ar_credit_note_allocations(tenant_id,invoice_id,credit_note_invoice_id,allocation_type,allocated_amount)
+                        VALUES(1,970,972,'MANUAL_PARTIAL_COVER',1),(1,971,972,'MANUAL_PARTIAL_COVER',1);
+                """) }
+                Session.borrow(connection,1) {
+                    val rows=Queries.creditNoteAppliedInvoices(listOf(972))
+                    assertEquals(listOf(971,970),rows.map { it.invoiceId })
+                    assertEquals(listOf("REF-B","REF-A"),rows.map { it.invoiceNumber })
+                    assertTrue(rows.all { it.creditNoteInvoiceId==972 })
+                    assertTrue(Queries.creditNoteAppliedInvoices(listOf(970)).isEmpty())
+                }
+                Session.borrow(connection,2) { assertTrue(Queries.creditNoteAppliedInvoices(listOf(972)).isEmpty()) }
+            } finally { connection.rollback() }
+        }
+    }
+
     @Test fun `same object IDs are isolated by tenant on read and update`() {
         vev.write(1) { assertEquals(1L,Queries.renameDepartment("Tenant One",1)) }
         assertEquals("Tenant One",vev.read(1) { Queries.department(1)!!.name })

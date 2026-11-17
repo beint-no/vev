@@ -13,9 +13,10 @@ Kotlin compiler to validate SQL and expose generated result types during compila
 Runtime strings alone cannot provide that contract.
 
 Git stores changes as deltas; file layout is primarily an editing and ownership choice,
-not a meaningful repository-size optimization. Vev generates per-query implementation
-files and a stable facade whether SQL is split or grouped. Related named statements may
-share one source file without sharing SQL text or weakening independent validation.
+not a meaningful repository-size optimization. Vev uses one query per source file, named after its generated method. This gives agents
+a small, complete unit for discovery, context loading, validation and review. Related
+queries belong in directories. Per-query generated implementations and a stable facade
+keep SQL-only edits local.
 
 Comment directives carry the API information PostgreSQL cannot infer: method name,
 cardinality, input nullability, global scope and mapping overrides. The `vev.` namespace

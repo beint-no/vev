@@ -38,7 +38,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.2.0"
+    id("no.beint.vev") version "2.3.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -55,13 +55,18 @@ The default migration directory is `src/main/resources/db/migration`.
 
 ## Queries
 
-Put queries in `src/main/sql`. A file may hold one query or several related named
-queries, each terminated with a semicolon:
+Put queries in `src/main/sql`. Use one named query per file, named after its generated method:
+
+`customer.sql`:
 
 ```sql
 -- vev.name: customer :optional
 SELECT id, name FROM customer WHERE tenant_id = :tenantId AND id = :id;
+```
 
+`customers.sql`:
+
+```sql
 -- vev.name: customers :many
 SELECT id, name FROM customer
 WHERE tenant_id = :tenantId AND id > :after
@@ -110,10 +115,10 @@ explicitly. Result names in snake_case become Kotlin camelCase properties.
 Nullability is conservative for expressions, joins, CTEs and aggregates; `notnull`
 is a checked assertion rather than an inference. Unsupported types fail generation.
 
-Use separate files for independent queries and grouped files for a cohesive set.
-Grouping does not share SQL fragments or change the generated API. Each query has
-its own directives, SQL, parameters and generated implementation. For shared database
-semantics, use ordinary views/functions in migrations and test their consumers.
+Keep one query per file so agents can discover, read and change its complete contract
+without loading neighboring queries. Multiple statements or named queries in a file
+fail the build. Organize related files in directories. Reuse database views/functions
+when shared semantics have an owner and execution tests; SQL text includes are absent.
 
 ## Transactions
 

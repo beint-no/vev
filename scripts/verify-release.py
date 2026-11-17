@@ -36,7 +36,7 @@ application {{ mainClass.set("sample.ConsumerKt") }}
     queries = consumer / "src/main/sql"
     queries.mkdir(parents=True)
     (queries / "create.sql").write_text("-- name: create :exec\nINSERT INTO customer(id,tenant_id,name) VALUES(:id,:tenantId,:name);")
-    (queries / "create.sql").write_text((queries / "create.sql").read_text() + "\n" + "-- name: find :optional\nSELECT id,name FROM customer WHERE tenant_id=:tenantId AND id=:id;")
+    (queries / "find.sql").write_text("-- name: find :optional\nSELECT id,name FROM customer WHERE tenant_id=:tenantId AND id=:id;")
     kotlin = consumer / "src/main/kotlin/sample"
     kotlin.mkdir(parents=True)
     (kotlin / "Consumer.kt").write_text("""
