@@ -2,8 +2,8 @@ plugins { `java-library`; application }
 dependencies {
     api(project(":cluster"))
     implementation("org.postgresql:postgresql:42.7.14")
-    implementation("org.flywaydb:flyway-core:13.8.1")
-    implementation("org.flywaydb:flyway-database-postgresql:13.8.1")
+    implementation("org.flywaydb:flyway-core:13.11.1")
+    implementation("org.flywaydb:flyway-database-postgresql:13.11.1")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

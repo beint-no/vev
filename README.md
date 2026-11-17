@@ -1,4 +1,4 @@
-# Vev 2.0.0
+# Vev 2.1.0
 
 Kotlin-first, tenant-scoped SQL for JDK 27 and PostgreSQL 18.
 
@@ -40,7 +40,7 @@ zip for offline use.
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.0.0"
+    id("no.beint.vev") version "2.1.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -184,7 +184,8 @@ remove PostgreSQL's runtime query preparation/planning.
 
 ```sh
 CI=true ./gradlew clean check releaseBundle :benchmarks:jmhClasses
-./gradlew :benchmarks:buildPerformance :benchmarks:jmh
+./gradlew :benchmarks:buildPerformance
+./gradlew :benchmarks:jmh
 python3 scripts/check-performance.py
 ```
 
@@ -194,15 +195,16 @@ views, functions, triggers, indexes and constraints. Provenance is pinned in
 fixtures are independently synthetic: three tenants with overlapping identifiers,
 900 vouchers and 1,800 postings.
 
-Thousands of database-backed checks exercise column contracts and SQL rejections.
+6,900 checks exercise database column contracts, SQL rejection and execution behavior.
 Execution covers generated scalar/array readers, Unicode, NULLs, empty arrays,
 joins, CTEs, windows, lateral joins, composite foreign keys, deferred triggers,
 tenant cascades, RLS, failures and virtual threads. Independent Kotlin/Java consumers
 and Gradle TestKit verify the actual API. CI executes tests against its installed
 PostgreSQL rather than restoring cached test results. CI checks Linux/macOS correctness and
-paired JDBC benchmarks with allocations and separate build-phase timings.
+paired JDBC benchmarks, Hibernate native DTO projections, single-row regressions,
+allocations and separate build-phase timings.
 
-Performance gates detect gross regressions, not production SLAs. No benchmark
-establishes a Hibernate speedup or predicts application throughput/startup gains.
+Performance gates detect gross regressions, not production SLAs. The Hibernate comparison measures a warm native DTO projection; it does not
+predict application throughput or startup gains.
 See [current analysis](docs/analysis.md), [performance](docs/performance.md), and
 [release procedure](docs/releases.md).

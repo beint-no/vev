@@ -127,6 +127,35 @@ class QueryTest {
         assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
     }
 
+    @Test fun `single row returning violations roll back every affected row even when caught`() {
+        for (optional in listOf(false, true)) {
+            assertThrows(IllegalStateException::class.java) {
+                vev.write(7) { session ->
+                    val insert = "INSERT INTO customer(tenant_id,name) SELECT 7,'Synthetic '||n FROM generate_series(1,3) n RETURNING id"
+                    try {
+                        if (optional) session.optional(insert, {}, { it.getInt(1) })
+                        else session.one(insert, {}, { it.getInt(1) })
+                    } catch (_: IllegalStateException) { }
+                }
+            }
+            assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
+        }
+    }
+
+    @Test fun `competing optimistic writes have one winner across independent transactions`() {
+        vev.write(7) { Queries.createCustomer("Synthetic") }
+        sql("INSERT INTO invoice(tenant_id,customer_id,amount) VALUES(7,1,10.00)")
+        val barrier = java.util.concurrent.CyclicBarrier(2)
+        java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor().use { executor ->
+            val updates = (1..2).map { number -> executor.submit<Boolean> {
+                barrier.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                vev.write(7) { Queries.updateInvoice(BigDecimal(number), null, InvoiceId(1), 0) != null }
+            } }
+            assertEquals(1, updates.count { it.get(20, java.util.concurrent.TimeUnit.SECONDS) })
+        }
+        assertEquals(1, vev.read(7) { session -> session.one("SELECT version FROM invoice WHERE tenant_id=7 AND id=1", {}, { it.getInt(1) }) })
+    }
+
     @Test fun `borrowed transaction leaves ownership with caller`() {
         postgres.connect().use { c ->
             c.autoCommit = false

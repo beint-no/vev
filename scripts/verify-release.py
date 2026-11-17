@@ -7,7 +7,7 @@ import tempfile
 import zipfile
 
 root = Path(__file__).resolve().parents[1]
-bundle = root / "build/distributions/vev-sql-2.0.0-maven.zip"
+bundle = root / "build/distributions/vev-sql-2.1.0-maven.zip"
 with tempfile.TemporaryDirectory(prefix="vev-release-consumer-") as temporary:
     consumer = Path(temporary)
     repository = consumer / "repository"
@@ -22,10 +22,10 @@ pluginManagement {{ repositories {{ maven {{ url = uri({repository_url}) }}; gra
 rootProject.name = "release-consumer"
 """)
     (consumer / "build.gradle.kts").write_text(f"""
-plugins {{ kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") version "2.0.0"; application }}
+plugins {{ kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") version "2.1.0"; application }}
 repositories {{ maven {{ url=uri({repository_url}) }}; mavenCentral() }}
 kotlin {{ jvmToolchain(27); compilerOptions {{ jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }} }}
-dependencies {{ implementation("org.postgresql:postgresql:42.7.14"); implementation("no.beint.vev:compiler:2.0.0") }}
+dependencies {{ implementation("org.postgresql:postgresql:42.7.14"); implementation("no.beint.vev:compiler:2.1.0") }}
 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {{ packageName.set("sample") }}
 application {{ mainClass.set("sample.ConsumerKt") }}
 """)

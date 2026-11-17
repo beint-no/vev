@@ -102,18 +102,34 @@ public final class Session {
 
     /** Exactly one row. Zero or multiple rows fail the transaction. */
     public <R> R one(String sql, Bind bind, Row<R> row) throws SQLException {
-        List<R> rows = list(sql, 1, bind, row);
-        if (rows.isEmpty()) {
-            failed = true;
-            throw new IllegalStateException("Vev query expected one row, received none");
-        }
-        return rows.getFirst();
+        return single(sql, bind, row, true);
     }
 
     /** Zero or one row. Multiple rows fail the transaction. */
     public <R> R optional(String sql, Bind bind, Row<R> row) throws SQLException {
-        List<R> rows = list(sql, 1, bind, row);
-        return rows.isEmpty() ? null : rows.getFirst();
+        return single(sql, bind, row, false);
+    }
+
+    private <R> R single(String sql, Bind bind, Row<R> row, boolean required) throws SQLException {
+        check();
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             Bindings bindings = new Bindings(connection, statement)) {
+            // Two rows detect a cardinality violation without a one-row cursor's extra fetch.
+            statement.setFetchSize(2);
+            bind.apply(bindings);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    if (required) throw new IllegalStateException("Vev query expected one row, received none");
+                    return null;
+                }
+                R value = java.util.Objects.requireNonNull(row.read(result), "Vev row mapper returned null");
+                if (result.next()) throw new IllegalStateException("Vev query expected at most one row, received multiple");
+                return value;
+            }
+        } catch (SQLException | RuntimeException | Error failure) {
+            failed = true;
+            throw failure;
+        }
     }
 
     /**

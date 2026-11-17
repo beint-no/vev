@@ -1,5 +1,6 @@
 package no.beint.vev.reai
 
+import no.beint.vev.Session
 import no.beint.vev.Vev
 import no.beint.vev.compiler.Postgres
 import no.beint.vev.reai.fixture.Queries
@@ -43,6 +44,73 @@ class ReaiExecutionTest {
             assertEquals(600,Queries.runningBalance().size)
             assertEquals(20,Queries.departmentTotals().size)
             assertTrue(Queries.departmentTotals().all { it.total.compareTo(BigDecimal.ZERO)==0 })
+        }
+    }
+
+    @Test fun `counterparty trial reports preserve unassigned revenue inclusive dates and signed totals`() {
+        val start = LocalDate.of(2026, 1, 1)
+        val end = LocalDate.of(2026, 1, 31)
+        for (tenant in 1..3) vev.read(tenant) {
+            val totals = Queries.reportTotals(start, end, listOf("3000"), false)
+            assertEquals(1, totals.size)
+            assertNull(totals.single().partyId)
+            assertEquals("", totals.single().name)
+            assertEquals(BigDecimal("-45150.00"), totals.single().amount)
+            val postings = Queries.reportPostings(start, end, listOf("3000"), false, -1)
+            assertEquals(300, postings.size)
+            assertEquals(totals.single().amount, postings.sumOf { it.amount })
+            val day = LocalDate.of(2026, 1, 2)
+            val daily = Queries.reportPostings(day, day, listOf("3000"), false, -1)
+            assertTrue(daily.isNotEmpty())
+            assertTrue(daily.all { it.postingDate == day })
+            assertTrue(Queries.reportTotals(start, end, emptyList(), false).isEmpty())
+            assertTrue(Queries.reportTotals(start, end, listOf("3000"), true).isEmpty())
+            assertTrue(Queries.reportSupplierCosts(start, end, listOf("3000"), true, null).isEmpty())
+            assertTrue(Queries.reportSupplierCosts(start, end, listOf("3000"), true, 1).isEmpty())
+            assertTrue(Queries.reportPostings(start, end, listOf("3000"), false, 1).isEmpty())
+        }
+    }
+
+    @Test fun `supplier trial handles balanced rows invoice fallback credits filters and tenant overlap`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit = false
+            try {
+                connection.createStatement().use { it.execute("""
+                    INSERT INTO persons(id,tenant_id,name) VALUES
+                        (901,1,'Synthetic Supplier A'),(902,1,'Synthetic Supplier B'),(901,2,'Other tenant');
+                    INSERT INTO suppliers(id,tenant_id,person_id) VALUES (901,1,901),(902,1,902),(901,2,901);
+                    UPDATE postings SET row_number=1 WHERE tenant_id=1 AND voucher_id IN (1,2,7);
+                    UPDATE postings SET account_number='2400',supplier_id=901 WHERE tenant_id=1 AND account_number='1920' AND voucher_id IN (1,2,4,7);
+                    UPDATE postings SET posting_date=posting_date+1 WHERE tenant_id=1 AND account_number='2400' AND voucher_id=2;
+                    UPDATE vouchers SET voucher_type='SUPPLIER_INVOICE' WHERE tenant_id=1 AND id IN (4,8);
+                    UPDATE postings SET account_number='2400',supplier_id=902 WHERE tenant_id=1 AND account_number='1920' AND voucher_id IN (5,8);
+                    UPDATE postings SET amount=-amount,currency_amount=-currency_amount WHERE tenant_id=1 AND voucher_id=7;
+                    UPDATE postings SET account_number='4000' WHERE account_number='3000';
+                """) }
+                val start = LocalDate.of(2026, 1, 1)
+                val end = LocalDate.of(2026, 1, 31)
+                Session.borrow(connection, 1) {
+                    val totals = Queries.reportTotals(start, end, listOf("4000"), true).associateBy { it.partyId }
+                    assertEquals(setOf(901, 902), totals.keys)
+                    assertEquals(BigDecimal("-2.00"), totals.getValue(901).amount)
+                    assertEquals("Synthetic Supplier A", totals.getValue(901).name)
+                    assertEquals(BigDecimal("8.00"), totals.getValue(902).amount)
+                    val rows = Queries.reportPostings(start, end, listOf("4000"), true, 901)
+                    assertEquals(setOf(1L, 4L, 7L), rows.map { it.voucherId }.toSet())
+                    assertEquals(BigDecimal("-2.00"), rows.sumOf { it.amount })
+                    val costs = Queries.reportSupplierCosts(start, end, listOf("4000"), true, null)
+                    assertEquals(2, costs.size)
+                    assertEquals(setOf("4000"), costs.map { it.accountNumber }.toSet())
+                    val filtered = Queries.reportSupplierCosts(start, end, listOf("4000"), true, 901)
+                    assertEquals(1, filtered.size)
+                    assertEquals(BigDecimal("-2.00"), filtered.single().amount)
+                    assertTrue(Queries.reportSupplierCosts(start, end, emptyList(), true, 901).isEmpty())
+                }
+                Session.borrow(connection, 2) {
+                    assertTrue(Queries.reportTotals(start, end, listOf("4000"), true).isEmpty())
+                    assertTrue(Queries.reportPostings(start, end, listOf("4000"), true, 901).isEmpty())
+                }
+            } finally { connection.rollback() }
         }
     }
 

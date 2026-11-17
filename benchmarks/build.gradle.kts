@@ -4,6 +4,7 @@ dependencies {
     jmh(project(":compiler"))
     jmh(project(":verification"))
     jmh("org.postgresql:postgresql:42.7.14")
+    jmh("org.hibernate.orm:hibernate-core:7.4.14.Final")
 }
 sourceSets.named("jmh") { resources.srcDir(project(":verification").file("src/main")) }
 jmh {
@@ -46,4 +47,8 @@ if (providers.gradleProperty("benchmarkQuick").isPresent) {
 tasks.named("jmh") {
     outputs.upToDateWhen { false }
     outputs.cacheIf("Performance observations cannot be reused from a build cache") { false }
+}
+
+providers.gradleProperty("benchmarkInclude").orNull?.let { pattern ->
+    jmh { includes.set(listOf(pattern)) }
 }
