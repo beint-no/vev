@@ -10,9 +10,32 @@ ORM, query DSL, persistence context, reflective mapper, JPA, or Spring adapter.
 ## Use
 
 Install PostgreSQL 18 (`postgres`, `initdb`, `pg_ctl`) and run Gradle on JDK 27.
-The GitHub release bundle is a standalone Maven repository: extract it and add its
-directory to both `pluginManagement.repositories` and dependency repositories.
-Use Maven Central only once the matching artifacts have actually been published there.
+Use the public Maven repository in `settings.gradle.kts`:
+
+```kotlin
+pluginManagement {
+    repositories {
+        maven("https://beint-no.github.io/vev/maven") {
+            content { includeGroup("no.beint.vev") }
+        }
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+dependencyResolutionManagement {
+    repositories {
+        maven("https://beint-no.github.io/vev/maven") {
+            content { includeGroup("no.beint.vev") }
+        }
+        mavenCentral()
+    }
+}
+```
+
+The group filter keeps unrelated dependency lookups off this repository. It is
+served from the existing Vev repository's publication branch and needs no consumer
+credentials. The GitHub release also includes a signed standalone Maven repository
+zip for offline use.
 
 ```kotlin
 plugins {

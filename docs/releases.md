@@ -21,3 +21,21 @@ Supported: JDK 27, Kotlin 2.5.0-Beta2, PostgreSQL 18 and matching pgjdbc.
 The bundle is a standalone Maven repository. GitHub assets and Maven Central are
 separate distribution channels. Never claim Central publication from a local bundle.
 Keep all signing/publishing secrets outside Git and CI artifacts.
+
+## Public Maven repository
+
+`https://beint-no.github.io/vev/maven` serves the signed release artifacts from the
+`codex/maven-repository` branch in this same GitHub repository. GitHub Pages publishes
+that branch directly; there is no additional repository or custom publishing service.
+The published 2.0.0 artifacts were verified by checksum and by an independent
+Kotlin/Java consumer using this URL.
+
+Keep published version files immutable. When publishing another version, append its
+validated Maven tree under `maven/` on the publication branch and preserve existing
+version directories. The GitHub release bundle and its checksum remain the offline
+distribution.
+
+On 2026-11-17 Sonatype rejected Central deployment because Beint had reached its
+monthly release-size quota; the reported reset date was 2026-12-01. The public
+GitHub-hosted repository is the available distribution for 2.0.0. Central publication
+was not successful and must not be claimed until independently verified.
