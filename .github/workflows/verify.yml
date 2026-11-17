@@ -79,7 +79,7 @@ jobs:
           echo '/usr/lib/postgresql/18/bin' >> "$GITHUB_PATH"
       - name: Measure schema bootstrap, SQL generation, and Kotlin compilation
         run: ./gradlew :benchmarks:buildPerformance --console=plain
-      - name: Paired JDBC comparisons with allocation profiling
+      - name: JDBC, Hibernate native DTO, and single-row comparisons with allocation profiling
         env:
           EVENT: ${{ github.event_name }}
         run: |

@@ -9,7 +9,7 @@ public final class VevPlugin implements Plugin<Project> {
     @Override public void apply(Project project) {
         var compiler = project.getConfigurations().create("vevCompiler");
         compiler.setCanBeConsumed(false);
-        project.getDependencies().add(compiler.getName(), "no.beint.vev:compiler:2.0.0");
+        project.getDependencies().add(compiler.getName(), "no.beint.vev:compiler:2.1.0");
         var cluster = project.getGradle().getSharedServices().registerIfAbsent("vevCluster", VevCluster.class,
                 service -> {});
         var task = project.getTasks().register("generateVev", GenerateSql.class, generate -> {
@@ -28,7 +28,7 @@ public final class VevPlugin implements Plugin<Project> {
         project.getPluginManager().withPlugin("org.jetbrains.kotlin.jvm", ignored -> {
             var kotlin = project.getExtensions().getByType(KotlinJvmProjectExtension.class);
             kotlin.getSourceSets().getByName("main").getKotlin().srcDir(task.flatMap(GenerateSql::getOutput));
-            project.getDependencies().add("implementation", "no.beint.vev:runtime:2.0.0");
+            project.getDependencies().add("implementation", "no.beint.vev:runtime:2.1.0");
         });
     }
 }

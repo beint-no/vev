@@ -147,7 +147,7 @@ class CompilerTest {
     @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
         String result = compile("-- name: lock :void\n-- scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
         assertTrue(result.contains("fun `lock`(`key`: String): Unit ="), result);
-        assertTrue(result.contains("Session.current().call("), result);
+        assertTrue(result.contains("_vevSession.call("), result);
         assertFalse(result.contains("LockRow"), result);
     }
 

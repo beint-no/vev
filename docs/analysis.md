@@ -1,6 +1,6 @@
 # Current architecture analysis
 
-Vev 2.0.0 targets a PostgreSQL-only, tenant-based application designed without an ORM.
+Vev 2.1.0 targets a PostgreSQL-only, tenant-based application designed without an ORM.
 It generates Kotlin contracts and JDBC implementations. Entity tracking, JPA/Spring
 compatibility, cascade engines and runtime query DSLs are outside the design.
 
@@ -76,3 +76,50 @@ Default transaction isolation inherits the pool configuration. pgjdbc unconditio
 sends `SET SESSION CHARACTERISTICS` when `setTransactionIsolation` is called, so Vev
 does not issue that call for the default. Explicit isolation overrides retain their
 required database statement. PostgreSQL itself defaults to READ COMMITTED.
+
+## Adopting 2.1 in ReAI
+
+Begin with native report projections. The limited trial replaces three counterparty
+queries, leaving service contracts and UI unchanged. Each query remains ordinary
+SQL with explicit tenant joins, typed arrays, generated immutable result rows and
+asserted non-null business outputs. PostgreSQL checks all three against ReAI's
+actual Flyway migrations at build time, without connecting to a developer's database.
+
+During coexistence, ReAI's repository flushes pending JPA changes and uses Spring JDBC to borrow the
+existing transaction connection inside the Spring transaction. Vev owns no second
+transaction or connection in this path. This bridge belongs to the application;
+there is no Hibernate compatibility module in Vev. Removing the bridge becomes
+possible when its owning service uses JDBC transactions throughout.
+
+| Concern | Vev | ReAI's JPA/Hibernate approach |
+|---|---|---|
+| Native PostgreSQL validation | Server Parse/Describe during build | Native query errors generally appear on execution |
+| Application types | Generated Kotlin parameters, rows, nullable properties, value classes | Entities/DTOs can be typed; native interface projection contracts are separately maintained |
+| HQL/JPQL checking | Not applicable | Hibernate Processor offers compile-time checking; Spring also validates many queries at startup |
+| Tenant handling | Required scoped integer bind; explicit SQL predicates | Entity tenant discriminator/filter support; native SQL still needs its own predicates |
+| Nullability | Conservative inference plus checked `notnull` assertions | Kotlin entity annotations and projection declarations do not prove SQL-expression nullability |
+| Query work | Generated JDBC mapping; no entity tracking or query translation | Native DTO queries can already be efficient; managed entities add persistence-context work |
+| Transactions | Explicit lexical scope or borrowed JDBC transaction | Mature Spring/JPA propagation, entity flushing and persistence context |
+| Writes | Explicit SQL, row counts, RETURNING, version predicates and database constraints | Dirty checking, cascades and entity lifecycle handled by ORM |
+| Kotlin usability | Named arguments and immutable data classes; SQL is edited directly | Convenient entity navigation and repository CRUD; native SQL mappings add separate declarations |
+| Build cost | Fresh migration/description on change, generated Kotlin compilation; no-op generation skipped | Entity/application compilation; processor checking costs extra if enabled |
+| Startup | No entity/repository/query-model initialization in Vev | Entity metadata and repository initialization remain while Hibernate is present |
+| Runtime size | Tiny dependency-free Java core; driver/pool and existing Kotlin runtime still needed | Hibernate core plus JPA, bytecode and other dependencies; exact core comparison in performance notes |
+| Maintenance | We own the compiler, type mappings, tests and release compatibility | Broad ecosystem, many mature integrations and maintainers |
+
+Recommend gradual adoption for read-heavy reports, then explicit bounded writes.
+Do not mechanically translate the entity graph. Each migrated write needs a decision
+about flushing, optimistic locking, cascade behavior, auditing and transaction scope.
+The database must keep enforcing tenant relationships and accounting invariants.
+Keep Hibernate where its entity lifecycle still earns its cost, and remove it only
+when a module's remaining behavior is deliberately replaced. A three-query pilot
+cannot establish a whole-application startup or throughput gain.
+
+Direct bytecode generation remains deferred. Kotlin compilation is a measured build
+cost, but matching Kotlin's metadata and ABI would add a second compiler backend.
+The source generator already yields JVM bytecode, Java interoperability and fast
+execution without giving up Kotlin's tooling.
+
+References: [Hibernate Processor](https://hibernate.org/orm/processor/),
+[Spring JPA transaction sharing](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/orm/jpa/JpaTransactionManager.html),
+[pgjdbc statement preparation](https://jdbc.postgresql.org/documentation/server-prepare/).
