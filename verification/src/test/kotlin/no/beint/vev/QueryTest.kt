@@ -74,6 +74,29 @@ class QueryTest {
         assertThrows(IllegalStateException::class.java) { Session.current() }
     }
 
+    @Test fun `borrowed tenant scope rejects missing tenants and preserves caller ownership`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit = false
+            for (tenantId in listOf(0, -1)) {
+                assertThrows(IllegalArgumentException::class.java) {
+                    Session.borrowTenant(connection, tenantId) { fail<Unit>("executed") }
+                }
+            }
+            Session.borrowTenant(connection, 7) { Queries.createCustomer("caller owns rollback") }
+            assertFalse(connection.isClosed)
+            connection.rollback()
+            assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
+        }
+    }
+
+    @Test fun `materialized rows stay ordered and immutable without exposing the backing list`() {
+        vev.write(7) { repeat(3) { Queries.createCustomer("Customer $it") } }
+        val rows = vev.read(7) { Queries.customers(null) }
+        assertEquals(listOf("Customer 0", "Customer 1", "Customer 2"), rows.map { it.name })
+        assertTrue(rows is java.util.RandomAccess)
+        assertThrows(UnsupportedOperationException::class.java) { (rows as MutableList).removeAt(0) }
+    }
+
     @Test fun `explicit global queries can run inside tenant and global transactions`() {
         assertTrue(vev.readGlobal { Queries.hasKey("{\"yes\":1}", "yes").present }!!)
         assertEquals(":not_a_parameter; \$dollars", vev.read(7) { Queries.quoted().textValue })

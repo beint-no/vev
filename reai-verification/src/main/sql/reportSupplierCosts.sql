@@ -55,7 +55,7 @@ WITH selected AS (
     LEFT JOIN suppliers s ON :suppliers AND s.id = p.resolved_party_id AND s.tenant_id = p.tenant_id
     LEFT JOIN customers cu ON NOT :suppliers AND cu.id = p.resolved_party_id AND cu.tenant_id = p.tenant_id
     LEFT JOIN companies co ON co.id = COALESCE(s.company_id, cu.company_id) AND co.tenant_id = p.tenant_id
-    LEFT JOIN company_details cd ON cd.id = co.id
+    LEFT JOIN company_details cd ON cd.id = co.id AND cd.tenant_id = p.tenant_id
     LEFT JOIN persons pe ON pe.id = COALESCE(s.person_id, cu.person_id) AND pe.tenant_id = p.tenant_id
     WHERE NOT :suppliers OR s.id IS NOT NULL
 )
