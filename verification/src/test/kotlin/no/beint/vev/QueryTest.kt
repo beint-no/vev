@@ -192,8 +192,18 @@ class QueryTest {
     }
 
     @Test fun `void queries hold advisory locks until transaction completion`() {
-        vev.write(7) { Queries.lockTenant("registration") }
-        vev.write(7) { Queries.lockTenant("registration") }
+        fun locks(): Int = postgres.connect().use { connection ->
+            connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype='advisory'").use { result ->
+                    result.next(); result.getInt(1)
+                }
+            }
+        }
+        vev.write(7) {
+            Queries.lockTenant("registration")
+            assertEquals(1,locks(),"the void function must execute and retain its transaction lock")
+        }
+        assertEquals(0,locks(),"commit must release the transaction lock")
     }
     @Test fun `RLS global scopes clear inherited session settings on a reused physical connection`() {
         postgres.connect().use { actual ->
