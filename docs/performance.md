@@ -53,3 +53,8 @@ The expanded matrix smoke run is retained as `docs/measurements/2026-11-17-matri
 It uses the quick configuration. Both bulk paths supply typed `Integer[]` to pgjdbc;
 using `Object[]` in the JDBC baseline would select a different encoder and give a
 misleading allocation comparison. The core table above uses the longer three-fork run.
+
+CI correctness tasks always execute against that runner's PostgreSQL installation;
+cached test results are not accepted as new verification. JMH tasks also always
+execute rather than reuse an up-to-date or cached result file. Compilation caches
+remain enabled.

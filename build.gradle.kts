@@ -23,6 +23,10 @@ subprojects {
         tasks.withType<Test>().configureEach {
             useJUnitPlatform()
             testLogging { events("failed", "skipped") }
+            if (providers.environmentVariable("CI").map(String::toBoolean).getOrElse(false)) {
+                outputs.cacheIf("Verify against the server and extensions actually installed on this runner") { false }
+                outputs.upToDateWhen { false }
+            }
         }
         tasks.withType<Jar>().configureEach {
             isPreserveFileTimestamps = false

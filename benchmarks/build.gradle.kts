@@ -41,3 +41,9 @@ if (providers.gradleProperty("benchmarkQuick").isPresent) {
         warmup.set("500ms")
     }
 }
+
+// Measurements must execute; a restored result file is not a new performance observation.
+tasks.named("jmh") {
+    outputs.upToDateWhen { false }
+    outputs.cacheIf("Performance observations cannot be reused from a build cache") { false }
+}

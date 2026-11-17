@@ -158,7 +158,7 @@ must match. Build checks do not attest production schema or permissions and do n
 remove PostgreSQL's runtime query preparation/planning.
 
 ```sh
-./gradlew clean check releaseBundle :benchmarks:jmhClasses
+CI=true ./gradlew clean check releaseBundle :benchmarks:jmhClasses
 ./gradlew :benchmarks:buildPerformance :benchmarks:jmh
 python3 scripts/check-performance.py
 ```
@@ -173,7 +173,8 @@ Thousands of database-backed checks exercise column contracts and SQL rejections
 Execution covers generated scalar/array readers, Unicode, NULLs, empty arrays,
 joins, CTEs, windows, lateral joins, composite foreign keys, deferred triggers,
 tenant cascades, RLS, failures and virtual threads. Independent Kotlin/Java consumers
-and Gradle TestKit verify the actual API. CI checks Linux/macOS correctness and
+and Gradle TestKit verify the actual API. CI executes tests against its installed
+PostgreSQL rather than restoring cached test results. CI checks Linux/macOS correctness and
 paired JDBC benchmarks with allocations and separate build-phase timings.
 
 Performance gates detect gross regressions, not production SLAs. No benchmark

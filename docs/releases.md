@@ -4,7 +4,7 @@ Publish matching `no.beint.vev:cluster`, `runtime`, `compiler`, `gradle-plugin` 
 Gradle marker `no.beint.vev` artifacts. Regenerate sources with matching versions.
 Supported: JDK 27, Kotlin 2.5.0-Beta2, PostgreSQL 18 and matching pgjdbc.
 
-1. Run `./gradlew clean check releaseBundle :benchmarks:jmhClasses`.
+1. Run `CI=true ./gradlew clean check releaseBundle :benchmarks:jmhClasses`.
 2. Run `./gradlew :benchmarks:buildPerformance :benchmarks:jmh`, retain raw JSON and
    environment information, and run `python3 scripts/check-performance.py`.
 3. Run `python3 scripts/verify-release.py` for independent Kotlin/Java consumers from
