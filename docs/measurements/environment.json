@@ -1,5 +1,5 @@
 {
-  "version": "2.3.0",
+  "version": "2.4.0",
   "os": "macOS-27.2.1-arm64-arm-64bit",
   "jdk": "27.0.1.0.3+1-2",
   "postgres": "18.6",

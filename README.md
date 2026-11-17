@@ -38,7 +38,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.3.0"
+    id("no.beint.vev") version "2.4.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -110,10 +110,11 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 | `-- vev.rows: 500` | Materialization ceiling, 1–1,000,000; exceeding it fails |
 
 Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`,
-and use PostgreSQL arrays for lists: `id = ANY(:ids::int[])`. List result columns
-explicitly. Result names in snake_case become Kotlin camelCase properties.
+and use PostgreSQL arrays for lists: `id = ANY(:ids::int[])`. List returned columns
+explicitly; internal CTEs and subqueries may use wildcards. Result names in snake_case become Kotlin camelCase properties.
 Nullability is conservative for expressions, joins, CTEs and aggregates; `notnull`
-is a checked assertion rather than an inference. Unsupported types fail generation.
+is a checked assertion rather than an inference. Unsupported types and result rows
+exceeding Kotlin’s JVM parameter limit fail generation with a query-local diagnostic.
 
 Keep one query per file so agents can discover, read and change its complete contract
 without loading neighboring queries. Multiple statements or named queries in a file

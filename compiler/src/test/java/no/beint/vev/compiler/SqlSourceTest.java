@@ -36,6 +36,24 @@ class SqlSourceTest {
         "SELECT * FROM t", "SELECT ALL * FROM t", "SELECT DISTINCT ON (id) * FROM t",
         "SELECT t.* FROM t", "SELECT (t).* FROM t", "DELETE FROM t RETURNING *"
     }) void rejectsUnstableWildcardResults(String sql) { assertThrows(IllegalArgumentException.class, () -> parse(sql)); }
+    @ParameterizedTest @ValueSource(strings = {
+        "WITH selected AS (SELECT t.* FROM t) SELECT id FROM selected",
+        "SELECT q.id FROM (SELECT t.* FROM t) q",
+        "SELECT EXISTS (SELECT * FROM t) AS present",
+        "INSERT INTO t SELECT * FROM u RETURNING id",
+        "WITH selected AS (SELECT * FROM t) UPDATE u SET id=1 RETURNING id"
+    }) void internalWildcardsDoNotDefineTheReturnedContract(String sql) {
+        assertNotNull(parse(sql));
+    }
+    @ParameterizedTest @ValueSource(strings = {
+        "WITH selected AS (SELECT * FROM t) SELECT * FROM selected",
+        "SELECT id FROM t UNION SELECT * FROM u",
+        "WITH selected AS (SELECT * FROM t) DELETE FROM u RETURNING u.*",
+        "INSERT INTO t SELECT id FROM u RETURNING t.*"
+    }) void outerWildcardsRemainRejected(String sql) {
+        assertThrows(IllegalArgumentException.class, () -> parse(sql));
+    }
+
     @Test void directiveErrorsAreExplicit() {
         assertThrows(IllegalArgumentException.class, () -> parse("-- nullable: absent\nSELECT :id"));
         assertThrows(IllegalArgumentException.class, () -> parse("-- rows: 0\nSELECT 1"));

@@ -36,6 +36,26 @@ class CompilerTest {
         }
     }
 
+    private static String wideProjection(int columns, boolean requiredLong) {
+        String labels=java.util.stream.IntStream.rangeClosed(1,columns).mapToObj(i -> "c"+i).collect(java.util.stream.Collectors.joining(","));
+        String sql=java.util.stream.IntStream.rangeClosed(1,columns).mapToObj(i -> "1::bigint AS c"+i).collect(java.util.stream.Collectors.joining(","));
+        return "-- vev.name: wide :one\n-- vev.scope: global\n"+(requiredLong?"-- vev.notnull: "+labels+"\n":"")+"SELECT "+sql;
+    }
+    @Test void wideRowsFailWithAnActionableJvmLimitInsteadOfInvalidGeneratedBytecode() throws Exception {
+        assertTrue(compile(wideProjection(245,false)).contains("data class"));
+        assertTrue(compile(wideProjection(124,true)).contains("data class"));
+        for (String sql : java.util.List.of(wideProjection(246,false),wideProjection(125,true))) {
+            var failure=assertThrows(IllegalArgumentException.class, () -> compile(sql));
+            assertTrue(failure.getMessage().contains("JVM parameter slots"));
+            assertTrue(failure.getMessage().contains("narrower projection"));
+        }
+    }
+    @Test void nestedWildcardQueryRetainsOnlyItsExplicitResultColumns() throws Exception {
+        String result=compile("-- vev.name: nested :many\n-- vev.scope: global\nWITH x AS (SELECT * FROM item) SELECT id FROM x");
+        assertTrue(result.contains("val `id`: Int?"));
+        assertFalse(result.contains("val `name`:"));
+    }
+
     @Test void databaseDiagnosticsCarryStableSqlStateAndTheQueryLocation() {
         var error = assertThrows(java.sql.SQLException.class,
                 () -> compile("-- vev.name: broken :many\n-- vev.scope: global\nSELECT missing FROM item"));

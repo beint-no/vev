@@ -32,7 +32,10 @@ semantics have a clear owner, migration lifecycle and execution tests.
 ## Generated Kotlin
 
 Kotlin source generation preserves data classes, named arguments, nullable types, value
-classes and compiler-maintained metadata. Static JVM methods also support Java callers.
+classes and compiler-maintained metadata. The compiler checks the JVM parameter-slot
+limit before emitting a row: nullable/reference columns use one slot, required Long/Double
+columns use two, and Kotlin’s generated copy method also needs masks and receiver slots.
+Use narrow report projections rather than flattening an entire entity graph into one row. Static JVM methods also support Java callers.
 A direct-bytecode backend could remove generated-source compilation, but would have to
 maintain that Kotlin ABI itself. Build measurements guide that decision; equivalent
 bytecode would not inherently make JDBC execution faster.
