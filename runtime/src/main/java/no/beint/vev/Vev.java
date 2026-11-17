@@ -4,16 +4,24 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import javax.sql.DataSource;
 
-/** Explicit standalone transactions. Use Session.borrow for framework-owned transactions. */
+/** Explicit JDBC transactions; the connection pool owns the default isolation configuration. */
 public final class Vev {
+    public static final int DEFAULT_ISOLATION = -1;
     private final DataSource source;
     private final int isolation;
+    private final boolean rowLevelSecurity;
 
-    public Vev(DataSource source) { this(source, Connection.TRANSACTION_READ_COMMITTED); }
+    public Vev(DataSource source) { this(source, DEFAULT_ISOLATION); }
 
     public Vev(DataSource source, int isolation) {
+        this(source, isolation, false);
+    }
+
+    public Vev(DataSource source, int isolation, boolean rowLevelSecurity) {
+        this.rowLevelSecurity = rowLevelSecurity;
         this.source = java.util.Objects.requireNonNull(source);
-        if (isolation != Connection.TRANSACTION_READ_COMMITTED
+        if (isolation != DEFAULT_ISOLATION
+                && isolation != Connection.TRANSACTION_READ_COMMITTED
                 && isolation != Connection.TRANSACTION_REPEATABLE_READ
                 && isolation != Connection.TRANSACTION_SERIALIZABLE) {
             throw new IllegalArgumentException("Unsupported PostgreSQL transaction isolation");
@@ -21,12 +29,18 @@ public final class Vev {
         this.isolation = isolation;
     }
 
-    public <R> R read(Session.Work<R> work) throws SQLException { return transaction(true, work); }
-    public <R> R write(Session.Work<R> work) throws SQLException { return transaction(false, work); }
-    public <R> R read(int tenantId, TenantSession.Work<R> work) throws SQLException { return read(session -> TenantSession.within(session, tenantId, work)); }
-    public <R> R write(int tenantId, TenantSession.Work<R> work) throws SQLException { return write(session -> TenantSession.within(session, tenantId, work)); }
+    public <R> R read(int tenantId, Session.Work<R> work) throws SQLException { return tenant(true, tenantId, work); }
+    public <R> R write(int tenantId, Session.Work<R> work) throws SQLException { return tenant(false, tenantId, work); }
+    public <R> R readGlobal(Session.Work<R> work) throws SQLException { return transaction(true, 0, work); }
+    public <R> R writeGlobal(Session.Work<R> work) throws SQLException { return transaction(false, 0, work); }
 
-    private <R> R transaction(boolean readOnly, Session.Work<R> work) throws SQLException {
+    private <R> R tenant(boolean readOnly, int tenantId, Session.Work<R> work) throws SQLException {
+        if (tenantId <= 0) throw new IllegalArgumentException("Tenant identifier must be positive");
+        return transaction(readOnly, tenantId, work);
+    }
+
+    private <R> R transaction(boolean readOnly, int tenantId, Session.Work<R> work) throws SQLException {
+        if (Session.bound()) throw new IllegalStateException("Nested Vev transactions are not supported");
         Connection connection = source.getConnection();
         Throwable failure = null;
         boolean committed = false;
@@ -34,10 +48,16 @@ public final class Vev {
         try {
             if (!connection.getAutoCommit()) throw new IllegalStateException("Vev requires a fresh connection");
             owned = true;
-            connection.setTransactionIsolation(isolation);
+            if (isolation != DEFAULT_ISOLATION) connection.setTransactionIsolation(isolation);
             connection.setReadOnly(readOnly);
             connection.setAutoCommit(false);
-            R result = Session.borrow(connection, work);
+            if (rowLevelSecurity) {
+                try (var statement = connection.prepareStatement("SELECT set_config('vev.tenant_id', ?, true)")) {
+                    statement.setString(1, tenantId > 0 ? Integer.toString(tenantId) : "");
+                    statement.execute();
+                }
+            }
+            R result = Session.borrow(connection, tenantId, work);
             connection.commit();
             committed = true;
             return result;

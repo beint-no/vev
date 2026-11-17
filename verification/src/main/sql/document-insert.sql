@@ -1,5 +1,4 @@
 -- name: createDocument :one
--- tenant: tenantId
 -- enum: status no.beint.vev.fixture.DocumentStatus
 -- enum: review no.beint.vev.fixture.ReviewState
 -- nullable: review, body, address

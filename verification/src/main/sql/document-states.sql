@@ -1,5 +1,4 @@
 -- name: documentStates :many
--- tenant: tenantId
 -- enum: status no.beint.vev.fixture.DocumentStatus
 -- notnull: status, total
 WITH counted AS (

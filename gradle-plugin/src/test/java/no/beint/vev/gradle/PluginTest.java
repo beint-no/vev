@@ -15,27 +15,48 @@ class PluginTest {
         Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
         String repository = System.getProperty("vev.repository").replace("\\", "/");
         Files.writeString(project.resolve("build.gradle.kts"), """
-                plugins { kotlin("jvm") version "2.4.21"; id("no.beint.vev") }
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
                 repositories { maven { url = uri("%s") }; mavenCentral() }
-                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26) } }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
                 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") { packageName.set("sample") }
                 """.formatted(repository));
-        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\nkotlin.jvm.target.validation.mode=warning\n");
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
         Path sql = Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql");
         Path migration = Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql");
-        Files.writeString(sql, "-- name: find :optional\nSELECT id,name FROM item WHERE id=:id;");
+        Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id;");
         Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
         Path consumer = Files.createDirectories(project.resolve("src/main/kotlin")).resolve("Consumer.kt");
-        Files.writeString(consumer, "package sample\nfun name(session: no.beint.vev.Session): String? = Queries.find(session, 1)?.name\n");
+        Files.writeString(consumer, "package sample\nfun name(): String? = Queries.find(1)?.name\n");
         var first = runner().build();
         assertTrue(first.getOutput().contains("BUILD SUCCESSFUL"));
         var second = runner().build();
         assertTrue(second.getOutput().contains("Reusing configuration cache"));
         assertTrue(second.getOutput().contains(":generateVev UP-TO-DATE"));
+        Path facade = project.resolve("build/generated/vev/Queries.kt");
+        var facadeTime = Files.getLastModifiedTime(facade);
+        Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
+        assertTrue(runner().build().getOutput().contains("BUILD SUCCESSFUL"));
+        assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite public Kotlin signatures");
+        assertTrue(Files.readString(project.resolve("build/generated/vev/Queries_find_Sql.kt")).contains("changed"));
+        Files.writeString(migration.resolveSibling("V2__index.sql"), "CREATE INDEX ON item(id);");
+        var schemaOnly = runner().build();
+        assertTrue(schemaOnly.getOutput().contains(":compileKotlin UP-TO-DATE"), schemaOnly.getOutput());
+        assertFalse(schemaOnly.getOutput().contains(":generateVev UP-TO-DATE"), schemaOnly.getOutput());
         Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, renamed text NOT NULL);");
         var failure = runner().buildAndFail();
         assertTrue(failure.getOutput().contains("find.sql"));
         assertTrue(failure.getOutput().contains("PostgreSQL rejected query"));
+        Path bin = Files.createDirectory(project.resolve("custom-postgres"));
+        Path version = bin.resolve("postgres"), init = bin.resolve("initdb");
+        Files.writeString(version, "#!/bin/sh\nprintf 'postgres (PostgreSQL) 18.99\\n'\n");
+        Files.writeString(init, "#!/bin/sh\nprintf 'vev-custom-initdb-sentinel\\n'\nexit 42\n");
+        assertTrue(version.toFile().setExecutable(true));
+        assertTrue(init.toFile().setExecutable(true));
+        Files.writeString(project.resolve("build.gradle.kts"),
+                "\ntasks.named<no.beint.vev.gradle.GenerateSql>(\"generateVev\") { postgresBin.set(\""
+                        + bin.toString().replace("\\", "/") + "\") }\n", java.nio.file.StandardOpenOption.APPEND);
+        assertTrue(runner().buildAndFail().getOutput().contains("vev-custom-initdb-sentinel"),
+                "The shared cluster must use the task's configured binaries, not PATH");
     }
 
     /** A repository with many modules must pay for one cluster and one migration replay, not one per module. */
@@ -44,14 +65,14 @@ class PluginTest {
         Files.writeString(project.resolve("settings.gradle.kts"),
                 "rootProject.name = \"consumer\"\ninclude(\"first\", \"second\")\n");
         Files.writeString(project.resolve("build.gradle.kts"), """
-                plugins { kotlin("jvm") version "2.4.21" apply false; id("no.beint.vev") apply false }
+                plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
                 subprojects {
                     apply(plugin = "org.jetbrains.kotlin.jvm")
                     apply(plugin = "no.beint.vev")
                     repositories { maven { url = uri("%s") }; mavenCentral() }
                     extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> {
                         jvmToolchain(27)
-                        compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26) }
+                        compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }
                     }
                     tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
                         packageName.set("sample." + project.name)
@@ -60,12 +81,12 @@ class PluginTest {
                 }
                 """.formatted(repository));
         Files.writeString(project.resolve("gradle.properties"),
-                "org.gradle.configuration-cache=true\nkotlin.jvm.target.validation.mode=warning\n");
+                "org.gradle.configuration-cache=true\n");
         Files.writeString(Files.createDirectories(project.resolve("migration")).resolve("V1__item.sql"),
                 "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
         for (String module : List.of("first", "second")) {
             Files.writeString(Files.createDirectories(project.resolve(module + "/src/main/sql")).resolve("find.sql"),
-                    "-- name: find :optional\nSELECT id,name FROM item WHERE id=:id;");
+                    "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id;");
         }
         var build = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath()
                 .withArguments("compileKotlin", "--console=plain", "--stacktrace").build();

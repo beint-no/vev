@@ -9,12 +9,39 @@ import java.util.List;
 
 /** A thread-confined, lexical execution scope. Generated queries own their JDBC resources. */
 public final class Session {
+    private static final ScopedValue<Session> CURRENT = ScopedValue.newInstance();
     private final Connection connection;
+    private final int tenantId;
     private final Thread owner = Thread.currentThread();
     private boolean active = true;
     private boolean failed;
 
-    Session(Connection connection) { this.connection = connection; }
+    Session(Connection connection, int tenantId) { this.connection = connection; this.tenantId = tenantId; }
+
+    /** Resolve only inside the owning transaction and thread; never propagate JDBC sessions to coroutines. */
+    public static Session current() {
+        if (!CURRENT.isBound()) throw new IllegalStateException("No active Vev transaction");
+        Session session = CURRENT.get();
+        session.check();
+        return session;
+    }
+
+    public static Session tenant() {
+        Session session = current();
+        if (session.tenantId <= 0) {
+            session.failed = true;
+            throw new IllegalStateException("A tenant query requires a tenant transaction");
+        }
+        return session;
+    }
+
+    public int tenantId() {
+        check();
+        if (tenantId <= 0) throw new IllegalStateException("A global transaction has no tenant");
+        return tenantId;
+    }
+
+    static boolean bound() { return CURRENT.isBound(); }
 
     @FunctionalInterface public interface Bind { void apply(Bindings bindings) throws SQLException; }
     @FunctionalInterface public interface Row<R> { R read(ResultSet result) throws SQLException; }
@@ -22,11 +49,17 @@ public final class Session {
 
     /** Participate in an existing transaction without committing, rolling back, or closing its connection. */
     public static <R> R borrow(Connection connection, Work<R> work) throws SQLException {
+        return borrow(connection, 0, work);
+    }
+
+    public static <R> R borrow(Connection connection, int tenantId, Work<R> work) throws SQLException {
+        if (tenantId < 0) throw new IllegalArgumentException("Tenant identifier cannot be negative");
+        if (bound()) throw new IllegalStateException("Nested Vev transactions are not supported");
         if (connection.getAutoCommit()) throw new IllegalStateException("Vev requires an explicit transaction");
         requirePostgres(connection);
-        Session session = new Session(connection);
+        Session session = new Session(connection, tenantId);
         try {
-            R result = work.run(session);
+            R result = ScopedValue.where(CURRENT, session).call(() -> work.run(session));
             session.check();
             return result;
         } finally { session.active = false; }

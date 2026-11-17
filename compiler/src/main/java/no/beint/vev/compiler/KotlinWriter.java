@@ -22,15 +22,20 @@ final class KotlinWriter {
             var source = query.source();
             String row = id(rowName(source.name()));
             String result = switch (source.cardinality()) { case "many" -> "List<" + row + ">"; case "optional" -> row + "?"; case "one" -> row; case "void" -> "Unit"; default -> "Long"; };
-            out.append("    fun ").append(id(source.name())).append(source.tenant() == null ? "(session: no.beint.vev.Session" : "(session: no.beint.vev.TenantSession");
-            for (var parameter : query.parameters()) if (!parameter.name().equals(source.tenant())) out.append(", ").append(id(parameter.name())).append(": ").append(parameter.kotlin());
-            out.append("): ").append(result).append(source.tenant() == null ? " =\n        session." : " =\n        session.session().").append(switch (source.cardinality()) { case "many" -> "list"; case "exec" -> "execute"; case "void" -> "call"; default -> source.cardinality(); }).append("(\n            ").append(quote(source.sql())).append(",\n");
+            out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
+            boolean comma = false;
+            for (var parameter : query.parameters()) if (!parameter.name().equals(source.tenant())) {
+                if (comma) out.append(", ");
+                out.append(id(parameter.name())).append(": ").append(parameter.kotlin());
+                comma = true;
+            }
+            out.append("): ").append(result).append(source.tenant() == null ? " =\n        no.beint.vev.Session.current()." : " =\n        no.beint.vev.Session.tenant().").append(switch (source.cardinality()) { case "many" -> "list"; case "exec" -> "execute"; case "void" -> "call"; default -> source.cardinality(); }).append("(\n            ").append(quote(source.sql())).append(",\n");
             if (source.cardinality().equals("many")) out.append("            ").append(source.maxRows()).append(",\n");
             out.append(source.parameters().isEmpty() ? "            { _ ->\n" : "            { _vevBindings ->\n");
             for (int i = 0; i < source.parameters().size(); i++) {
                 String name = source.parameters().get(i);
                 var parameter = query.parameters().stream().filter(p -> p.name().equals(name)).findFirst().orElseThrow();
-                String value = name.equals(source.tenant()) ? "session.tenantId()" : id(name);
+                String value = name.equals(source.tenant()) ? "no.beint.vev.Session.tenant().tenantId()" : id(name);
                 if (parameter.domain() != null) value += parameter.nullable() ? "?.value" : ".value";
                 if (parameter.enumType() != null) value += parameter.nullable() ? "?.name" : ".name";
                 if (parameter.type().element() != null) {
@@ -55,6 +60,28 @@ final class KotlinWriter {
             out.append("\n        )\n\n");
         }
         return out.append("}\n").toString();
+    }
+
+    /** Stable public signatures keep SQL-only edits out of the facade's Kotlin compilation unit. */
+    static String facade(String packageName, String className, List<QueryCompiler.Query> queries, Map<String, PgType> domains) {
+        StringBuilder out = new StringBuilder(write(packageName, className, List.of(), domains));
+        out.setLength(out.length() - 2);
+        for (var query : queries) {
+            var source = query.source();
+            String row = id(rowName(source.name()));
+            String result = switch (source.cardinality()) { case "many" -> "List<" + row + ">"; case "optional" -> row + "?"; case "one" -> row; case "void" -> "Unit"; default -> "Long"; };
+            var parameters = query.parameters().stream().filter(p -> !p.name().equals(source.tenant())).toList();
+            out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
+            out.append(parameters.stream().map(p -> id(p.name()) + ": " + p.kotlin()).collect(java.util.stream.Collectors.joining(", ")));
+            out.append("): ").append(result).append(" = ").append(id(implementationName(className, query))).append(".").append(id(source.name())).append("(");
+            out.append(parameters.stream().map(p -> id(p.name())).collect(java.util.stream.Collectors.joining(", ")));
+            out.append(")\n\n");
+        }
+        return out.append("}\n").toString();
+    }
+
+    static String implementationName(String className, QueryCompiler.Query query) {
+        return className + "_" + query.source().name() + "_Sql";
     }
 
     private static String read(PgType type, int index) {

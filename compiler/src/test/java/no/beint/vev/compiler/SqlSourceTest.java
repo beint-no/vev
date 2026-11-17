@@ -8,7 +8,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SqlSourceTest {
-    private SqlSource parse(String sql) { return SqlSource.parse(Path.of("test.sql"), "-- name: find :many\n" + sql); }
+    private SqlSource parse(String sql) { return SqlSource.parse(Path.of("test.sql"), "-- name: find :many\n-- scope: global\n" + sql); }
 
     @Test void preservesQuotedTokensAndCasts() {
         var source = parse("SELECT ':hidden', $$:hidden;$$, $tag$:hidden$tag$, \"column:quoted\", :id::int, :id -- :hidden\n /* :hidden /* nested */ */");

@@ -15,12 +15,13 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
                         Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
-    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|tenant):.*";
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|scope):.*";
 
     public static SqlSource parse(Path path, String source) {
         String name = null;
         String cardinality = null;
-        String tenant = null;
+        String tenant = "tenantId";
+        boolean scopeDeclared = false;
         int maxRows = 1000;
         Set<String> nullable = new LinkedHashSet<>();
         Set<String> notNull = new LinkedHashSet<>();
@@ -54,9 +55,10 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                 if (parts.length != 2) throw error(path, "Use -- type: parameterOrColumn DomainType");
                 String previous = domains.put(identifier(path, parts[0]), typeName(path, parts[1]));
                 if (previous != null) throw error(path, "Duplicate type declaration: " + parts[0]);
-            } else if (text.startsWith("tenant:")) {
-                if (tenant != null) throw error(path, "Duplicate tenant directive");
-                tenant = identifier(path, text.substring(7).strip());
+            } else if (text.startsWith("scope:")) {
+                if (scopeDeclared || !text.substring(6).strip().equals("global")) throw error(path, "Use -- scope: global once to opt out of tenant binding");
+                scopeDeclared = true;
+                tenant = null;
             } else {
                 try { maxRows = Integer.parseInt(text.substring(5).strip()); }
                 catch (NumberFormatException failure) { throw error(path, "rows must be an integer"); }
@@ -154,11 +156,8 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             }
         }
         if (!new LinkedHashSet<>(parameters).containsAll(nullable)) throw error(path, "nullable names an unknown parameter");
-        for (String required : notNull) {
-            if (parameters.contains(required)) throw error(path, "notnull applies to result columns, not parameter " + required);
-        }
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
-        if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "tenant must name a required, unwrapped integer parameter");
+        if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- scope: global for global SQL");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
         return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),

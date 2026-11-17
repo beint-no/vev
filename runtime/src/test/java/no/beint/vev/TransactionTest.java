@@ -41,7 +41,7 @@ class TransactionTest {
     }
     @Test void successCommitsAndClosesOnce() throws Exception {
         Fixture f = new Fixture();
-        assertEquals(42, new Vev(f.source).<Integer>write(s -> 42).intValue());
+        assertEquals(42, new Vev(f.source).<Integer>writeGlobal(s -> 42).intValue());
         assertEquals(1, f.calls.stream().filter("commit"::equals).count());
         assertEquals(1, f.calls.stream().filter("close"::equals).count());
         assertFalse(f.calls.contains("rollback"));
@@ -49,31 +49,31 @@ class TransactionTest {
     @Test void callbackFailureRollsBackAndPreservesOriginal() {
         Fixture f = new Fixture(); f.failRollback = true; f.failClose = true;
         var original = new IllegalArgumentException("original");
-        var error = assertThrows(IllegalArgumentException.class, () -> new Vev(f.source).write(s -> { throw original; }));
+        var error = assertThrows(IllegalArgumentException.class, () -> new Vev(f.source).writeGlobal(s -> { throw original; }));
         assertSame(original, error);
         assertEquals(2, error.getSuppressed().length);
         assertFalse(f.calls.contains("commit"));
     }
     @Test void uncertainCommitIsNotRetried() {
         Fixture f = new Fixture(); f.failCommit = true;
-        assertThrows(SQLException.class, () -> new Vev(f.source).write(s -> 1));
+        assertThrows(SQLException.class, () -> new Vev(f.source).writeGlobal(s -> 1));
         assertEquals(1, f.calls.stream().filter("commit"::equals).count());
         assertTrue(f.calls.contains("rollback"));
         assertTrue(f.calls.contains("close"));
     }
     @Test void closeFailureCannotTurnACommitIntoAReportedFailedWrite() throws Exception {
         Fixture f = new Fixture(); f.failClose = true;
-        assertEquals(42, new Vev(f.source).<Integer>write(s -> 42).intValue());
+        assertEquals(42, new Vev(f.source).<Integer>writeGlobal(s -> 42).intValue());
         assertFalse(f.calls.contains("rollback"));
     }
     @Test void unsupportedPostgresIsRejectedBeforeWork() {
         Fixture f = new Fixture(); f.major = 17;
-        assertThrows(IllegalArgumentException.class, () -> new Vev(f.source).read(s -> fail("work executed")));
+        assertThrows(IllegalArgumentException.class, () -> new Vev(f.source).readGlobal(s -> fail("work executed")));
         assertFalse(f.calls.contains("commit"));
     }
     @Test void doesNotRollbackAnUnownedTransaction() {
         Fixture f = new Fixture(); f.autoCommit = false;
-        assertThrows(IllegalStateException.class, () -> new Vev(f.source).read(s -> 1));
+        assertThrows(IllegalStateException.class, () -> new Vev(f.source).readGlobal(s -> 1));
         assertFalse(f.calls.contains("rollback"));
     }
     @Test void borrowedScopeDoesNotCommitCloseOrRollback() throws Exception {
@@ -87,5 +87,13 @@ class TransactionTest {
         Fixture f = new Fixture();
         assertThrows(IllegalArgumentException.class, () -> new Vev(f.source, Connection.TRANSACTION_NONE));
         assertDoesNotThrow(() -> new Vev(f.source, Connection.TRANSACTION_SERIALIZABLE));
+    }
+    @Test void defaultIsolationDoesNotIssueRedundantDatabaseCommands() throws Exception {
+        Fixture f = new Fixture();
+        new Vev(f.source).read(7, s -> 1);
+        assertFalse(f.calls.contains("setTransactionIsolation"));
+        Fixture explicit = new Fixture();
+        new Vev(explicit.source, Connection.TRANSACTION_SERIALIZABLE).read(7, s -> 1);
+        assertEquals(1, explicit.calls.stream().filter("setTransactionIsolation"::equals).count());
     }
 }

@@ -1,15 +1,20 @@
 # Contributing
 
-Use the latest JDK and PostgreSQL 18. Run `./gradlew clean check releaseBundle` before
-submitting a change. Add compiler rejection or independent consumer compilation
-tests for type-system changes, and PostgreSQL integration tests for execution
-semantics. Preserve original failures and explicit connection ownership.
+Use JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 18. Before release run
+`CI=true ./gradlew clean check releaseBundle :benchmarks:jmhClasses` and the performance suite.
+Keep tests committed. Compiler changes need PostgreSQL rejection cases and independent
+consumer checks; runtime changes need database execution and failure tests.
 
-SQL semantics belong to PostgreSQL. When nullability cannot be proved, expose a
-nullable result. Never silently fall back to an unchecked mapping or add an unsafe
-non-null override. Extend the actual application query corpus before expanding
-the public API. Keep new runtime dependencies justified and measured.
+Keep SQL semantics in PostgreSQL. Do not add an ORM compatibility layer, another
+SQL type system or runtime query DSL. Tenant scope is the default; global SQL opts
+out explicitly. Scoped values do not replace predicates, authorization or RLS.
 
-Performance changes need equivalent outcomes, statement counts, result checks,
-warmup, fresh forks, and raw JMH output. Report allocation and latency separately.
-Passing tests does not establish a general performance advantage.
+Never import production rows or credentials. The authorized ReAI DDL has pinned
+provenance. Generate synthetic data independently. Review fixture updates for private
+literals, external effects and credentials, update catalog-size expectations, and
+run the full execution suite.
+
+Performance claims require equivalent results/SQL/statement counts, warmup,
+independent forks, allocation profiling, raw output, toolchains and limitations.
+Measure SQL analysis separately from generated Kotlin compilation. Do not hide
+unsupported cases or weaken assertions to improve results.

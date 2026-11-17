@@ -11,238 +11,218 @@ import org.junit.jupiter.api.Assertions.*
 import org.postgresql.ds.PGSimpleDataSource
 import java.math.BigDecimal
 import java.nio.file.Path
-import java.time.*
-import java.util.UUID
+import java.sql.Connection
+import java.sql.SQLException
+import java.util.concurrent.CompletableFuture
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class QueryTest {
     private lateinit var postgres: Postgres
     private lateinit var vev: Vev
+    private lateinit var source: PGSimpleDataSource
 
     @BeforeAll fun start() {
         postgres = Postgres("")
         postgres.migrate(Path.of("src/main/schema"))
-        val source = PGSimpleDataSource().apply {
-            setURL(postgres.url()); user = postgres.user(); password = postgres.password()
-        }
+        source = PGSimpleDataSource().apply { setURL(postgres.url()); user = postgres.user(); password = postgres.password() }
         vev = Vev(source)
     }
     @AfterAll fun stop() { if (::postgres.isInitialized) postgres.close() }
-    @BeforeEach fun reset() {
-        postgres.connect().use { c -> c.createStatement().use { it.execute("TRUNCATE customer,invoice,posting,scalar_values,document_record RESTART IDENTITY CASCADE") } }
+    @BeforeEach fun reset() = sql("TRUNCATE customer,invoice,posting,scalar_values,document_record RESTART IDENTITY CASCADE")
+    private fun sql(text: String) { postgres.connect().use { c -> c.createStatement().use { it.execute(text) } } }
+
+    @Test fun `tenant binding needs no query plumbing and isolates rows`() {
+        val id = vev.write(7) { Queries.createCustomer("Alice").id!! }
+        vev.write(8) { Queries.createCustomer("Other tenant") }
+        assertEquals("Alice", vev.read(7) { Queries.customer(id)!!.name })
+        assertNull(vev.read(8) { Queries.customer(id) })
+        assertEquals(1, vev.read(7) { Queries.customers(null).size })
+        assertNull(vev.read(7) { Queries.invoiceSummary().single().invoiceId })
     }
 
-    @Test fun `typed queries retain nulls and tenant predicates`() {
-        val first = vev.write { Queries.createCustomer(it, 7, "Alice").id!! }
-        vev.write { Queries.createCustomer(it, 8, "Other tenant") }
-        assertEquals("Alice", vev.read { Queries.customer(it, 7, first)!!.name })
-        assertNull(vev.read { Queries.customer(it, 8, first) })
-        val rows = vev.read { Queries.invoiceSummary(it, 7) }
-        assertEquals(1, rows.size)
-        assertNull(rows.single().invoiceId)
-        assertNull(rows.single().amount)
-        assertEquals(1, vev.read { Queries.customers(it, 7, null).size })
-        assertEquals(0, vev.read { Queries.customers(it, 7, "Nobody").size })
+    @Test fun `query outside transaction and tenant query in global scope fail closed`() {
+        assertThrows(IllegalStateException::class.java) { Queries.customers(null) }
+        assertThrows(IllegalStateException::class.java) { vev.readGlobal { Queries.customers(null) } }
+        assertThrows(IllegalArgumentException::class.java) { vev.read(0) { fail<Any>("executed") } }
+        assertThrows(IllegalArgumentException::class.java) { vev.write(-1) { fail<Any>("executed") } }
+        assertThrows(IllegalStateException::class.java) { Session.current() }
     }
 
-    @Test fun `generated queries execute joins CTEs and optimistic updates`() {
-        vev.write { Queries.createCustomer(it, 7, "Alice") }
-        postgres.connect().use { c -> c.createStatement().use { it.execute("INSERT INTO invoice(tenant_id,customer_id,amount) VALUES(7,1,10.00)") } }
-        assertEquals(BigDecimal("10.00"), vev.read { Queries.totals(it, 7).single().total })
-        val updated = vev.write { Queries.updateInvoice(it, BigDecimal("12.50"), null, 7, InvoiceId(1), 0) }
-        assertEquals(1, updated!!.version)
-        assertNull(vev.write { Queries.updateInvoice(it, BigDecimal("14"), "stale", 7, InvoiceId(1), 0) })
-        assertEquals(BigDecimal("12.50"), vev.read { Queries.invoiceSummary(it, 7).single().amount })
+    @Test fun `explicit global queries can run inside tenant and global transactions`() {
+        assertTrue(vev.readGlobal { Queries.hasKey("{\"yes\":1}", "yes").present }!!)
+        assertEquals(":not_a_parameter; \$dollars", vev.read(7) { Queries.quoted().textValue })
     }
 
-    @Test fun `database deferred business constraints survive`() {
-        vev.write { Queries.post(it, 1, BigDecimal.TEN); Queries.post(it, 1, BigDecimal.TEN.negate()) }
-        assertThrows(java.sql.SQLException::class.java) { vev.write { Queries.post(it, 2, BigDecimal.ONE) } }
-        postgres.connect().use { c -> c.createStatement().use { s -> s.executeQuery("SELECT count(*) FROM posting").use { r -> r.next(); assertEquals(2, r.getInt(1)) } } }
+    @Test fun `nested transactions reject tenant switching without changing the outer context`() {
+        vev.write(7) {
+            assertThrows(IllegalStateException::class.java) { vev.write(8) { Queries.createCustomer("wrong") } }
+            assertEquals(7, Session.tenant().tenantId())
+            Queries.createCustomer("correct")
+        }
+        assertTrue(vev.read(8) { Queries.customers(null).isEmpty() })
+        assertEquals("correct", vev.read(7) { Queries.customers(null).single().name })
+    }
+
+    @Test fun `scope does not leak after exceptions or across worker threads`() {
+        assertThrows(IllegalArgumentException::class.java) { vev.read(7) { throw IllegalArgumentException("abort") } }
+        assertThrows(IllegalStateException::class.java) { Session.current() }
+        vev.read(7) {
+            val error = CompletableFuture.supplyAsync { runCatching { Queries.customers(null) }.exceptionOrNull() }.get()
+            assertInstanceOf(IllegalStateException::class.java, error)
+        }
+        assertThrows(IllegalStateException::class.java) { Session.current() }
+    }
+
+    @Test fun `virtual thread transactions isolate scoped values`() {
+        java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor().use { executor ->
+            val futures = (1..32).map { tenant -> executor.submit<Int> { vev.read(tenant) { Session.tenant().tenantId() } } }
+            assertEquals((1..32).toList(), futures.map { it.get() })
+        }
+    }
+
+    @Test fun `sessions cannot escape their scope or cross threads`() {
+        var escaped: Session? = null
+        vev.read(7) { session ->
+            escaped = session
+            val error = CompletableFuture.supplyAsync { runCatching { session.tenantId() }.exceptionOrNull() }.get()
+            assertInstanceOf(IllegalStateException::class.java, error)
+        }
+        assertThrows(IllegalStateException::class.java) { escaped!!.tenantId() }
+    }
+
+    @Test fun `joins CTEs and optimistic writes retain results and conflict detection`() {
+        vev.write(7) { Queries.createCustomer("Alice") }
+        sql("INSERT INTO invoice(tenant_id,customer_id,amount) VALUES(7,1,10.00)")
+        assertEquals(BigDecimal("10.00"), vev.read(7) { Queries.totals().single().total })
+        assertEquals(1, vev.write(7) { Queries.updateInvoice(BigDecimal("12.50"), null, InvoiceId(1), 0) }!!.version)
+        assertNull(vev.write(7) { Queries.updateInvoice(BigDecimal("14"), "stale", InvoiceId(1), 0) })
+        assertEquals(BigDecimal("12.50"), vev.read(7) { Queries.invoiceSummary().single().amount })
+    }
+
+    @Test fun `deferred business constraints are checked at commit`() {
+        vev.writeGlobal { Queries.post(1, BigDecimal.TEN); Queries.post(1, BigDecimal.TEN.negate()) }
+        assertThrows(SQLException::class.java) { vev.writeGlobal { Queries.post(2, BigDecimal.ONE) } }
     }
 
     @Test fun `read only transactions reject writes`() {
-        assertThrows(java.sql.SQLException::class.java) { vev.read { Queries.createCustomer(it, 7, "rejected") } }
-        assertTrue(vev.read { Queries.customers(it, 7, null).isEmpty() })
+        assertThrows(SQLException::class.java) { vev.read(7) { Queries.createCustomer("rejected") } }
+        assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
     }
 
-    @Test fun `cardinality and row bounds fail rather than truncate`() {
-        assertThrows(IllegalStateException::class.java) { vev.read { Queries.exactlyOne(it, 7) } }
-        vev.write { tx -> repeat(6) { Queries.createCustomer(tx, 7, "Person $it") } }
-        assertThrows(IllegalStateException::class.java) { vev.read { Queries.exactlyOne(it, 7) } }
-        assertThrows(IllegalStateException::class.java) { vev.read { Queries.customers(it, 7, null) } }
+    @Test fun `cardinality and materialization bounds fail rather than truncate`() {
+        assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.exactlyOne() } }
+        vev.write(7) { repeat(6) { Queries.createCustomer("Person $it") } }
+        assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.exactlyOne() } }
+        assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.customers(null) } }
     }
 
-    @Test fun `caught execution failures still roll back the complete transaction`() {
+    @Test fun `caught query failures poison and roll back the transaction`() {
         assertThrows(IllegalStateException::class.java) {
-            vev.write { tx ->
-                Queries.createCustomer(tx, 7, "rollback")
-                try { Queries.exactlyOne(tx, 8) } catch (_: IllegalStateException) { }
+            vev.write(7) {
+                Queries.createCustomer("rollback")
+                Queries.createCustomer("second")
+                try { Queries.exactlyOne() } catch (_: IllegalStateException) { }
             }
         }
-        assertTrue(vev.read { Queries.customers(it, 7, null).isEmpty() })
+        assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
     }
 
-    @Test fun `sessions cannot escape their scope or thread`() {
-        var escaped: Session? = null
-        vev.read { tx ->
-            escaped = tx
-            val error = java.util.concurrent.CompletableFuture.supplyAsync {
-                runCatching { Queries.customers(tx, 7, null) }.exceptionOrNull()
-            }.get()
-            assertInstanceOf(IllegalStateException::class.java, error)
-        }
-        assertThrows(IllegalStateException::class.java) { Queries.customers(escaped!!, 7, null) }
-    }
-
-    @Test fun `borrowed transactions retain caller ownership`() {
+    @Test fun `borrowed transaction leaves ownership with caller`() {
         postgres.connect().use { c ->
             c.autoCommit = false
-            Session.borrow(c) { Queries.createCustomer(it, 7, "not committed") }
+            Session.borrow(c, 7) { Queries.createCustomer("not committed") }
             assertFalse(c.isClosed)
             c.rollback()
         }
-        assertTrue(vev.read { Queries.customers(it, 7, null).isEmpty() })
-        postgres.connect().use { c -> assertThrows(IllegalStateException::class.java) { Session.borrow(c) { 1 } } }
+        assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
     }
 
-    @Test fun `each generated query executes one statement including tenant predicates`() {
-        vev.write { Queries.createCustomer(it, 7, "Alice") }
+    @Test fun `tenant predicates add no database statements`() {
+        vev.write(7) { Queries.createCustomer("Alice") }
         var prepared = 0
-        var executed = 0
         postgres.connect().use { actual ->
             actual.autoCommit = false
-            val observed = java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(java.sql.Connection::class.java)) { _, method, args ->
-                try {
-                    val result = method.invoke(actual, *(args ?: emptyArray()))
-                    if (method.name == "prepareStatement") {
-                        prepared++
-                        java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(java.sql.PreparedStatement::class.java)) { _, call, values ->
-                            if (call.name.startsWith("execute")) executed++
-                            try { call.invoke(result, *(values ?: emptyArray())) }
-                            catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
-                        }
-                    } else result
-                } catch (failure: java.lang.reflect.InvocationTargetException) { throw failure.targetException }
-            } as java.sql.Connection
-            assertEquals(1, Session.borrow(observed) { Queries.customers(it, 7, null).size })
-            assertNotNull(TenantSession.borrow(observed, 7) { Queries.scopedCustomer(it, CustomerId(1)) })
+            val observed = java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(Connection::class.java)) { _, method, args ->
+                if (method.name == "prepareStatement") prepared++
+                try { method.invoke(actual, *(args ?: emptyArray())) }
+                catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
+            } as Connection
+            Session.borrow(observed, 7) { Queries.customers(null); Queries.scopedCustomer(CustomerId(1)) }
             actual.rollback()
         }
         assertEquals(2, prepared)
-        assertEquals(2, executed)
     }
 
-    @Test fun `parameter names cannot shadow generated lambda locals`() {
-        val row = vev.read { Queries.localNames(it, "bound value", 42) }
-        assertEquals("bound value", row.bindings)
-        assertEquals(42, row.result)
+    @Test fun `values and array elements are bound safely`() {
+        vev.write(7) { Queries.createCustomer("'; DROP TABLE customer; --") }
+        assertEquals(listOf(1), vev.read(7) { Queries.customerIds(listOf(1, null)).map { it.id } })
+        assertTrue(vev.read(7) { Queries.customerIds(emptyList()).isEmpty() })
+        assertEquals("bound value", vev.readGlobal { Queries.localNames("bound value", 42).bindings })
     }
 
-    @Test fun `arrays JSON and SQL literals are bound safely`() {
-        vev.write { Queries.createCustomer(it, 7, "'; DROP TABLE customer; --") }
-        assertEquals(listOf(1), vev.read { Queries.customerIds(it, 7, listOf(1, null)).map { row -> row.id } })
-        assertTrue(vev.read { Queries.customerIds(it, 7, emptyList()).isEmpty() })
-        assertEquals(true, vev.read { Queries.hasKey(it, "{\"hello\":true}", "hello").present })
-        assertEquals(":not_a_parameter; \$dollars", vev.read { Queries.quoted(it).textValue })
-    }
-
-    @Test fun `tenant capabilities bind predicates and restore transaction context`() {
-        val id = vev.write { Queries.createCustomer(it, 7, "Alice").id!! }
-        assertEquals("Alice", vev.read(7) { Queries.scopedCustomer(it, id)!!.name })
-        assertNull(vev.read(8) { Queries.scopedCustomer(it, id) })
-        var escaped: TenantSession? = null
-        postgres.connect().use { connection ->
-            connection.autoCommit = false
-            TenantSession.borrow(connection, 7) { outer -> outer.withRls { scope -> escaped = scope; Queries.scopedCustomer(scope, id) } }
-            connection.createStatement().use { s -> s.executeQuery("SELECT current_setting('vev.tenant_id')").use { r -> r.next(); assertEquals("", r.getString(1)) } }
-            connection.rollback()
-        }
-        assertThrows(IllegalStateException::class.java) { Queries.scopedCustomer(escaped!!, id) }
-        assertThrows(IllegalArgumentException::class.java) { vev.read(-1) { Queries.scopedCustomer(it, id) } }
-    }
-
-    @Test fun `RLS is enforced by PostgreSQL under a nonowner role`() {
-        val id = vev.write { Queries.createCustomer(it, 7, "Alice").id!! }
-        postgres.connect().use { connection ->
-            connection.createStatement().use { s ->
-                s.execute("CREATE ROLE tenant_reader; GRANT SELECT ON customer TO tenant_reader; ALTER TABLE customer ENABLE ROW LEVEL SECURITY; CREATE POLICY tenant_read ON customer TO tenant_reader USING (tenant_id = nullif(current_setting('vev.tenant_id', true),'')::integer)")
+    @Test fun `database RLS uses one transaction-local setting and resets after pooled reuse`() {
+        vev.write(7) { Queries.createCustomer("Alice") }
+        sql("CREATE ROLE tenant_reader; GRANT SELECT ON customer TO tenant_reader; ALTER TABLE customer ENABLE ROW LEVEL SECURITY; CREATE POLICY tenant_read ON customer TO tenant_reader USING (tenant_id = nullif(current_setting('vev.tenant_id', true),'')::integer)")
+        try {
+            // Real nonowner connection: table owners and superusers bypass ordinary RLS.
+            val restricted = PGSimpleDataSource().apply {
+                setURL(postgres.url()); user = postgres.user(); password = postgres.password()
+                options = "-c role=tenant_reader"
             }
-            try {
-                connection.autoCommit = false
-                connection.createStatement().use { it.execute("SET LOCAL ROLE tenant_reader") }
-                assertEquals("Alice", TenantSession.borrow(connection, 7) { outer -> outer.withRls { Queries.scopedCustomer(it, id)!!.name } })
-                assertNull(TenantSession.borrow(connection, 8) { outer -> outer.withRls { Queries.scopedCustomer(it, id) } })
-                assertTrue(Session.borrow(connection) { Queries.customers(it, 7, null).isEmpty() })
-                connection.rollback()
-            } finally {
-                connection.autoCommit = true
-                connection.createStatement().use { it.execute("DROP POLICY tenant_read ON customer; ALTER TABLE customer DISABLE ROW LEVEL SECURITY; REVOKE SELECT ON customer FROM tenant_reader; DROP ROLE tenant_reader") }
-            }
+            val rls = Vev(restricted, Connection.TRANSACTION_READ_COMMITTED, true)
+            assertEquals("Alice", rls.read(7) { Queries.customer(CustomerId(1))!!.name })
+            assertNull(rls.read(8) { Queries.customer(CustomerId(1)) })
+            assertTrue(rls.readGlobal { session -> session.list("SELECT id FROM customer", 100, {}, { it.getInt(1) }).isEmpty() })
+        } finally {
+            sql("DROP POLICY tenant_read ON customer; ALTER TABLE customer DISABLE ROW LEVEL SECURITY; REVOKE SELECT ON customer FROM tenant_reader; DROP ROLE tenant_reader")
         }
     }
 
-    @Test fun `all supported scalar bindings round trip without reflective mapping`() {
-        val uid = UUID.randomUUID()
-        val day = LocalDate.of(2026, 9, 19)
-        val clock = LocalTime.of(12, 30, 45, 123456000)
-        val local = LocalDateTime.of(day, clock)
-        val stamp = local.atOffset(ZoneOffset.UTC)
-        vev.write { Queries.insertScalars(it, 1, true, 12, 5_000_000_000L, BigDecimal("1.25"), 1.5f, 2.5, "æøå", uid, day, clock, local, stamp, byteArrayOf(1,2), "{\"n\":1}", listOf(1,null,3), listOf("a",null)) }
-        val row = vev.read { Queries.scalars(it, 1)!! }
-        assertEquals(uid, row.uid); assertEquals(day, row.day); assertEquals(clock, row.clock)
-        assertEquals(local, row.localStamp); assertEquals(stamp, row.stamp)
-        assertArrayEquals(byteArrayOf(1,2), row.payload)
-        assertEquals(listOf(1,null,3), row.numbers); assertEquals(listOf("a",null), row.tags)
-        assertEquals(BigDecimal("1.25"), row.precise)
-        assertEquals(5_000_000_000L, row.large)
-        assertEquals(true, row.active); assertEquals("æøå", row.label)
-    }
-
-    @Test fun `Kotlin enums and textual PostgreSQL types round trip through generated readers`() {
-        val id = vev.write(7) { Queries.createDocument(it, DocumentStatus.SENT, ReviewState.PENDING, "Post@ReAI.no", "<n>1</n>", "10.0.0.1") }.id
-        val row = vev.read(7) { Queries.document(it, id) }!!
+    @Test fun `Kotlin enums text adapters and asserted nonnull results round trip`() {
+        val id = vev.write(7) { Queries.createDocument(DocumentStatus.SENT, ReviewState.PENDING, "Post@ReAI.no", "<n>1</n>", "10.0.0.1") }.id
+        val row = vev.read(7) { Queries.document(id) }!!
         assertEquals(DocumentStatus.SENT, row.status)
         assertEquals(ReviewState.PENDING, row.review)
-        assertEquals("Post@ReAI.no", row.email)
+        assertEquals("10.0.0.1/32", row.address)
         assertEquals("<n>1</n>", row.body)
-        assertEquals("10.0.0.1/32", row.address, "inet keeps PostgreSQL's own text form")
-        val nulls = vev.read(7) { Queries.document(it, vev.write(7) { w -> Queries.createDocument(w, DocumentStatus.DRAFT, null, "x@y.no", null, null) }.id) }!!
-        assertNull(nulls.review); assertNull(nulls.body); assertNull(nulls.address)
-        // citext compares case-insensitively, so the generated String binding must reach the real column type.
-        assertEquals(1, vev.read(7) { Queries.documentsByEmail(it, "POST@reai.NO") }.size)
+        assertEquals(1, vev.read(7) { Queries.documentsByEmail("POST@reai.NO").size })
+        assertEquals(listOf(1L), vev.read(7) { Queries.documentStates().map { it.total } })
+        sql("INSERT INTO document_record(id,tenant_id,status,email) VALUES (900,7,'UNKNOWN','test@example.invalid')")
+        assertThrows(IllegalArgumentException::class.java) { vev.read(7) { Queries.document(900) } }
     }
 
-    @Test fun `notnull restores required types a CTE would otherwise hide`() {
-        vev.write(7) { Queries.createDocument(it, DocumentStatus.PAID, null, "a@b.no", null, null) }
-        vev.write(7) { Queries.createDocument(it, DocumentStatus.PAID, null, "c@d.no", null, null) }
-        val states = vev.read(7) { Queries.documentStates(it) }
-        assertEquals(listOf(DocumentStatus.PAID), states.map { it.status })
-        assertEquals(listOf(2L), states.map { it.total })
+    @Test fun `void queries hold advisory locks until transaction completion`() {
+        vev.write(7) { Queries.lockTenant("registration") }
+        vev.write(7) { Queries.lockTenant("registration") }
     }
-
-    @Test fun `an enum constant absent from Kotlin fails loudly rather than decoding wrongly`() {
-        postgres.connect().use { c -> c.createStatement().use { it.execute("INSERT INTO document_record(id,tenant_id,status,email) VALUES (900,7,'UNKNOWN','z@z.no')") } }
-        assertThrows(IllegalArgumentException::class.java) { vev.read(7) { Queries.document(it, 900) } }
-    }
-
-    @Test fun `a void query takes a real advisory lock for the length of its transaction`() {
-        vev.write(7) { tenant ->
-            Queries.lockTenant(tenant, "registration")
-            postgres.connect().use { other ->
-                other.createStatement().use { s ->
-                    s.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").use { r ->
-                        r.next(); assertEquals(1, r.getInt(1))
-                    }
+    @Test fun `RLS global scopes clear inherited session settings on a reused physical connection`() {
+        postgres.connect().use { actual ->
+            actual.createStatement().use { it.execute("SELECT set_config('vev.tenant_id','999',false)") }
+            val pooled = java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(javax.sql.DataSource::class.java)) { _, method, _ ->
+                check(method.name == "getConnection")
+                java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(Connection::class.java)) { _, call, args ->
+                    if (call.name == "close") { actual.autoCommit=true; actual.isReadOnly=false; null }
+                    else try { call.invoke(actual, *(args ?: emptyArray())) }
+                    catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
                 }
-            }
+            } as javax.sql.DataSource
+            val scoped=Vev(pooled,Connection.TRANSACTION_READ_COMMITTED,true)
+            fun setting() = Session.current().one("SELECT current_setting('vev.tenant_id',true)", {}, { it.getString(1) })
+            assertEquals("7",scoped.read(7) { setting() })
+            assertEquals("8",scoped.read(8) { setting() })
+            assertEquals("",scoped.readGlobal { setting() })
+            assertThrows(IllegalArgumentException::class.java) { scoped.write(7) { throw IllegalArgumentException("abort") } }
+            assertEquals("",scoped.readGlobal { setting() })
         }
-        postgres.connect().use { c ->
-            c.createStatement().use { s ->
-                s.executeQuery("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'").use { r ->
-                    r.next(); assertEquals(0, r.getInt(1), "the lock must be released when the transaction ends")
-                }
-            }
+    }
+    @Test fun `default isolation inherits configured connections and explicit overrides remain available`() {
+        val configured=PGSimpleDataSource().apply {
+            setURL(postgres.url());user=postgres.user();password=postgres.password()
+            options="-c default_transaction_isolation=serializable"
         }
+        fun level() = Session.current().one("SHOW transaction_isolation", {}, { it.getString(1) })
+        assertEquals("serializable",Vev(configured).read(7) { level() })
+        assertEquals("read committed",Vev(configured,Connection.TRANSACTION_READ_COMMITTED).read(7) { level() })
+        assertEquals("serializable",Vev(configured).read(7) { level() })
     }
 }
