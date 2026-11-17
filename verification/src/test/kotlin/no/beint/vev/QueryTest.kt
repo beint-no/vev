@@ -31,6 +31,16 @@ class QueryTest {
     @BeforeEach fun reset() = sql("TRUNCATE customer,invoice,posting,scalar_values,document_record RESTART IDENTITY CASCADE")
     private fun sql(text: String) { postgres.connect().use { c -> c.createStatement().use { it.execute(text) } } }
 
+    @Test fun `wide write binder loads and executes`() {
+        val method=Queries::class.java.methods.single { it.name == "wideWrite" }
+        val args=Array<Any?>(252) { 1L }
+        assertNotNull(vev.write(7) { method.invoke(null,*args) })
+        val primitive=Queries::class.java.methods.single { it.name == "widePrimitiveWrite" }
+        assertNotNull(vev.write(7) { primitive.invoke(null,*Array<Any?>(126) { 1L }) })
+        val global=Queries::class.java.methods.single { it.name == "wideGlobalWrite" }
+        assertNotNull(vev.writeGlobal { global.invoke(null,*Array<Any?>(253) { 1L }) })
+    }
+
     @Test fun `internal wildcards preserve the explicit generated row and tenant predicate`() {
         vev.write(7) { Queries.createCustomer("Synthetic local") }
         vev.write(8) { Queries.createCustomer("Synthetic other") }

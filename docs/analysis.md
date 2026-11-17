@@ -35,7 +35,11 @@ Kotlin source generation preserves data classes, named arguments, nullable types
 classes and compiler-maintained metadata. The compiler checks the JVM parameter-slot
 limit before emitting a row: nullable/reference columns use one slot, required Long/Double
 columns use two, and Kotlin’s generated copy method also needs masks and receiver slots.
-Use narrow report projections rather than flattening an entire entity graph into one row. Static JVM methods also support Java callers.
+The generated binding lambda also captures query arguments and the tenant value. The
+compiler budgets the method-handle receiver and binding argument so oversized inputs fail
+before Kotlin emits classes that cannot load. Arrays keep list filters within one bind.
+Use narrow report projections rather than flattening an entire entity graph into one row.
+Static JVM methods also support Java callers.
 A direct-bytecode backend could remove generated-source compilation, but would have to
 maintain that Kotlin ABI itself. Build measurements guide that decision; equivalent
 bytecode would not inherently make JDBC execution faster.
@@ -60,3 +64,15 @@ removes reflective mapping and entity tracking; SQL plans, statement counts and 
 still dominate database work. The small core and absent ORM metadata reduce the work a
 fully migrated application must load, but an application retaining Hibernate retains that
 cost. See [measured comparisons](performance.md).
+
+A write needs an explicit SQL contract. `INSERT … RETURNING` reads identity, default
+and trigger-produced values. A tenant-keyed `ON CONFLICT … DO UPDATE … RETURNING`
+replaces find-then-save without its first-insert race. An optimistic update includes
+its expected version in `WHERE`; a missing `:optional` result lets the caller choose
+its conflict policy. SQL constraints and affected-row counts remain visible.
+
+Migrate a complete small data owner, such as tenant project settings, so its rows
+have one persistence path. Removing that owner's entity also removes stale managed
+copies after SQL writes. Borrowed scopes participate in the caller's transaction;
+the application enforces framework read-only hints before issuing writes. Returned
+numeric values have PostgreSQL's stored scale, rather than an unsaved input's scale.

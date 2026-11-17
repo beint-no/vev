@@ -169,15 +169,24 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         int depth = 0;
         String statement = null;
         boolean projection = false;
+        boolean returningAliases = false;
+        int returningAliasesEnd = -2;
         for (int i = 0; i < tokens.size(); i++) {
             String token = tokens.get(i);
             if (token.equals(")")) depth--;
             if (depth == 0) {
+                if (token.equals("RETURNING")) returningAliases = i + 2 < tokens.size()
+                        && tokens.get(i + 1).equals("WITH") && tokens.get(i + 2).equals("(");
+                if (returningAliases && token.equals(")")) {
+                    returningAliasesEnd = i;
+                    returningAliases = false;
+                }
                 if (statement == null && Set.of("SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(token)) statement = token;
                 if (token.equals("RETURNING") || token.equals("SELECT") && "SELECT".equals(statement)) projection = true;
                 if (Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "UNION", "EXCEPT", "INTERSECT").contains(token)) projection = false;
                 if (projection && token.equals("*") && i > 0
-                        && (Set.of("SELECT", "RETURNING", "DISTINCT", "ALL", ",", ".").contains(tokens.get(i - 1))
+                        && (i == returningAliasesEnd + 1
+                        || Set.of("SELECT", "RETURNING", "DISTINCT", "ALL", ",", ".").contains(tokens.get(i - 1))
                         || i + 1 < tokens.size() && Set.of("FROM", "INTO").contains(tokens.get(i + 1)))) {
                     throw error(path, "List returned columns explicitly; SELECT/RETURNING * is not a stable query contract");
                 }

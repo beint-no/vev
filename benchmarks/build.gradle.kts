@@ -52,3 +52,12 @@ tasks.named("jmh") {
 providers.gradleProperty("benchmarkInclude").orNull?.let { pattern ->
     jmh { includes.set(listOf(pattern)) }
 }
+
+if (providers.gradleProperty("benchmarkSettingsUpdate").isPresent) {
+    jmh {
+        includes.set(listOf("SettingsWriteBenchmark"))
+        benchmarkParameters.put("operation", objects.listProperty(String::class.java).value(listOf("update")))
+        benchmarkParameters.put("value", objects.listProperty(String::class.java).value(listOf("12.50")))
+        resultsFile.set(layout.buildDirectory.file("results/jmh/settings-update-long.json"))
+    }
+}

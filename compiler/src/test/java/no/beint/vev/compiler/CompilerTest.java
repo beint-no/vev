@@ -56,6 +56,37 @@ class CompilerTest {
         assertFalse(result.contains("val `name`:"));
     }
 
+    private static String inputProjection(int count, boolean nullable, boolean tenant) {
+        String names=java.util.stream.IntStream.rangeClosed(1,count).mapToObj(n -> "p"+n).collect(java.util.stream.Collectors.joining(","));
+        String values=java.util.stream.IntStream.rangeClosed(1,count).mapToObj(n -> "(:p"+n+"::bigint)").collect(java.util.stream.Collectors.joining(","));
+        return "-- vev.name: inputs :one\n"+(tenant?"":"-- vev.scope: global\n")
+                +(nullable?"-- vev.nullable: "+names+"\n":"")
+                +"SELECT sum(v) AS total FROM (VALUES "+values+") q(v)"+(tenant?" WHERE :tenantId::int > 0":"");
+    }
+    @Test void bindingMethodHandleLimitsFailDuringGeneration() throws Exception {
+        assertTrue(compile(inputProjection(252,true,true)).contains("fun `inputs`"));
+        assertTrue(compile(inputProjection(253,true,false)).contains("fun `inputs`"));
+        assertTrue(compile(inputProjection(126,false,true)).contains("fun `inputs`"));
+        for (String sql : java.util.List.of(inputProjection(253,true,true),inputProjection(254,true,false),inputProjection(127,false,true))) {
+            var failure=assertThrows(IllegalArgumentException.class, () -> compile(sql));
+            assertTrue(failure.getMessage().contains("Query bindings require"));
+            assertTrue(failure.getMessage().contains("PostgreSQL array"));
+        }
+    }
+    @Test void repeatedBindsCaptureOneApiValueRatherThanOneValuePerPlaceholder() throws Exception {
+        String values=java.util.stream.IntStream.range(0,500).mapToObj(n -> "(:value::bigint)").collect(java.util.stream.Collectors.joining(","));
+        assertTrue(compile("-- vev.name: repeated :one\n-- vev.scope: global\nSELECT sum(v) AS total FROM (VALUES "+values+") q(v)").contains("fun `repeated`(`value`: Long)"));
+    }
+
+    @Test void postgres18ReturningAliasesDescribeOldAndNewValuesWithoutExecutingWrites() throws Exception {
+        String result=compile("-- vev.name: rename :optional\n-- vev.scope: global\nUPDATE item SET name=:name WHERE id=:id RETURNING WITH (OLD AS previous, NEW AS current) previous.name AS old_name,current.name AS name");
+        assertTrue(result.contains("val `oldName`: String?"));
+        assertTrue(result.contains("val `name`: String?"));
+        try(var connection=postgres.connect();var statement=connection.createStatement();var rows=statement.executeQuery("SELECT count(*) FROM item")) {
+            assertTrue(rows.next());assertEquals(0,rows.getInt(1));
+        }
+    }
+
     @Test void databaseDiagnosticsCarryStableSqlStateAndTheQueryLocation() {
         var error = assertThrows(java.sql.SQLException.class,
                 () -> compile("-- vev.name: broken :many\n-- vev.scope: global\nSELECT missing FROM item"));
