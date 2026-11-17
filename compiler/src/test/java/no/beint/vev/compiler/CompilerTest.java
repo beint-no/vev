@@ -36,6 +36,15 @@ class CompilerTest {
         }
     }
 
+    @Test void databaseDiagnosticsCarryStableSqlStateAndTheQueryLocation() {
+        var error = assertThrows(java.sql.SQLException.class,
+                () -> compile("-- vev.name: broken :many\n-- vev.scope: global\nSELECT missing FROM item"));
+        assertEquals("42703", error.getSQLState());
+        assertTrue(error.getMessage().contains("query.sql"));
+        assertTrue(error.getMessage().contains("broken [SQLSTATE 42703]"));
+        assertInstanceOf(org.postgresql.util.PSQLException.class, error.getCause());
+    }
+
     @ParameterizedTest @ValueSource(strings = {
         "SELECT missing FROM item", "SELECT id FROM absent", "SELECT id FROM item WHERE id = :id::uuid",
         "SELECT id, id FROM item", "SELECT id AS \"bad label\" FROM item", "SELECT point(1,2) AS p",

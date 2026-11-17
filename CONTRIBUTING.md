@@ -5,6 +5,7 @@ Use JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 18. Before release run
 Keep tests committed. Compiler changes need PostgreSQL rejection cases and independent
 consumer checks; runtime changes need database execution and failure tests.
 
+Keep one named query per SQL file; use its generated method name as the filename.
 Keep SQL semantics in PostgreSQL. Do not add an ORM compatibility layer, another
 SQL type system or runtime query DSL. Tenant scope is the default; global SQL opts
 out explicitly. Scoped values do not replace predicates, authorization or RLS.

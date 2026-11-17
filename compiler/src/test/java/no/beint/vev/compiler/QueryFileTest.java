@@ -8,45 +8,12 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class QueryFileTest {
     private static final Path FILE = Path.of("customers.sql");
-    @Test void relatedQueriesHaveIndependentContracts() {
-        var queries = SqlSource.parseAll(FILE, """
-                -- vev.name: first :one
-                -- vev.scope: global
-                -- vev.rows: 5
-                -- vev.nullable: id
-                SELECT :id::int AS id;
-
-                -- vev.name: second :many
-                SELECT :tenantId::int AS id;
-                """);
-        assertEquals(2, queries.size());
-        assertNull(queries.getFirst().tenant());
-        assertEquals(5, queries.getFirst().maxRows());
-        assertTrue(queries.getFirst().nullable().contains("id"));
-        assertEquals("tenantId", queries.getLast().tenant());
-        assertEquals(1000, queries.getLast().maxRows());
-        assertTrue(queries.getLast().nullable().isEmpty());
-        assertEquals("second", queries.getLast().name());
-    }
-
-    @Test void queryMarkersInsideQuotedTextAndNestedCommentsAreNotBoundaries() {
-        var queries = SqlSource.parseAll(FILE, """
-                -- vev.name: text :one
-                -- vev.scope: global
-                SELECT $body$
-                -- vev.name: hidden :exec
-                ;
-                $body$ AS text, E'escaped\\\'\n-- vev.name: hidden :exec' AS other;
-                /* outer /* nested */
-                -- vev.name: hidden :exec
-                */
-                -- vev.name: next :one
-                -- vev.scope: global
-                SELECT 1 AS value;
-                -- trailing explanation
-                """);
-        assertEquals(2, queries.size());
-        assertEquals("next", queries.getLast().name());
+    @Test void markersInsideQuotedTextAreOrdinarySQL() {
+        var query = SqlSource.parse(FILE, "-- vev.name: text :one\n-- vev.scope: global\n"
+                + "SELECT $body$\n-- vev.name: hidden :exec\n;$body$ AS text;\n"
+                + "/* outer /* nested */\n-- vev.name: hidden :exec\n*/");
+        assertEquals("text", query.name());
+        assertTrue(query.sql().contains("hidden"));
     }
 
     @ParameterizedTest @ValueSource(strings = {
@@ -57,16 +24,7 @@ class QueryFileTest {
         "SELECT :tenantId::int AS id;\nDELETE FROM customer;"
     }) void invalidContractCannotBeSilentlyIgnored(String body) {
         assertThrows(IllegalArgumentException.class,
-                () -> SqlSource.parseAll(FILE, "-- vev.name: first :one\n" + body));
-    }
-
-    @Test void largeGroupedFilesDoNotRequireRecursionOrShareNames() {
-        StringBuilder source = new StringBuilder();
-        for (int i = 0; i < 1000; i++) source.append("-- vev.name: query").append(i)
-                .append(" :one\nSELECT :tenantId::int AS id;\n");
-        var queries = SqlSource.parseAll(FILE, source.toString());
-        assertEquals(1000, queries.size());
-        assertEquals("query999", queries.getLast().name());
+                () -> SqlSource.parse(FILE, "-- vev.name: first :one\n" + body));
     }
 
     @Test void singleQueryApiRejectsMultipleQueries() {
