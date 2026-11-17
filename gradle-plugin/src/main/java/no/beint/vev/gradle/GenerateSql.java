@@ -2,6 +2,7 @@ package no.beint.vev.gradle;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -74,20 +75,28 @@ public abstract class GenerateSql extends DefaultTask {
     private String schemaDigest() {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            digest.update(getPostgresVersion().get().getBytes(StandardCharsets.UTF_8));
-            List<Path> roots = new ArrayList<>();
-            roots.add(getMigrations().get().getAsFile().toPath());
-            if (getFixtures().isPresent()) roots.add(getFixtures().get().getAsFile().toPath());
-            for (Path root : roots) {
-                try (var paths = Files.walk(root)) {
-                    for (Path file : paths.filter(Files::isRegularFile).sorted().toList()) {
-                        digest.update(root.relativize(file).toString().getBytes(StandardCharsets.UTF_8));
-                        digest.update(Files.readAllBytes(file));
-                    }
-                }
-            }
+            hashField(digest, getPostgresVersion().get().getBytes(StandardCharsets.UTF_8));
+            hashTree(digest, getMigrations().get().getAsFile().toPath());
+            if (getFixtures().isPresent()) hashTree(digest, getFixtures().get().getAsFile().toPath());
             return HexFormat.of().formatHex(digest.digest()).substring(0, 24);
         } catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
         catch (IOException failure) { throw new UncheckedIOException("Vev could not read its migrations", failure); }
     }
+
+    static void hashTree(MessageDigest digest, Path root) throws IOException {
+        try (var paths = Files.walk(root)) {
+            var files = paths.filter(Files::isRegularFile).sorted().toList();
+            digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(files.size()).array());
+            for (Path file : files) {
+                hashField(digest, root.relativize(file).toString().getBytes(StandardCharsets.UTF_8));
+                hashField(digest, Files.readAllBytes(file));
+            }
+        }
+    }
+
+    private static void hashField(MessageDigest digest, byte[] bytes) {
+        digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());
+        digest.update(bytes);
+    }
+
 }

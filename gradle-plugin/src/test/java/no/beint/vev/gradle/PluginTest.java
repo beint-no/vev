@@ -2,6 +2,7 @@ package no.beint.vev.gradle;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.List;
 import org.gradle.testkit.runner.GradleRunner;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,21 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class PluginTest {
     @TempDir Path project;
+
+    @Test void schemaDigestPreservesPathAndContentBoundaries() throws Exception {
+        Path left = Files.createDirectory(project.resolve("left"));
+        Path right = Files.createDirectory(project.resolve("right"));
+        Files.writeString(left.resolve("V1__a.sql"), "x V2__b.sql");
+        Files.writeString(left.resolve("V3__c.sql"), "z");
+        Files.writeString(right.resolve("V1__a.sql"), "x ");
+        Files.writeString(right.resolve("V2__b.sql"), "V3__c.sqlz");
+
+        var leftHash = MessageDigest.getInstance("SHA-256");
+        var rightHash = MessageDigest.getInstance("SHA-256");
+        GenerateSql.hashTree(leftHash, left);
+        GenerateSql.hashTree(rightHash, right);
+        assertFalse(MessageDigest.isEqual(leftHash.digest(), rightHash.digest()));
+    }
 
     @Test void generatedSourcesConfigurationCacheAndMigrationInvalidation() throws Exception {
         Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");

@@ -5,6 +5,8 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Objects;
 import java.util.List;
 
 /** A thread-confined, lexical execution scope. Generated queries own their JDBC resources. */
@@ -52,6 +54,12 @@ public final class Session {
         return borrow(connection, 0, work);
     }
 
+    /** Participate in a caller-owned transaction that must have a positive tenant identifier. */
+    public static <R> R borrowTenant(Connection connection, int tenantId, Work<R> work) throws SQLException {
+        if (tenantId <= 0) throw new IllegalArgumentException("Tenant identifier must be positive");
+        return borrow(connection, tenantId, work);
+    }
+
     public static <R> R borrow(Connection connection, int tenantId, Work<R> work) throws SQLException {
         if (tenantId < 0) throw new IllegalArgumentException("Tenant identifier cannot be negative");
         if (bound()) throw new IllegalStateException("Nested Vev transactions are not supported");
@@ -90,9 +98,13 @@ public final class Session {
                 List<R> rows = new ArrayList<>();
                 while (result.next()) {
                     if (rows.size() == maxRows) throw new IllegalStateException("Vev query exceeded its row bound: " + maxRows);
-                    rows.add(row.read(result));
+                    rows.add(Objects.requireNonNull(row.read(result), "Vev row mapper returned null"));
                 }
-                return List.copyOf(rows);
+                return switch (rows.size()) {
+                    case 0 -> List.of();
+                    case 1 -> List.of(rows.getFirst());
+                    default -> Collections.unmodifiableList(rows);
+                };
             }
         } catch (SQLException | RuntimeException | Error failure) {
             failed = true;
@@ -122,7 +134,7 @@ public final class Session {
                     if (required) throw new IllegalStateException("Vev query expected one row, received none");
                     return null;
                 }
-                R value = java.util.Objects.requireNonNull(row.read(result), "Vev row mapper returned null");
+                R value = Objects.requireNonNull(row.read(result), "Vev row mapper returned null");
                 if (result.next()) throw new IllegalStateException("Vev query expected at most one row, received multiple");
                 return value;
             }
