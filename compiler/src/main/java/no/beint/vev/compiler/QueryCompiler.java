@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /** PostgreSQL Parse/Describe validates SQL without executing application queries. */
 public final class QueryCompiler {
@@ -141,6 +142,14 @@ public final class QueryCompiler {
                 if (!valueless) throw SqlSource.error(source.path(), ":void requires every result column to be a void function call; use :many, :one or :optional to read values");
             } else if (columns.stream().anyMatch(c -> c.type.valueless())) {
                 throw SqlSource.error(source.path(), "A void result carries no value; declare the query :void to call it for its effect");
+            }
+            if (!source.cardinality().equals("void")) {
+                int valueSlots = columns.stream().mapToInt(column -> !column.nullable
+                        && Set.of("Long", "Double").contains(column.type.kotlin()) ? 2 : 1).sum();
+                // copy$default adds its row receiver, one mask per 32 properties, and a marker.
+                int copySlots = valueSlots + (columns.size() + 31) / 32 + 2;
+                if (copySlots > 255) throw SqlSource.error(source.path(), "Result has " + columns.size()
+                        + " columns requiring " + copySlots + " JVM parameter slots; Kotlin data-class copy methods allow at most 255. Select a narrower projection");
             }
             return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns));
         } catch (SQLException exception) {

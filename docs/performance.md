@@ -17,18 +17,18 @@ two 500ms warmups and three 500ms measurements. The default uses three forks, th
 2-second warmups and five 2-second measurements. `-PbenchmarkInclude=HibernateBenchmark`
 selects a focused investigation; the CI gate requires the complete matrix.
 
-## Vev 2.3.0 observations
+## Vev 2.4.0 observations
 
 Local macOS arm64, JDK 27.0.1, Kotlin 2.5.0-Beta2, PostgreSQL 18.6 and pgjdbc 42.7.14.
 The table uses the quick configuration; errors are JMH confidence-interval half-widths.
 
 | Five-row native DTO projection | Mean µs/op | Allocation B/op |
 |---|---:|---:|
-| Vev | 53.68 ± 1.44 | 2,314 |
-| Hibernate 7.4.14 | 56.71 ± 3.99 | 7,822 |
+| Vev | 53.46 ± 0.74 | 2,313 |
+| Hibernate 7.4.14 | 55.67 ± 1.19 | 7,829 |
 
-For 1,000 varied queries, schema setup took 1.416s, SQL description/generation
-0.200s and Kotlin compilation 3.843s. The migrated database
+For 1,000 varied queries, schema setup took 1.413s, SQL description/generation
+0.194s and Kotlin compilation 3.782s. The migrated database
 is shared across the 10/100/1,000-query samples; the first Kotlin sample initializes the
 compiler and later samples use its warmed JVM. Gradle separately verifies skipped no-op
 generation, configuration-cache reuse and unchanged output timestamps.
@@ -67,5 +67,5 @@ production contention. PostgreSQL permissions and business invariants also need 
 execution tests. The ReAI trial validates its generated queries against current migrations
 and compares behavior on the restored local database.
 
-[Runtime matrix](measurements/2.3.0-matrix.json) ·
-[Build phases](measurements/2.3.0-build.json) · [Environment](measurements/environment.json)
+[Runtime matrix](measurements/2.4.0-matrix.json) ·
+[Build phases](measurements/2.4.0-build.json) · [Environment](measurements/environment.json)

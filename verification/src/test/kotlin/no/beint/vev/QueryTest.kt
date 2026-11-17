@@ -31,6 +31,22 @@ class QueryTest {
     @BeforeEach fun reset() = sql("TRUNCATE customer,invoice,posting,scalar_values,document_record RESTART IDENTITY CASCADE")
     private fun sql(text: String) { postgres.connect().use { c -> c.createStatement().use { it.execute(text) } } }
 
+    @Test fun `internal wildcards preserve the explicit generated row and tenant predicate`() {
+        vev.write(7) { Queries.createCustomer("Synthetic local") }
+        vev.write(8) { Queries.createCustomer("Synthetic other") }
+        assertEquals(listOf("Synthetic local"),vev.read(7) { Queries.nestedCustomers().map { it.name } })
+        assertEquals(listOf("Synthetic other"),vev.read(8) { Queries.nestedCustomers().map { it.name } })
+    }
+
+    @Test fun `data classes at JVM parameter slot boundaries compile and execute`() {
+        val nullable=vev.readGlobal { Queries.wideNullable() }
+        assertNull(nullable.c1)
+        assertEquals(1L,nullable.c245)
+        val required=vev.readGlobal { Queries.wideRequired() }
+        assertEquals(1L,required.c1)
+        assertEquals(1L,required.c124)
+    }
+
     @Test fun `tenant binding needs no query plumbing and isolates rows`() {
         val id = vev.write(7) { Queries.createCustomer("Alice").id!! }
         vev.write(8) { Queries.createCustomer("Other tenant") }

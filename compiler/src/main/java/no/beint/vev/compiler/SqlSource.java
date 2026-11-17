@@ -166,11 +166,23 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         if (tokens.isEmpty() || !Set.of("SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(tokens.getFirst())) {
             throw error(path, "Queries must be SELECT, WITH, VALUES, INSERT, UPDATE, DELETE, or MERGE");
         }
-        for (int i = 1; i < tokens.size(); i++) {
-            if (tokens.get(i).equals("*") && (Set.of("SELECT", "RETURNING", "DISTINCT", "ALL", ",", ".").contains(tokens.get(i - 1))
-                    || (i + 1 < tokens.size() && Set.of("FROM", "INTO").contains(tokens.get(i + 1))))) {
-                throw error(path, "List result columns explicitly; SELECT/RETURNING * is not a stable query contract");
+        int depth = 0;
+        String statement = null;
+        boolean projection = false;
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (token.equals(")")) depth--;
+            if (depth == 0) {
+                if (statement == null && Set.of("SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(token)) statement = token;
+                if (token.equals("RETURNING") || token.equals("SELECT") && "SELECT".equals(statement)) projection = true;
+                if (Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "UNION", "EXCEPT", "INTERSECT").contains(token)) projection = false;
+                if (projection && token.equals("*") && i > 0
+                        && (Set.of("SELECT", "RETURNING", "DISTINCT", "ALL", ",", ".").contains(tokens.get(i - 1))
+                        || i + 1 < tokens.size() && Set.of("FROM", "INTO").contains(tokens.get(i + 1)))) {
+                    throw error(path, "List returned columns explicitly; SELECT/RETURNING * is not a stable query contract");
+                }
             }
+            if (token.equals("(")) depth++;
         }
         if (!new LinkedHashSet<>(parameters).containsAll(nullable)) throw error(path, "nullable names an unknown parameter");
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
