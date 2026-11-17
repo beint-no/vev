@@ -94,4 +94,24 @@ class ReaiExecutionTest {
         assertNull(vev.read(2) { Queries.department(901) })
         vev.write(1) { Queries.deleteDepartment(901) }
     }
+    @Test fun `paged real ledger reads retain tenant isolation at different result sizes`() {
+        for (limit in listOf(0,1,100,600,1000)) {
+            val first=vev.read(1) { Queries.pagedLedger(limit) }
+            val second=vev.read(2) { Queries.pagedLedger(limit) }
+            assertEquals(minOf(limit,600),first.size)
+            assertEquals(minOf(limit,600),second.size)
+            assertTrue(first.map { it.id }.toSet().intersect(second.map { it.id }.toSet()).isEmpty())
+        }
+    }
+
+    @Test fun `set based array writes retain affected counts tenant scope and atomic failures`() {
+        val ids=(950..981).toList()
+        assertEquals(32L,vev.write(1) { Queries.bulkDepartments(ids) })
+        assertEquals(52,vev.read(1) { Queries.departments().size })
+        assertEquals(20,vev.read(2) { Queries.departments().size })
+        vev.write(1) { for (id in ids) Queries.deleteDepartment(id) }
+        val error=assertThrows(SQLException::class.java) { vev.write(1) { Queries.bulkDepartments(listOf(950,null)) } }
+        assertEquals("23502",error.sqlState)
+        assertNull(vev.read(1) { Queries.department(950) })
+    }
 }

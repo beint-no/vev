@@ -7,6 +7,7 @@ dependencies {
 }
 sourceSets.named("jmh") { resources.srcDir(project(":verification").file("src/main")) }
 jmh {
+    failOnError.set(true)
     warmupIterations.set(3)
     iterations.set(5)
     fork.set(3)

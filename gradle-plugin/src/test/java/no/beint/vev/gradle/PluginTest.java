@@ -38,6 +38,10 @@ class PluginTest {
         assertTrue(runner().build().getOutput().contains("BUILD SUCCESSFUL"));
         assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite public Kotlin signatures");
         assertTrue(Files.readString(project.resolve("build/generated/vev/Queries_find_Sql.kt")).contains("changed"));
+        Files.writeString(migration.resolveSibling("V2__index.sql"), "CREATE INDEX ON item(id);");
+        var schemaOnly = runner().build();
+        assertTrue(schemaOnly.getOutput().contains(":compileKotlin UP-TO-DATE"), schemaOnly.getOutput());
+        assertFalse(schemaOnly.getOutput().contains(":generateVev UP-TO-DATE"), schemaOnly.getOutput());
         Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, renamed text NOT NULL);");
         var failure = runner().buildAndFail();
         assertTrue(failure.getOutput().contains("find.sql"));

@@ -149,7 +149,8 @@ classloaders avoid compiler JVM launches per module. Generated implementations a
 split per query with a stable public facade; SQL-only edits leave unrelated files
 untouched. Removed queries remove owned generated files. Gradle skips unchanged
 generation entirely. Configuration cache is tested. Shared output caching is disabled
-because installed extensions are external state. No database daemon is retained
+because installed extensions are external state. Force regeneration with
+`--rerun-tasks` after changing installed extensions. No database daemon is retained
 between builds. `initdb` must run as a non-root user.
 
 Build/deployment PostgreSQL majors, extensions, search path and relevant settings

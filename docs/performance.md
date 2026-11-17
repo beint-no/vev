@@ -11,7 +11,7 @@ bootstrap/migrations, SQL description/generation and actual Kotlin compilation a
 reported separately. The first Kotlin invocation includes cold compiler initialization;
 later samples share its JVM. This is not an incremental application-build benchmark.
 Gradle TestKit verifies up-to-date/configuration-cache reuse, SQL-only edits, schema
-invalidation and shared schema lifecycle. Compiler tests verify stale-output removal.
+invalidation, schema-only changes skipping Kotlin compilation, and shared schema lifecycle. Compiler tests verify stale-output removal.
 
 JMH compares generated/handwritten JDBC for five-row customer projections and
 600-row joined ledger reads. Each fork owns a cluster and asserts exact result parity
@@ -26,8 +26,11 @@ weekly. Quick runs are smoke signals, not publication-grade claims.
 
 CI rejects gross statistically separated timing regressions, excessive allocations,
 and very large build-time regressions. Thresholds are guardrails rather than
-cross-machine guarantees. Confidence intervals/raw samples are retained. No comparison
-covers Hibernate, pool acquisition, TLS, remote networks, writes, contention or
+cross-machine guarantees. Confidence intervals/raw samples are retained. Additional paired matrices cover 1/100/600-row ledger pages, INSERT RETURNING, and
+1/32/512-row set-based writes. Write measurements roll back after each operation to
+keep data stable; they do not measure durable commit throughput. Every parameter
+variant is checked against its matching JDBC variant. No comparison
+covers Hibernate, pool acquisition, TLS, remote networks, contention or
 production throughput. Application startup gains need a separate ReAI measurement.
 
 ## Local release measurements, 2026-11-17
@@ -45,3 +48,8 @@ For 1,000 varied queries: bootstrap/migrations 1.436s, description/generation
 0.225s, Kotlin compilation 5.198s. The bootstrap was shared across the 10/100/1,000
 query samples. These are local observations, not universal speed guarantees.
 Raw JSON and environment details are in `docs/measurements`.
+
+The expanded matrix smoke run is retained as `docs/measurements/2026-11-17-matrix-smoke.json`.
+It uses the quick configuration. Both bulk paths supply typed `Integer[]` to pgjdbc;
+using `Object[]` in the JDBC baseline would select a different encoder and give a
+misleading allocation comparison. The core table above uses the longer three-fork run.
