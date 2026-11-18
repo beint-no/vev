@@ -38,7 +38,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.6.0"
+    id("no.beint.vev") version "2.7.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -134,7 +134,7 @@ work. Suspending a coroutine or sharing the connection with child threads is uns
 Default isolation comes from the connection pool; the constructor accepts an explicit
 JDBC isolation override. Configure the pool with auto-commit enabled for owned scopes.
 
-`Session.borrow(connection, tenantId) { ... }` participates in an existing transaction;
+`Session.borrowTenant(connection, tenantId) { ... }` participates in an existing transaction;
 its connection must have auto-commit disabled. The caller owns commit, rollback and
 close, and must propagate failures to its transaction manager. Flush pending ORM writes
 before borrowing a connection while migrating an application incrementally. The caller also

@@ -40,6 +40,9 @@ final class KotlinWriter {
                 if (parameter.enumType() != null) value += parameter.nullable() ? "?.name" : ".name";
                 if (parameter.type().element() != null) {
                     out.append("                _vevBindings.array(").append(i + 1).append(", ").append(quote(parameter.type().element().postgres())).append(", ").append(value).append(parameter.nullable() ? "?.toTypedArray()" : ".toTypedArray()").append(")\n");
+                } else if (!parameter.nullable() && primitive(parameter.type())) {
+                    out.append("                _vevBindings.statement().set").append(parameter.type().kotlin())
+                            .append("(").append(i + 1).append(", ").append(value).append(")\n");
                 } else {
                     out.append("                _vevBindings.statement().setObject(").append(i + 1).append(", ").append(value).append(", ").append(parameter.type().jdbc()).append(")\n");
                 }
@@ -50,7 +53,15 @@ final class KotlinWriter {
                 for (int i = 0; i < query.columns().size(); i++) {
                     var column = query.columns().get(i);
                     String read = read(column.type(), i + 1);
-                    if (!column.nullable()) read = "requireNotNull(" + read + ") { " + quote(source.name() + ": unexpected NULL for " + column.name()) + " }";
+                    if (!column.nullable()) {
+                        String message = quote(source.name() + ": unexpected NULL for " + column.name());
+                        if (primitive(column.type())) {
+                            read = "_vevResult.get" + column.type().kotlin() + "(" + (i + 1)
+                                    + ").also { require(!_vevResult.wasNull()) { " + message + " } }";
+                        } else {
+                            read = "requireNotNull(" + read + ") { " + message + " }";
+                        }
+                    }
                     if (column.domain() != null) read = column.nullable() ? read + "?.let { " + id(column.domain()) + "(it) }" : id(column.domain()) + "(" + read + ")";
                     if (column.enumType() != null) read = column.nullable() ? read + "?.let { " + column.enumType() + ".valueOf(it) }" : column.enumType() + ".valueOf(" + read + ")";
                     out.append("                    ").append(read).append(",\n");
@@ -100,6 +111,13 @@ final class KotlinWriter {
         // pgjdbc has no typed conversion for json, xml, citext or inet, and getString is exact for every text-like type.
         if (type.kotlin().equals("String")) return "_vevResult.getString(" + index + ")";
         return "_vevResult.getObject(" + index + ", " + javaClass(type) + ")";
+    }
+
+    private static boolean primitive(PgType type) {
+        return switch (type.kotlin()) {
+            case "Boolean", "Short", "Int", "Long", "Float", "Double" -> true;
+            default -> false;
+        };
     }
 
     private static String javaClass(PgType type) {

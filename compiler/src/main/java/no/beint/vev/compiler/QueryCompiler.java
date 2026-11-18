@@ -119,7 +119,10 @@ public final class QueryCompiler {
             List<Value> columns = new ArrayList<>();
             HashSet<String> labels = new HashSet<>();
             if (result != null) {
-                for (int i = 1; i <= result.getColumnCount(); i++) {
+                int columnCount = result.getColumnCount();
+                var required = source.requiredExpressions(columnCount);
+                boolean direct = source.directNullability();
+                for (int i = 1; i <= columnCount; i++) {
                     String label = result.getColumnLabel(i);
                     if (label.equals("?column?")) {
                         throw SqlSource.error(source.path(), "Result column " + i + " has no name; give the expression an alias such as AS present");
@@ -128,8 +131,8 @@ public final class QueryCompiler {
                     if (!labels.add(KotlinWriter.camel(name))) throw SqlSource.error(source.path(), "Duplicate result property: " + name + "; give columns distinct aliases");
                     PgType type = PgType.of(source.path(), result.getColumnTypeName(i));
                     boolean nullable = !source.notNull().contains(name)
-                            && !source.requiredExpression(i - 1)
-                            && (!source.directNullability() || result.isNullable(i) != ResultSetMetaData.columnNoNulls);
+                            && !required.get(i - 1)
+                            && (!direct || result.isNullable(i) != ResultSetMetaData.columnNoNulls);
                     columns.add(new Value(name, type, nullable, source.domains().get(name), enumType(source, name, type)));
                 }
             }
