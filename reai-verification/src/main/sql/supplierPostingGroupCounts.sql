@@ -1,5 +1,4 @@
 -- vev.name: supplierPostingGroupCounts :many
--- vev.rows: 100000
 -- vev.notnull: posting_group_id,posting_count
 SELECT membership.posting_group_id, count(p.id) AS posting_count
 FROM supplier_posting_group_memberships membership

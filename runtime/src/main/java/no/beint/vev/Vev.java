@@ -9,16 +9,10 @@ public final class Vev {
     public static final int DEFAULT_ISOLATION = -1;
     private final DataSource source;
     private final int isolation;
-    private final boolean rowLevelSecurity;
 
     public Vev(DataSource source) { this(source, DEFAULT_ISOLATION); }
 
     public Vev(DataSource source, int isolation) {
-        this(source, isolation, false);
-    }
-
-    public Vev(DataSource source, int isolation, boolean rowLevelSecurity) {
-        this.rowLevelSecurity = rowLevelSecurity;
         this.source = java.util.Objects.requireNonNull(source);
         if (isolation != DEFAULT_ISOLATION
                 && isolation != Connection.TRANSACTION_READ_COMMITTED
@@ -51,12 +45,6 @@ public final class Vev {
             if (isolation != DEFAULT_ISOLATION) connection.setTransactionIsolation(isolation);
             connection.setReadOnly(readOnly);
             connection.setAutoCommit(false);
-            if (rowLevelSecurity) {
-                try (var statement = connection.prepareStatement("SELECT set_config('vev.tenant_id', ?, true)")) {
-                    statement.setString(1, tenantId > 0 ? Integer.toString(tenantId) : "");
-                    statement.execute();
-                }
-            }
             R result = Session.borrow(connection, tenantId, work);
             connection.commit();
             committed = true;

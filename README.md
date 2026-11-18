@@ -38,7 +38,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.7.0"
+    id("no.beint.vev") version "2.8.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -107,7 +107,7 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 | `-- vev.notnull: id, total` | Assert and check non-null output values |
 | `-- vev.type: id CustomerId` | Generate a scalar Kotlin value class |
 | `-- vev.enum: status example.Status` | Map a textual column/input to an existing Kotlin enum |
-| `-- vev.rows: 500` | Materialization ceiling, 1–1,000,000; exceeding it fails |
+| `-- vev.rows: 500` | Optional `:many` result ceiling (default 1,000). Reading one extra row fails the call |
 
 Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`,
 and use PostgreSQL arrays for lists: `id = ANY(:ids::int[])`. List returned columns
@@ -139,11 +139,6 @@ its connection must have auto-commit disabled. The caller owns commit, rollback 
 close, and must propagate failures to its transaction manager. Flush pending ORM writes
 before borrowing a connection while migrating an application incrementally. The caller also
 enforces framework read-only policies; a framework hint need not make PostgreSQL read-only.
-
-For PostgreSQL RLS, `Vev(dataSource, Vev.DEFAULT_ISOLATION, true)` sets transaction-local
-`vev.tenant_id`. Global work clears the value. Policies can read
-`nullif(current_setting('vev.tenant_id', true), '')::int`; use an application role subject
-to the policy. Borrowed scopes leave RLS configuration to their caller.
 
 ## Build behavior
 

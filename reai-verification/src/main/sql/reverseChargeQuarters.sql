@@ -1,5 +1,4 @@
 -- vev.name: reverseChargeQuarters :many
--- vev.rows: 100000
 -- vev.notnull: last_posting_date
 SELECT max(p.posting_date) AS last_posting_date
 FROM postings p JOIN vouchers v ON v.id=p.voucher_id AND v.tenant_id=p.tenant_id

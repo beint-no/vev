@@ -1,5 +1,4 @@
 -- name: vouchers :many
--- rows: 1000
 -- notnull: id,date,total
 WITH amounts AS (
     SELECT voucher_id,tenant_id,sum(amount) AS total FROM postings

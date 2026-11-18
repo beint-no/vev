@@ -77,7 +77,7 @@ Treat statement count, allocation, locking and database write cost separately.
 The schema corpus contains 432 ReAI tables, views, functions, indexes, constraints and
 triggers, with pinned provenance. Execution fixtures are synthetic: three tenants,
 900 vouchers and 1,800 postings. The suite checks supported column mappings, invalid SQL,
-nullability, arrays, tenant isolation, constraints, RLS, concurrent writes and failure cleanup.
+nullability, arrays, tenant isolation, constraints, concurrent writes and failure cleanup.
 Write coverage includes PostgreSQL 18 old/new RETURNING values, triggers, generated columns,
 nullable upserts, concurrent first saves, optimistic conflicts, serialization/deadlock SQLSTATE,
 lock timeouts, read-only enforcement, savepoints and rollback after decoding failures.
