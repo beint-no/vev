@@ -30,6 +30,10 @@ import org.gradle.work.DisableCachingByDefault;
 /** Generation is incremental locally; external PostgreSQL binaries intentionally disable shared caching. */
 @DisableCachingByDefault(because = "PostgreSQL patch version and extensions are external build inputs")
 public abstract class GenerateSql extends DefaultTask {
+    public GenerateSql() {
+        getInternalQueries().convention(false);
+    }
+
     @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getQueries();
     @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getMigrations();
     @org.gradle.api.tasks.Optional @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getFixtures();
