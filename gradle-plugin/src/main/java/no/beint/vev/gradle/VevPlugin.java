@@ -20,6 +20,7 @@ public final class VevPlugin implements Plugin<Project> {
             generate.getMigrations().convention(project.getLayout().getProjectDirectory().dir("src/main/resources/db/migration"));
             generate.getOutput().convention(project.getLayout().getBuildDirectory().dir("generated/vev"));
             generate.getClassName().convention("Queries");
+            generate.getInternalQueries().convention(false);
             generate.getPostgresBin().convention(project.getProviders().of(PostgresBin.class, specification -> {}));
             generate.usesService(cluster);
             generate.getPostgresVersion().convention(project.getProviders().of(PostgresVersion.class,

@@ -40,7 +40,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.9.1"
+    id("no.beint.vev") version "2.9.2"
 }
 kotlin {
     jvmToolchain(27)
@@ -48,12 +48,19 @@ kotlin {
 }
 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
     packageName.set("example.db")
+    internalQueries.set(true)
     migrations.set(rootProject.layout.projectDirectory.dir("db/src/main/resources/db/migration"))
 }
 ```
 
 The plugin adds `no.beint.vev:runtime`. Supply pgjdbc and your connection pool.
 The default migration directory is `src/main/resources/db/migration`.
+
+Apply the plugin in each module that owns SQL. It reads that module’s `src/main/sql`
+and compiles the generated code into the same module. With `internalQueries.set(true)`,
+Kotlin callers in the module and its tests can use the query facade, result rows and
+generated value classes. Other Kotlin modules must call an API exposed by the owner.
+The default is public. Kotlin internal declarations remain accessible to Java on the JVM.
 
 ## Queries
 

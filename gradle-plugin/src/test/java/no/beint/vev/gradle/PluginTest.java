@@ -114,6 +114,63 @@ class PluginTest {
         assertTrue(Files.exists(project.resolve("second/build/generated/vev/Queries.kt")));
     }
 
+    @Test void moduleVisibilityControlsKotlinConsumers() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), """
+                rootProject.name = "consumer"
+                include("storage", "app")
+                """);
+        Path storage = Files.createDirectories(project.resolve("storage"));
+        Path app = Files.createDirectories(project.resolve("app"));
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
+                subprojects {
+                    apply(plugin = "org.jetbrains.kotlin.jvm")
+                    repositories { maven { url = uri("%s") }; mavenCentral() }
+                    extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> { jvmToolchain(27) }
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/")));
+        Files.writeString(storage.resolve("build.gradle.kts"), """
+                plugins { id("no.beint.vev") }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("storage.sql")
+                    providers.gradleProperty("moduleSql").orNull?.let { internalQueries.set(it.toBooleanStrict()) }
+                }
+                """);
+        Files.writeString(app.resolve("build.gradle.kts"), "dependencies { \"implementation\"(project(\":storage\")) }");
+        Files.writeString(Files.createDirectories(storage.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Files.writeString(Files.createDirectories(storage.resolve("src/main/sql")).resolve("find.sql"), """
+                -- vev.name: find :optional
+                -- vev.scope: global
+                -- vev.type: id ItemId
+                SELECT id, name FROM item WHERE id=:key;
+                """);
+        Files.writeString(Files.createDirectories(storage.resolve("src/main/kotlin")).resolve("Store.kt"),
+                "package storage\nfun name(key: Int): String? = storage.sql.Queries.find(key)?.name");
+        Files.writeString(Files.createDirectories(storage.resolve("src/test/kotlin")).resolve("Friend.kt"),
+                "internal fun friend(key: Int): storage.sql.FindRow? = storage.sql.Queries.find(key)");
+        Path client = Files.createDirectories(app.resolve("src/main/kotlin")).resolve("Client.kt");
+        String direct = """
+                import storage.sql.Queries
+                import storage.sql.FindRow
+                import storage.sql.ItemId
+                internal fun row(key: Int): FindRow? = Queries.find(key)
+                internal fun id(value: Int): ItemId = ItemId(value)
+                """;
+        Files.writeString(client, direct);
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        runner.withArguments(":app:compileKotlin", "--configuration-cache").build();
+        var failure = runner.withArguments(":app:compileKotlin", "-PmoduleSql=true", "--configuration-cache").buildAndFail();
+        for (String declaration : List.of("Queries", "FindRow", "ItemId")) {
+            assertTrue(failure.getOutput().lines().anyMatch(line -> line.contains("Cannot access")
+                    && line.contains(declaration) && line.contains("internal")), failure.getOutput());
+        }
+        Files.writeString(client, "fun name(key: Int): String? = storage.name(key)");
+        runner.withArguments(":app:compileKotlin", ":storage:compileTestKotlin", "-PmoduleSql=true", "--configuration-cache").build();
+        Files.writeString(client, direct);
+        runner.withArguments(":app:compileKotlin", "--configuration-cache").build();
+    }
+
     private static int count(String text, String needle) {
         int total = 0;
         for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) total++;

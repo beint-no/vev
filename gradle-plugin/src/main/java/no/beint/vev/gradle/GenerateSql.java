@@ -36,6 +36,7 @@ public abstract class GenerateSql extends DefaultTask {
     @OutputDirectory public abstract DirectoryProperty getOutput();
     @Input public abstract Property<String> getPackageName();
     @Input public abstract Property<String> getClassName();
+    @Input public abstract Property<Boolean> getInternalQueries();
     @Input public abstract Property<String> getPostgresBin();
     @Input public abstract Property<String> getPostgresVersion();
     @Classpath public abstract ConfigurableFileCollection getCompilerClasspath();
@@ -56,6 +57,7 @@ public abstract class GenerateSql extends DefaultTask {
                 "--queries", getQueries().get().getAsFile().toString(),
                 "--output", getOutput().get().getAsFile().toString(),
                 "--package", getPackageName().get(), "--class", getClassName().get(),
+                "--visibility", getInternalQueries().get() ? "internal" : "public",
                 "--url", details.url(), "--user", details.user(), "--password", details.password(),
                 "--database", database));
     }
