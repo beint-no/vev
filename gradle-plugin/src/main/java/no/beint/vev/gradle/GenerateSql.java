@@ -30,17 +30,13 @@ import org.gradle.work.DisableCachingByDefault;
 /** Generation is incremental locally; external PostgreSQL binaries intentionally disable shared caching. */
 @DisableCachingByDefault(because = "PostgreSQL patch version and extensions are external build inputs")
 public abstract class GenerateSql extends DefaultTask {
-    public GenerateSql() {
-        getInternalQueries().convention(false);
-    }
-
     @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getQueries();
     @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getMigrations();
     @org.gradle.api.tasks.Optional @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getFixtures();
     @OutputDirectory public abstract DirectoryProperty getOutput();
     @Input public abstract Property<String> getPackageName();
     @Input public abstract Property<String> getClassName();
-    @Input public abstract Property<Boolean> getInternalQueries();
+    @org.gradle.api.tasks.Optional @Input public abstract Property<Boolean> getInternalQueries();
     @Input public abstract Property<String> getPostgresBin();
     @Input public abstract Property<String> getPostgresVersion();
     @Classpath public abstract ConfigurableFileCollection getCompilerClasspath();
@@ -61,7 +57,7 @@ public abstract class GenerateSql extends DefaultTask {
                 "--queries", getQueries().get().getAsFile().toString(),
                 "--output", getOutput().get().getAsFile().toString(),
                 "--package", getPackageName().get(), "--class", getClassName().get(),
-                "--visibility", getInternalQueries().get() ? "internal" : "public",
+                "--visibility", getInternalQueries().getOrElse(false) ? "internal" : "public",
                 "--url", details.url(), "--user", details.user(), "--password", details.password(),
                 "--database", database));
     }
