@@ -6,8 +6,10 @@ Write SQL. Vev applies your Flyway migrations to a disposable PostgreSQL databas
 uses PostgreSQL Parse/Describe to validate queries, and generates Kotlin data classes
 and JDBC implementations. The runtime has no external dependencies.
 
-Requires JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 18. Install `postgres`, `initdb` and
-`pg_ctl` on the build machine; the deployed application only needs JDBC and its pool.
+Requires JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 18. The build machine needs the
+PostgreSQL 18 server binaries (`postgres`, `initdb`, `pg_ctl`); the deployed application only
+needs JDBC and its pool. The plugin uses `PATH`, then the standard Homebrew, Debian/Ubuntu,
+PGDG RPM and Postgres.app locations; set `postgresBin` for any other directory.
 
 ## Setup
 
@@ -38,7 +40,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.8.0"
+    id("no.beint.vev") version "2.9.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -81,9 +83,16 @@ val page = db.read(42) { Queries.customers(after = 0, limit = 100) }
 
 `read(tenantId)` / `write(tenantId)` provide a lexical transaction. Generated methods
 bind `:tenantId` from its scoped value; it is absent from their parameter lists.
-Tenant IDs must be positive. SQL must include the required integer bind and explicit
-tenant predicates, including joins. Use authenticated context and composite foreign
-keys to enforce tenant relationships.
+Tenant IDs must be positive.
+
+The build proves tenant isolation for reads from PostgreSQL's generic plan: every scan of a
+table with a `tenant_id` column must be restricted by `tenant_id = :tenantId`, directly or
+through tenant-key equalities PostgreSQL derives across joins, views and subqueries. A join,
+view or `IN`/`EXISTS` subquery that matches rows by ID alone fails generation and names the
+unproven table. Where a materialized CTE, `LATERAL` or scalar subquery boundary hides the
+derivation, compare that table's `tenant_id` with `:tenantId` directly. The proof does not
+cover tables without `tenant_id`, function bodies, or the values an `INSERT` writes; use
+composite foreign keys for tenant relationships.
 
 Global queries declare `-- vev.scope: global`. Run them in `readGlobal` / `writeGlobal`,
 or within a tenant transaction. Tenant queries require a tenant transaction.

@@ -158,6 +158,7 @@ public final class QueryCompiler {
                 if (copySlots > 255) throw SqlSource.error(source.path(), "Result has " + columns.size()
                         + " columns requiring " + copySlots + " JVM parameter slots; Kotlin data-class copy methods allow at most 255. Select a narrower projection");
             }
+            TenantScans.require(connection, source);
             return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns));
         } catch (SQLException exception) {
             throw new SQLException(source.path() + ": PostgreSQL rejected query " + source.name() + " [SQLSTATE " + exception.getSQLState() + "]: " + exception.getMessage(), exception.getSQLState(), exception);
