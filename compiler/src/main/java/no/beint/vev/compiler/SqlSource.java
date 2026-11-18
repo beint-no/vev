@@ -13,7 +13,8 @@ import java.util.regex.Pattern;
 /** Lexes bind parameters without interpreting SQL semantics; PostgreSQL owns SQL validation. */
 public record SqlSource(Path path, String name, String cardinality, int maxRows, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
-                        Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant) {
+                        Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
+                        String positionalSql) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|scope):.*";
 
@@ -110,21 +111,23 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         List<String> parameters = new ArrayList<>();
         List<String> tokens = new ArrayList<>();
         StringBuilder sql = new StringBuilder();
+        // The same SQL with $n placeholders, for EXPLAIN (GENERIC_PLAN) outside JDBC's ? rewriting.
+        StringBuilder positional = new StringBuilder();
         boolean terminated = false;
         for (int i = sqlStart; i < source.length();) {
             char c = source.charAt(i);
-            if (Character.isWhitespace(c)) { sql.append(c); i++; continue; }
+            if (Character.isWhitespace(c)) { sql.append(c); positional.append(c); i++; continue; }
             if (source.startsWith("--", i)) {
                 int end = lineEnd(source, i + 2);
                 String comment = directive(path, source.substring(i + 2, end).strip());
                 if (!tokens.isEmpty() && comment.matches(DIRECTIVES)) throw error(path, "Query directives must precede SQL");
                 i = end;
-                sql.append(' ');
+                sql.append(' '); positional.append(' ');
                 continue;
             }
             if (source.startsWith("/*", i)) {
                 i = afterBlockComment(path, source, i);
-                sql.append(' ');
+                sql.append(' '); positional.append(' ');
                 continue;
             }
             if (terminated) throw error(path, "Exactly one SQL statement is allowed per query file");
@@ -142,7 +145,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                     }
                 }
                 if (!closed) throw error(path, "Unterminated quoted SQL token");
-                sql.append(source, start, i);
+                sql.append(source, start, i); positional.append(source, start, i);
                 tokens.add(c == '\'' ? "<literal>" : "<identifier>");
                 continue;
             }
@@ -152,29 +155,30 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                     String delimiter = match.group();
                     int end = source.indexOf(delimiter, i + delimiter.length());
                     if (end < 0) throw error(path, "Unterminated dollar-quoted SQL literal");
-                    sql.append(source, i, end + delimiter.length());
+                    sql.append(source, i, end + delimiter.length()); positional.append(source, i, end + delimiter.length());
                     i = end + delimiter.length();
                     tokens.add("<literal>");
                     continue;
                 }
                 throw error(path, "Use named :parameters, not PostgreSQL positional parameters");
             }
-            if (source.startsWith("::", i)) { sql.append("::"); tokens.add("::"); i += 2; continue; }
+            if (source.startsWith("::", i)) { sql.append("::"); positional.append("::"); tokens.add("::"); i += 2; continue; }
             if (c == ':' && i + 1 < source.length() && Character.isJavaIdentifierStart(source.charAt(i + 1))) {
                 int end = i + 2;
                 while (end < source.length() && Character.isJavaIdentifierPart(source.charAt(end))) end++;
                 String parameter = identifier(path, source.substring(i + 1, end));
                 if (parameter.equals("session")) throw error(path, "Parameter name session is reserved");
                 parameters.add(parameter);
-                sql.append('?'); tokens.add("<parameter>"); i = end; continue;
+                sql.append('?'); positional.append('$').append(parameters.size()); tokens.add("<parameter>"); i = end; continue;
             }
             if (Character.isJavaIdentifierStart(c)) {
                 int end = i + 1;
                 while (end < source.length() && Character.isJavaIdentifierPart(source.charAt(end))) end++;
                 String word = source.substring(i, end);
-                sql.append(word); tokens.add(word.toUpperCase(Locale.ROOT)); i = end; continue;
+                sql.append(word); positional.append(word); tokens.add(word.toUpperCase(Locale.ROOT)); i = end; continue;
             }
             if (c == '?') sql.append("??"); else sql.append(c);
+            positional.append(c);
             tokens.add(String.valueOf(c)); i++;
         }
         if (tokens.isEmpty() || !Set.of("SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(tokens.getFirst())) {
@@ -213,7 +217,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
         return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant);
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip());
     }
 
     static String identifier(Path path, String name) {

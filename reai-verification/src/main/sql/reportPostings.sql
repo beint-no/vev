@@ -32,7 +32,7 @@ WITH selected AS (
            CASE WHEN v.voucher_type = 'CUSTOMER_INVOICE' AND COUNT(DISTINCT p.customer_id) = 1
                 THEN MIN(p.customer_id) END AS customer_id
     FROM voucher_postings p
-    JOIN vouchers v ON v.id = p.voucher_id AND v.tenant_id = p.tenant_id
+    JOIN vouchers v ON v.id = p.voucher_id AND v.tenant_id = :tenantId
     WHERE v.voucher_type IN ('SUPPLIER_INVOICE', 'CUSTOMER_INVOICE')
     GROUP BY p.voucher_id, v.voucher_type
 ), resolved AS (
@@ -41,7 +41,7 @@ WITH selected AS (
         THEN COALESCE(p.supplier_id, si.supplier_id, rp.supplier_id, ip.supplier_id)
         ELSE COALESCE(p.customer_id, rp.customer_id, ip.customer_id) END AS resolved_party_id
     FROM selected p
-    LEFT JOIN supplier_invoice si ON si.id = p.supplier_invoice_id AND si.tenant_id = p.tenant_id
+    LEFT JOIN supplier_invoice si ON si.id = p.supplier_invoice_id AND si.tenant_id = :tenantId
     LEFT JOIN row_parties rp ON rp.voucher_id = p.voucher_id AND rp.row_number = p.row_number AND rp.posting_date = p.posting_date
     LEFT JOIN invoice_parties ip ON ip.voucher_id = p.voucher_id
 ), attributed AS (
@@ -50,11 +50,11 @@ WITH selected AS (
            CASE WHEN :suppliers THEN s.id ELSE cu.id END AS party_id,
            COALESCE(cd.name, pe.name, '') AS name
     FROM resolved p
-    LEFT JOIN suppliers s ON :suppliers AND s.id = p.resolved_party_id AND s.tenant_id = p.tenant_id
-    LEFT JOIN customers cu ON NOT :suppliers AND cu.id = p.resolved_party_id AND cu.tenant_id = p.tenant_id
-    LEFT JOIN companies co ON co.id = COALESCE(s.company_id, cu.company_id) AND co.tenant_id = p.tenant_id
-    LEFT JOIN company_details cd ON cd.id = co.id AND cd.tenant_id = p.tenant_id
-    LEFT JOIN persons pe ON pe.id = COALESCE(s.person_id, cu.person_id) AND pe.tenant_id = p.tenant_id
+    LEFT JOIN suppliers s ON :suppliers AND s.id = p.resolved_party_id AND s.tenant_id = :tenantId
+    LEFT JOIN customers cu ON NOT :suppliers AND cu.id = p.resolved_party_id AND cu.tenant_id = :tenantId
+    LEFT JOIN companies co ON co.id = COALESCE(s.company_id, cu.company_id) AND co.tenant_id = :tenantId
+    LEFT JOIN company_details cd ON cd.id = co.id AND cd.tenant_id = :tenantId
+    LEFT JOIN persons pe ON pe.id = COALESCE(s.person_id, cu.person_id) AND pe.tenant_id = :tenantId
     WHERE NOT :suppliers OR s.id IS NOT NULL
 )
 SELECT id, voucher_id, posting_date,
