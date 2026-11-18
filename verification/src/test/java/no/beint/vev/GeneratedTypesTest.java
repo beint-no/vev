@@ -74,6 +74,24 @@ class GeneratedTypesTest {
             else assertEquals(edge.value,actual);
         }));
     }
+    @Test void arrayCommasPreserveNullabilityOfSubsequentProjections() throws Exception {
+        var row = vev.readGlobal(session -> Queries.arrayProjection());
+        assertEquals(List.of(1, 2), row.getIds());
+        assertEquals(1L, row.getTotal());
+        assertNull(row.getMissing());
+    }
+
+    @Test void requiredPrimitiveBindingsAndReadsPreserveExtremaAndZero() throws Exception {
+        var row = vev.readGlobal(session -> Queries.requiredPrimitives(false, Short.MIN_VALUE, 0,
+                Long.MAX_VALUE, Float.NaN, Double.NEGATIVE_INFINITY));
+        assertFalse(row.getB());
+        assertEquals(Short.MIN_VALUE, row.getS());
+        assertEquals(0, row.getI());
+        assertEquals(Long.MAX_VALUE, row.getL());
+        assertTrue(Float.isNaN(row.getF()));
+        assertEquals(Double.NEGATIVE_INFINITY, row.getD());
+    }
+
     @Test void unsupportedValuesAndWrongNonNullAssertionsFailInsteadOfDecodingDefaults() {
         assertThrows(IllegalArgumentException.class,()->vev.readGlobal(s->Queries.assertedNull()));
         assertThrows(java.sql.SQLException.class,()->vev.readGlobal(s->Queries.multidimensional()));

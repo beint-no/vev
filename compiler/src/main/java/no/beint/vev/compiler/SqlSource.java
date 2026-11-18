@@ -235,26 +235,42 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         return tokens.stream().noneMatch(Set.of("WITH", "LEFT", "RIGHT", "FULL", "GROUP", "UNION", "EXCEPT", "INTERSECT", "VALUES", "TABLE")::contains);
     }
 
-    boolean requiredExpression(int column) {
-        if (!tokens.getFirst().equals("SELECT")) return false;
-        List<List<String>> projections = new ArrayList<>();
-        List<String> expression = new ArrayList<>();
+    private static final Set<String> SELECT_END = Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING",
+            "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR");
+    private static final Set<String> SET_OPERATIONS = Set.of("UNION", "EXCEPT", "INTERSECT");
+
+    /** Indices of projections that guarantee a value. PostgreSQL supplies the actual column types. */
+    java.util.BitSet requiredExpressions(int columnCount) {
+        var required = new java.util.BitSet();
+        if (!tokens.getFirst().equals("SELECT") || tokens.stream().anyMatch(SET_OPERATIONS::contains)) return required;
+        int start = 1;
+        int column = 0;
         int depth = 0;
-        for (int i = 1; i < tokens.size(); i++) {
-            String token = tokens.get(i);
-            if (depth == 0 && Set.of("FROM", "INTO", "WHERE", "GROUP", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "UNION", "EXCEPT", "INTERSECT").contains(token)) break;
-            if (depth == 0 && token.equals(",")) { projections.add(List.copyOf(expression)); expression.clear(); continue; }
-            expression.add(token);
-            if (token.equals("(")) depth++;
-            if (token.equals(")")) depth--;
+        for (int i = start; i <= tokens.size(); i++) {
+            String token = i == tokens.size() ? "FROM" : tokens.get(i);
+            if (depth == 0 && (token.equals(",") || SELECT_END.contains(token))) {
+                if (requiredExpression(tokens.subList(start, i))) required.set(column);
+                column++;
+                if (!token.equals(",")) break;
+                start = i + 1;
+            } else if (token.equals("(") || token.equals("[")) {
+                depth++;
+            } else if (token.equals(")") || token.equals("]")) {
+                depth--;
+            }
         }
-        projections.add(List.copyOf(expression));
-        if (column >= projections.size() || tokens.stream().anyMatch(Set.of("UNION", "EXCEPT", "INTERSECT")::contains)) return false;
-        expression = new ArrayList<>(projections.get(column));
-        if (expression.size() >= 2 && expression.get(expression.size() - 2).equals("AS")) expression = new ArrayList<>(expression.subList(0, expression.size() - 2));
+        // Only associate positional hints with columns when Describe agrees with the projection count.
+        if (column != columnCount) required.clear();
+        return required;
+    }
+
+    private static boolean requiredExpression(List<String> expression) {
+        if (expression.size() >= 2 && expression.get(expression.size() - 2).equals("AS")) {
+            expression = expression.subList(0, expression.size() - 2);
+        }
         if (expression.equals(List.of("COUNT", "(", "*", ")"))) return true;
         if (expression.size() < 3 || !expression.getFirst().equals("EXISTS") || !expression.get(1).equals("(")) return false;
-        depth = 0;
+        int depth = 0;
         for (int i = 1; i < expression.size(); i++) {
             if (expression.get(i).equals("(")) depth++;
             if (expression.get(i).equals(")")) depth--;
