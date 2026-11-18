@@ -1,5 +1,4 @@
 -- vev.name: vatBasisByMonth :many
--- vev.rows: 100000
 -- vev.notnull: month_number,vat_code,basis_amount
 SELECT extract(month FROM p.posting_date)::int AS month_number, p.vat_code,
        sum(coalesce(p.vat_basis_amount,p.amount)) AS basis_amount

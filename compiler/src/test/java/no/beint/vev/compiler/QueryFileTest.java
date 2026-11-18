@@ -27,6 +27,26 @@ class QueryFileTest {
                 () -> SqlSource.parse(FILE, "-- vev.name: first :one\n" + body));
     }
 
+    @Test void ordinaryCommentsBetweenDirectivesPreserveTheRowBound() {
+        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\n/* outer /* nested */ */\n"
+                + "-- vev.rows: 7\nSELECT :tenantId::int AS id");
+        assertEquals(7, query.maxRows());
+    }
+
+    @ParameterizedTest @ValueSource(strings = {":one", ":optional", ":exec", ":void"})
+    void rowBoundRequiresAListResult(String cardinality) {
+        var error = assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(FILE,
+                "-- vev.name: customers " + cardinality + "\n-- vev.rows: 7\nSELECT :tenantId::int AS id"));
+        assertTrue(error.getMessage().contains("rows requires :many"));
+    }
+
+    @Test void carriageReturnsEndDirectivesAndSqlComments() {
+        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\r-- vev.rows: 7\r"
+                + "SELECT -- an ordinary comment\r:tenantId::int AS id");
+        assertEquals(7, query.maxRows());
+        assertEquals(java.util.List.of("tenantId"), query.parameters());
+    }
+
     @Test void singleQueryApiRejectsMultipleQueries() {
         assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(FILE,
                 "-- name: first :one\nSELECT :tenantId::int AS id;\n-- name: next :one\nSELECT :tenantId::int AS id;"));

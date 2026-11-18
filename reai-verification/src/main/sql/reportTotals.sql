@@ -1,5 +1,4 @@
 -- vev.name: reportTotals :many
--- vev.rows: 100000
 -- vev.notnull: name,amount
 
 -- Manual vouchers infer parties only within a balanced same-date debit/credit row.

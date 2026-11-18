@@ -24,6 +24,25 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         return value;
     }
 
+    private static int lineEnd(String source, int start) {
+        int i = start;
+        while (i < source.length() && source.charAt(i) != '\n' && source.charAt(i) != '\r') i++;
+        return i;
+    }
+
+    private static int afterBlockComment(Path path, String source, int start) {
+        int depth = 1;
+        int i = start + 2;
+        while (i < source.length()) {
+            if (source.startsWith("/*", i)) { depth++; i += 2; }
+            else if (source.startsWith("*/", i)) {
+                i += 2;
+                if (--depth == 0) return i;
+            } else i++;
+        }
+        throw error(path, "Unterminated SQL comment");
+    }
+
     public static SqlSource parse(Path path, String source) {
         String name = null;
         String cardinality = null;
@@ -35,16 +54,17 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         Map<String, String> domains = new LinkedHashMap<>();
         Map<String, String> enums = new LinkedHashMap<>();
         Set<String> singletonDirectives = new LinkedHashSet<>();
-        int lineStart = 0;
-        while (lineStart < source.length()) {
-            int lineEnd = source.indexOf('\n', lineStart);
-            if (lineEnd < 0) lineEnd = source.length();
-            String line = source.substring(lineStart, lineEnd);
-            lineStart = lineEnd + 1;
-            String text = line.strip();
-            if (text.isEmpty()) continue;
-            if (!text.startsWith("--")) break;
-            text = directive(path, text.substring(2).strip());
+        int sqlStart = 0;
+        while (sqlStart < source.length()) {
+            if (Character.isWhitespace(source.charAt(sqlStart))) { sqlStart++; continue; }
+            if (source.startsWith("/*", sqlStart)) {
+                sqlStart = afterBlockComment(path, source, sqlStart);
+                continue;
+            }
+            if (!source.startsWith("--", sqlStart)) break;
+            int end = lineEnd(source, sqlStart + 2);
+            String text = directive(path, source.substring(sqlStart + 2, end).strip());
+            sqlStart = end;
             if (!text.matches(DIRECTIVES)) continue;
             String key = text.substring(0, text.indexOf(':'));
             if (Set.of("name", "rows", "scope").contains(key) && !singletonDirectives.add(key)) {
@@ -83,6 +103,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             }
         }
         if (name == null) throw error(path, "Missing -- name: queryName :cardinality");
+        if (singletonDirectives.contains("rows") && !cardinality.equals("many")) throw error(path, "rows requires :many");
         for (String both : enums.keySet()) {
             if (domains.containsKey(both)) throw error(path, "Declare either type or enum for " + both + ", not both");
         }
@@ -90,26 +111,19 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         List<String> tokens = new ArrayList<>();
         StringBuilder sql = new StringBuilder();
         boolean terminated = false;
-        for (int i = 0; i < source.length();) {
+        for (int i = sqlStart; i < source.length();) {
             char c = source.charAt(i);
             if (Character.isWhitespace(c)) { sql.append(c); i++; continue; }
             if (source.startsWith("--", i)) {
-                int end = source.indexOf('\n', i);
-                String comment = directive(path, source.substring(i + 2, end < 0 ? source.length() : end).strip());
+                int end = lineEnd(source, i + 2);
+                String comment = directive(path, source.substring(i + 2, end).strip());
                 if (!tokens.isEmpty() && comment.matches(DIRECTIVES)) throw error(path, "Query directives must precede SQL");
-                i = end < 0 ? source.length() : end;
+                i = end;
                 sql.append(' ');
                 continue;
             }
             if (source.startsWith("/*", i)) {
-                int depth = 1;
-                i += 2;
-                while (i < source.length() && depth > 0) {
-                    if (source.startsWith("/*", i)) { depth++; i += 2; }
-                    else if (source.startsWith("*/", i)) { depth--; i += 2; }
-                    else i++;
-                }
-                if (depth != 0) throw error(path, "Unterminated SQL comment");
+                i = afterBlockComment(path, source, i);
                 sql.append(' ');
                 continue;
             }

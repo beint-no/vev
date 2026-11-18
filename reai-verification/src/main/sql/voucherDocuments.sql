@@ -1,5 +1,4 @@
 -- vev.name: voucherDocuments :many
--- vev.rows: 100000
 -- vev.notnull: voucher_id,voucher_type
 SELECT v.id AS voucher_id,v.voucher_type,si.id AS supplier_invoice_id,invoice.id AS invoice_id,
        salary.id AS salary_payment_id,expense.id AS expense_id,customs.id AS customs_declaration_id,

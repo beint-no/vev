@@ -1,5 +1,4 @@
 -- vev.name: voucherOverview :many
--- vev.rows: 100000
 -- vev.notnull: voucher_id,voucher_number,voucher_date,voucher_created_at,voucher_description,voucher_type
 SELECT v.id AS voucher_id,v.number AS voucher_number,v.date AS voucher_date,v.created_at AS voucher_created_at,
        coalesce(v.description,'') AS voucher_description,v.voucher_type,v.reversed_at AS voucher_reversed_at,

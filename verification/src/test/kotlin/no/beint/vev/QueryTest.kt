@@ -165,6 +165,14 @@ class QueryTest {
         assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.customers(null) } }
     }
 
+    @Test fun `default list ceiling returns the complete boundary and fails on the next row`() {
+        assertEquals(1000, vev.readGlobal { Queries.boundedSeries(1000) }.size)
+        val failure = assertThrows(IllegalStateException::class.java) {
+            vev.readGlobal { Queries.boundedSeries(1001) }
+        }
+        assertTrue(failure.message!!.contains("exceeded its row bound: 1000"))
+    }
+
     @Test fun `caught query failures poison and roll back the transaction`() {
         assertThrows(IllegalStateException::class.java) {
             vev.write(7) {
@@ -238,24 +246,6 @@ class QueryTest {
         assertEquals("bound value", vev.readGlobal { Queries.localNames("bound value", 42).bindings })
     }
 
-    @Test fun `database RLS uses one transaction-local setting and resets after pooled reuse`() {
-        vev.write(7) { Queries.createCustomer("Alice") }
-        sql("CREATE ROLE tenant_reader; GRANT SELECT ON customer TO tenant_reader; ALTER TABLE customer ENABLE ROW LEVEL SECURITY; CREATE POLICY tenant_read ON customer TO tenant_reader USING (tenant_id = nullif(current_setting('vev.tenant_id', true),'')::integer)")
-        try {
-            // Real nonowner connection: table owners and superusers bypass ordinary RLS.
-            val restricted = PGSimpleDataSource().apply {
-                setURL(postgres.url()); user = postgres.user(); password = postgres.password()
-                options = "-c role=tenant_reader"
-            }
-            val rls = Vev(restricted, Connection.TRANSACTION_READ_COMMITTED, true)
-            assertEquals("Alice", rls.read(7) { Queries.customer(CustomerId(1))!!.name })
-            assertNull(rls.read(8) { Queries.customer(CustomerId(1)) })
-            assertTrue(rls.readGlobal { session -> session.list("SELECT id FROM customer", 100, {}, { it.getInt(1) }).isEmpty() })
-        } finally {
-            sql("DROP POLICY tenant_read ON customer; ALTER TABLE customer DISABLE ROW LEVEL SECURITY; REVOKE SELECT ON customer FROM tenant_reader; DROP ROLE tenant_reader")
-        }
-    }
-
     @Test fun `Kotlin enums text adapters and asserted nonnull results round trip`() {
         val id = vev.write(7) { Queries.createDocument(DocumentStatus.SENT, ReviewState.PENDING, "Post@ReAI.no", "<n>1</n>", "10.0.0.1") }.id
         val row = vev.read(7) { Queries.document(id) }!!
@@ -282,26 +272,6 @@ class QueryTest {
             assertEquals(1,locks(),"the void function must execute and retain its transaction lock")
         }
         assertEquals(0,locks(),"commit must release the transaction lock")
-    }
-    @Test fun `RLS global scopes clear inherited session settings on a reused physical connection`() {
-        postgres.connect().use { actual ->
-            actual.createStatement().use { it.execute("SELECT set_config('vev.tenant_id','999',false)") }
-            val pooled = java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(javax.sql.DataSource::class.java)) { _, method, _ ->
-                check(method.name == "getConnection")
-                java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(Connection::class.java)) { _, call, args ->
-                    if (call.name == "close") { actual.autoCommit=true; actual.isReadOnly=false; null }
-                    else try { call.invoke(actual, *(args ?: emptyArray())) }
-                    catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
-                }
-            } as javax.sql.DataSource
-            val scoped=Vev(pooled,Connection.TRANSACTION_READ_COMMITTED,true)
-            fun setting() = Session.current().one("SELECT current_setting('vev.tenant_id',true)", {}, { it.getString(1) })
-            assertEquals("7",scoped.read(7) { setting() })
-            assertEquals("8",scoped.read(8) { setting() })
-            assertEquals("",scoped.readGlobal { setting() })
-            assertThrows(IllegalArgumentException::class.java) { scoped.write(7) { throw IllegalArgumentException("abort") } }
-            assertEquals("",scoped.readGlobal { setting() })
-        }
     }
     @Test fun `default isolation inherits configured connections and explicit overrides remain available`() {
         val configured=PGSimpleDataSource().apply {

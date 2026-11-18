@@ -1,5 +1,4 @@
 -- vev.name: postingSettlementDates :many
--- vev.rows: 100000
 -- vev.notnull: posting_id,settlement_date
 SELECT p.id AS posting_id, min(later.posting_date) AS settlement_date
 FROM postings p

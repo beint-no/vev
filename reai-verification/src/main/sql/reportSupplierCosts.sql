@@ -1,5 +1,4 @@
 -- vev.name: reportSupplierCosts :many
--- vev.rows: 100000
 -- vev.notnull: supplier_id,supplier_name,account_number,amount
 -- vev.nullable: supplierId
 

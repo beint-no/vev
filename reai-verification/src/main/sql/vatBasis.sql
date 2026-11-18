@@ -1,5 +1,4 @@
 -- vev.name: vatBasis :many
--- vev.rows: 100000
 -- vev.notnull: vat_code,basis_amount
 SELECT p.vat_code, sum(coalesce(p.vat_basis_amount,p.amount)) AS basis_amount
 FROM postings p LEFT JOIN vouchers v ON v.id=p.voucher_id AND v.tenant_id=p.tenant_id

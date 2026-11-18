@@ -1,5 +1,4 @@
 -- vev.name: voucherSearchSources :many
--- vev.rows: 100000
 -- vev.notnull: voucher_id,kind,source_id,priority
 SELECT v.id AS voucher_id, source.kind, source.id AS source_id, source.number, source.priority, vat.year,
     CASE vat.period WHEN 'JAN_FEB' THEN 1 WHEN 'MAR_APR' THEN 2 WHEN 'MAY_JUN' THEN 3

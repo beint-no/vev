@@ -48,7 +48,7 @@ bytecode would not inherently make JDBC execution faster.
 
 A private ScopedValue resolves a lexical, thread-confined JDBC session. Tenant queries
 bind the scope's required integer identifier; SQL retains explicit tenant predicates and
-joins. Composite foreign keys and optional PostgreSQL RLS enforce database boundaries.
+joins. Composite foreign keys enforce tenant consistency on references.
 The compiler checks the bind contract, not whether a predicate expresses authorization.
 
 Owned scopes commit or roll back. Borrowed scopes preserve a caller's transaction boundary.
