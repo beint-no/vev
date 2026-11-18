@@ -11,6 +11,10 @@ dependencies {
 gradlePlugin { plugins { create("vev") { id = "no.beint.vev"; implementationClass = "no.beint.vev.gradle.VevPlugin" } } }
 tasks.test {
     dependsOn(":compiler:publishAllPublicationsToReleaseRepository", ":runtime:publishAllPublicationsToReleaseRepository", ":cluster:publishAllPublicationsToReleaseRepository")
+    if (providers.environmentVariable("GITHUB_ACTIONS").orNull == "true") {
+        // Hosted runners already resolved the same dependencies for the outer build.
+        systemProperty("org.gradle.testkit.dir", gradle.gradleUserHomeDir.absolutePath)
+    }
     systemProperty("vev.repository", rootProject.layout.buildDirectory.dir("repository").get().asFile.absolutePath)
 }
 

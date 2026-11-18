@@ -1,10 +1,9 @@
 package no.beint.vev.gradle;
 
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import org.gradle.api.provider.ValueSource;
 import org.gradle.api.provider.ValueSourceParameters;
 
@@ -22,28 +21,17 @@ public abstract class PostgresBin implements ValueSource<String, ValueSourcePara
     static String find(List<String> locations) {
         for (String bin : locations) {
             if (!bin.isBlank() && !Files.isExecutable(Path.of(bin, "postgres"))) continue;
-            String version = version(bin);
-            if (version != null && version.matches("(?s).*PostgreSQL\\) 18\\..*")) return bin;
+            if (isPostgres18(bin, "postgres") && isPostgres18(bin, "initdb") && isPostgres18(bin, "pg_ctl")) return bin;
         }
         throw new IllegalStateException("Vev requires PostgreSQL 18 server binaries (postgres, initdb, pg_ctl). Searched PATH and "
                 + String.join(", ", locations.stream().filter(bin -> !bin.isBlank()).toList()) + "; install PostgreSQL 18 or set postgresBin");
     }
 
-    private static String version(String bin) {
-        Process process = null;
+    private static boolean isPostgres18(String bin, String program) {
         try {
-            process = new ProcessBuilder(bin.isBlank() ? "postgres" : Path.of(bin, "postgres").toString(), "--version")
-                    .redirectErrorStream(true).start();
-            if (!process.waitFor(10, TimeUnit.SECONDS)) return null;
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            return process.exitValue() == 0 ? output : null;
-        } catch (java.io.IOException missing) {
-            return null;
-        } catch (InterruptedException failure) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted locating PostgreSQL", failure);
-        } finally {
-            if (process != null && process.isAlive()) process.destroyForcibly();
+            return PostgresVersion.version(bin, program).contains("(PostgreSQL) 18.");
+        } catch (IOException unavailable) {
+            return false;
         }
     }
 }

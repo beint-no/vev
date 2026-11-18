@@ -10,7 +10,8 @@ and plugin marker artifacts.
 3. Run `python3 scripts/verify-release.py` against the bundled Maven repository.
 4. Review the diff and require Linux/macOS correctness plus performance CI.
 5. Tag the tested merge as `sql-v<version>` and attach the signed Maven bundle and
-   SHA-256 checksum to its GitHub release.
+   SHA-256 checksum to its GitHub release. Attach `results.json` and `build-performance.json`
+   from that source tree’s successful performance job before the CI artifacts expire.
 6. Append the validated Maven tree to `maven/` on `codex/maven-repository` in this
    repository. Preserve published version files, merge the version lists in Maven
    metadata and regenerate its checksums. GitHub Pages serves that branch directly.

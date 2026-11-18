@@ -8,14 +8,14 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Proves from PostgreSQL's generic plan that a tenant query reads only the bound tenant's rows.
+ * Checks tenant restrictions on relation scans visible in PostgreSQL's generic plan.
  *
  * <p>Every scan of a relation with a {@code tenant_id} column must carry a top-level
  * {@code alias.tenant_id = $n} condition, where {@code $n} is a {@code :tenantId} bind, or
  * equal the {@code tenant_id} of another scan already proven that way. PostgreSQL derives
  * those conditions through inner joins, outer joins, views and subqueries when the SQL joins
  * on tenant keys, so a join, view or subquery that matches rows by ID alone fails the build.
- * Relations without {@code tenant_id}, opaque function bodies and the rows an INSERT writes
+ * Relations without {@code tenant_id}, opaque function bodies and values assigned by mutations
  * are outside this check.
  */
 final class TenantScans {

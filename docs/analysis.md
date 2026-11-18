@@ -49,18 +49,13 @@ bytecode would not inherently make JDBC execution faster.
 A private ScopedValue resolves a lexical, thread-confined JDBC session. Tenant queries
 bind the scope's required integer identifier, and SQL states its tenant predicates and joins.
 
-The compiler proves those predicates instead of trusting them. It plans each tenant query
-with `EXPLAIN (GENERIC_PLAN)` and requires every scan of a `tenant_id` table to carry
-`tenant_id = $n`, where `$n` is a `:tenantId` bind, or to equal the `tenant_id` of a scan
-already proven that way. PostgreSQL's equivalence classes propagate the bind through
-inner and outer joins, views and pushed-down subqueries, so correctly keyed SQL passes
-unchanged and a join by ID alone fails with the table and alias. The rule is sound but
-conservative: a materialized CTE column is not traced to its origin, so such queries
-compare with `:tenantId` directly. This covers reads and the rows `UPDATE`, `DELETE`
-and `MERGE` scan. It cannot see into function bodies or relations without `tenant_id`,
-and composite foreign keys still enforce tenant consistency of written references.
-Unlike ORM tenant filters it also covers handwritten SQL, and unlike RLS it costs nothing
-at runtime; it does not decide authorization within a tenant.
+The compiler uses `EXPLAIN (GENERIC_PLAN)` against the migrated build schema. It
+looks for a tenant-key equality on each visible scan of a table with `tenant_id` and
+follows equalities to other tenant-bound scans. This can catch an omitted join key
+inside an expanded view. A valid query can also be rejected when a materialized CTE
+hides the origin of a tenant key. Comparing directly with `:tenantId` makes the
+restriction visible. The same check inspects relation scans in writes. The SQL author
+owns assigned tenant values, conflict keys, opaque function behavior and authorization.
 
 Owned scopes commit or roll back. Borrowed scopes preserve a caller's transaction boundary.
 There is no persistence context, cascade engine, SQL DSL or framework adapter. During

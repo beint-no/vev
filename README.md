@@ -40,7 +40,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.9.0"
+    id("no.beint.vev") version "2.9.1"
 }
 kotlin {
     jvmToolchain(27)
@@ -85,14 +85,16 @@ val page = db.read(42) { Queries.customers(after = 0, limit = 100) }
 bind `:tenantId` from its scoped value; it is absent from their parameter lists.
 Tenant IDs must be positive.
 
-The build proves tenant isolation for reads from PostgreSQL's generic plan: every scan of a
-table with a `tenant_id` column must be restricted by `tenant_id = :tenantId`, directly or
-through tenant-key equalities PostgreSQL derives across joins, views and subqueries. A join,
-view or `IN`/`EXISTS` subquery that matches rows by ID alone fails generation and names the
-unproven table. Where a materialized CTE, `LATERAL` or scalar subquery boundary hides the
-derivation, compare that table's `tenant_id` with `:tenantId` directly. The proof does not
-cover tables without `tenant_id`, function bodies, or the values an `INSERT` writes; use
-composite foreign keys for tenant relationships.
+At build time Vev checks relation scans in PostgreSQL's generic plan. Each scan of a
+table with a `tenant_id` column must show a restriction to the bound tenant, directly or
+through a tenant-key equality with another checked scan. Vev names the table when it cannot
+establish that restriction. Compare with `:tenantId` directly where a materialized CTE
+or correlated subquery hides the relationship from the planner.
+
+For writes, review both the tenant value assigned to a row and the key that selects an
+existing row in `ON CONFLICT DO UPDATE`. Those decisions sit outside the scan check.
+Opaque functions, triggers and tables with other tenancy conventions need application
+review. Composite foreign keys enforce tenant consistency between stored references.
 
 Global queries declare `-- vev.scope: global`. Run them in `readGlobal` / `writeGlobal`,
 or within a tenant transaction. Tenant queries require a tenant transaction.
