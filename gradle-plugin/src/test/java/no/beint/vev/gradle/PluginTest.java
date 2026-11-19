@@ -52,7 +52,7 @@ class PluginTest {
         var facadeTime = Files.getLastModifiedTime(facade);
         Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
         assertTrue(runner().build().getOutput().contains("BUILD SUCCESSFUL"));
-        assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite public Kotlin signatures");
+        assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite the Kotlin facade");
         assertTrue(Files.readString(project.resolve("build/generated/vev/Queries_find_Sql.kt")).contains("changed"));
         Files.writeString(migration.resolveSibling("V2__index.sql"), "CREATE INDEX ON item(id);");
         var schemaOnly = runner().build();
@@ -114,7 +114,7 @@ class PluginTest {
         assertTrue(Files.exists(project.resolve("second/build/generated/vev/Queries.kt")));
     }
 
-    @Test void moduleVisibilityControlsKotlinConsumers() throws Exception {
+    @Test void generatedTypesAreInternalToTheirKotlinModule() throws Exception {
         Files.writeString(project.resolve("settings.gradle.kts"), """
                 rootProject.name = "consumer"
                 include("storage", "app")
@@ -133,7 +133,6 @@ class PluginTest {
                 plugins { id("no.beint.vev") }
                 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
                     packageName.set("storage.sql")
-                    providers.gradleProperty("moduleSql").orNull?.let { internalQueries.set(it.toBooleanStrict()) }
                 }
                 """);
         Files.writeString(app.resolve("build.gradle.kts"), "dependencies { \"implementation\"(project(\":storage\")) }");
@@ -150,25 +149,19 @@ class PluginTest {
         Files.writeString(Files.createDirectories(storage.resolve("src/test/kotlin")).resolve("Friend.kt"),
                 "internal fun friend(key: Int): storage.sql.FindRow? = storage.sql.Queries.find(key)");
         Path client = Files.createDirectories(app.resolve("src/main/kotlin")).resolve("Client.kt");
-        String direct = """
-                import storage.sql.Queries
-                import storage.sql.FindRow
-                import storage.sql.ItemId
+        Files.writeString(client, """
+                package storage.sql
                 internal fun row(key: Int): FindRow? = Queries.find(key)
                 internal fun id(value: Int): ItemId = ItemId(value)
-                """;
-        Files.writeString(client, direct);
+                """);
         var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
-        runner.withArguments(":app:compileKotlin", "--configuration-cache").build();
-        var failure = runner.withArguments(":app:compileKotlin", "-PmoduleSql=true", "--configuration-cache").buildAndFail();
+        var failure = runner.withArguments(":app:compileKotlin", "--configuration-cache").buildAndFail();
         for (String declaration : List.of("Queries", "FindRow", "ItemId")) {
             assertTrue(failure.getOutput().lines().anyMatch(line -> line.contains("Cannot access")
                     && line.contains(declaration) && line.contains("internal")), failure.getOutput());
         }
         Files.writeString(client, "fun name(key: Int): String? = storage.name(key)");
-        runner.withArguments(":app:compileKotlin", ":storage:compileTestKotlin", "-PmoduleSql=true", "--configuration-cache").build();
-        Files.writeString(client, direct);
-        runner.withArguments(":app:compileKotlin", "--configuration-cache").build();
+        runner.withArguments(":app:compileKotlin", ":storage:compileTestKotlin", "--configuration-cache").build();
     }
 
     private static int count(String text, String needle) {

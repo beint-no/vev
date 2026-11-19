@@ -21,8 +21,13 @@ class TypeSafetyTest {
         Files.writeString(source, "import no.beint.vev.*\nimport no.beint.vev.fixture.*\nfun example(session: Session) { $body }\n")
         val classpath = listOf(Queries::class.java, Session::class.java, Unit::class.java)
             .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toString() }.joinToString(java.io.File.pathSeparator)
+        val generatedClasses = Path.of(Queries::class.java.protectionDomain.codeSource.location.toURI())
         val output = ByteArrayOutputStream()
-        val result = K2JVMCompiler().exec(PrintStream(output), "-no-stdlib", "-no-reflect", "-jvm-target", "27", "-classpath", classpath, "-d", directory.resolve("classes").toString(), source.toString())
+        val result = K2JVMCompiler().exec(
+            PrintStream(output), "-no-stdlib", "-no-reflect", "-jvm-target", "27",
+            "-classpath", classpath, "-Xfriend-paths=$generatedClasses",
+            "-d", directory.resolve("classes").toString(), source.toString()
+        )
         return result to output.toString()
     }
 
@@ -42,9 +47,10 @@ class TypeSafetyTest {
         val (result, diagnostics) = compile(body)
         assertEquals(ExitCode.COMPILATION_ERROR, result, diagnostics)
         assertTrue(diagnostics.contains("Consumer.kt"), diagnostics)
+        assertFalse(diagnostics.contains("Cannot access"), diagnostics)
     }
 
-    @Test fun `valid generated contracts compile in an independent consumer`() {
+    @Test fun `valid generated contracts compile with module access`() {
         val (result, diagnostics) = compile("val name: String? = Queries.customer(CustomerId(1))?.name; Queries.customers(null)")
         assertEquals(ExitCode.OK, result, diagnostics)
     }

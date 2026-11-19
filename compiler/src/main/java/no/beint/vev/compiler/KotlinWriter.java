@@ -13,10 +13,10 @@ final class KotlinWriter {
         return out;
     }
 
-    static String implementation(String packageName, String className, QueryCompiler.Query query, String visibility) {
+    static String implementation(String packageName, String className, QueryCompiler.Query query) {
         StringBuilder out = header(packageName);
         if (!query.columns().isEmpty() && !query.source().cardinality().equals("void")) {
-            out.append(visibility).append("data class ").append(id(rowName(query.source().name()))).append("(\n");
+            out.append("internal data class ").append(id(rowName(query.source().name()))).append("(\n");
             for (var column : query.columns()) out.append("    val ").append(id(camel(column.name()))).append(": ").append(column.kotlin()).append(",\n");
             out.append(")\n\n");
         }
@@ -75,11 +75,11 @@ final class KotlinWriter {
     }
 
     /** Stable signatures keep SQL-only edits out of the facade's Kotlin compilation unit. */
-    static String facade(String packageName, String className, List<QueryCompiler.Query> queries, Map<String, PgType> domains, String visibility) {
+    static String facade(String packageName, String className, List<QueryCompiler.Query> queries, Map<String, PgType> domains) {
         StringBuilder out = header(packageName);
-        domains.forEach((name, type) -> out.append("@JvmInline\n").append(visibility).append("value class ").append(id(name))
+        domains.forEach((name, type) -> out.append("@JvmInline\ninternal value class ").append(id(name))
                 .append("(val value: ").append(type.kotlin()).append(")\n\n"));
-        out.append(visibility).append("object ").append(id(className)).append(" {\n");
+        out.append("internal object ").append(id(className)).append(" {\n");
         for (var query : queries) {
             var source = query.source();
             String result = resultType(query);

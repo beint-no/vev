@@ -27,11 +27,6 @@ public final class QueryCompiler {
 
     public static void compile(Connection connection, Path queries, Path output, String packageName, String className)
             throws SQLException, IOException {
-        compile(connection, queries, output, packageName, className, false);
-    }
-
-    public static void compile(Connection connection, Path queries, Path output, String packageName, String className,
-                               boolean internalQueries) throws SQLException, IOException {
         if (connection.getMetaData().getDatabaseMajorVersion() != 18
                 || !connection.getMetaData().getDatabaseProductName().equals("PostgreSQL")) {
             throw new IllegalArgumentException("Vev compiler requires PostgreSQL 18");
@@ -72,12 +67,11 @@ public final class QueryCompiler {
             }
         }
         Map<String, String> generated = new java.util.TreeMap<>();
-        String visibility = internalQueries ? "internal " : "";
-        generated.put(className + ".kt", KotlinWriter.facade(packageName, className, compiled, domains, visibility));
+        generated.put(className + ".kt", KotlinWriter.facade(packageName, className, compiled, domains));
         for (Query query : compiled) {
             String name = KotlinWriter.implementationName(className, query);
             if (!types.add(name)) throw SqlSource.error(query.source.path(), "Generated implementation name collision: " + name);
-            generated.put(name + ".kt", KotlinWriter.implementation(packageName, name, query, visibility));
+            generated.put(name + ".kt", KotlinWriter.implementation(packageName, name, query));
         }
         Files.createDirectories(output);
         Path owner = output.resolve(".vev-output");
