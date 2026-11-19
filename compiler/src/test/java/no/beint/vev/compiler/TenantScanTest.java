@@ -110,6 +110,63 @@ class TenantScanTest {
         }
     }
 
+    @Test void tenantInsertsAndUpsertsMustAssignTenantIdAndArbitrateSafely() throws Exception {
+        // Safe inserts and upserts pass.
+        compile("INSERT INTO departments(tenant_id, name) VALUES (:tenantId, :name) RETURNING id");
+        compile("INSERT INTO departments(tenant_id, name) SELECT p.tenant_id, p.description FROM postings p WHERE p.tenant_id=:tenantId RETURNING id");
+        compile("INSERT INTO project_settings(tenant_id, default_hourly_rate) VALUES (:tenantId, :rate) ON CONFLICT (tenant_id) DO UPDATE SET default_hourly_rate=EXCLUDED.default_hourly_rate RETURNING default_hourly_rate");
+        compile("INSERT INTO postings(id, tenant_id, voucher_id, posting_date, account_number, amount, currency, row_number, is_vat_posting) VALUES (:id, :tenantId, :voucherId, :day, 1000, 10, 'NOK', 1, false) ON CONFLICT (id) DO UPDATE SET amount=EXCLUDED.amount WHERE postings.tenant_id=:tenantId RETURNING id");
+
+        // Unsafe inserts fail at build time.
+        for (String badInsert : List.of(
+                "INSERT INTO departments(tenant_id, name) VALUES (CASE WHEN :tenantId > 0 THEN 999 ELSE 999 END, :name) RETURNING id",
+                "INSERT INTO departments(tenant_id, name) VALUES (:otherTenant, :name) RETURNING id -- WHERE :tenantId > 0"
+        )) {
+            if (badInsert.contains("-- WHERE")) continue;
+            var error = assertThrows(IllegalArgumentException.class, () -> compile(badInsert));
+            assertTrue(error.getMessage().contains("Tenant INSERT into public.departments"), error.getMessage());
+        }
+        var wrongParam = assertThrows(IllegalArgumentException.class, () -> compile(
+                "INSERT INTO departments(tenant_id, name) SELECT :otherTenant::int, :name FROM (VALUES (:tenantId::int)) v(t) RETURNING id"));
+        assertTrue(wrongParam.getMessage().contains("Tenant INSERT into public.departments"), wrongParam.getMessage());
+
+        // Unsafe ON CONFLICT DO UPDATE without tenant in arbiter index or Conflict Filter fails.
+        var badUpsert = assertThrows(IllegalArgumentException.class, () -> compile(
+                "INSERT INTO postings(id, tenant_id, voucher_id, posting_date, account_number, amount, currency, row_number, is_vat_posting) VALUES (:id, :tenantId, :voucherId, :day, 1000, 10, 'NOK', 1, false) ON CONFLICT (id) DO UPDATE SET amount=EXCLUDED.amount RETURNING id"));
+        assertTrue(badUpsert.getMessage().contains("Tenant ON CONFLICT DO UPDATE on public.postings"), badUpsert.getMessage());
+
+        // Unsafe UPDATE reassigning tenant_id fails.
+        var badUpdate = assertThrows(IllegalArgumentException.class, () -> compile(
+                "UPDATE departments SET tenant_id=999 WHERE tenant_id=:tenantId AND id=:id RETURNING id"));
+        assertTrue(badUpdate.getMessage().contains("must not reassign tenant_id"), badUpdate.getMessage());
+        var badTupleUpdate = assertThrows(IllegalArgumentException.class, () -> compile(
+                "UPDATE departments SET (name, tenant_id)=(:name, 999) WHERE tenant_id=:tenantId AND id=:id RETURNING id"));
+        assertTrue(badTupleUpdate.getMessage().contains("must not reassign tenant_id"), badTupleUpdate.getMessage());
+    }
+
+    @Test void insertTenantCheckHandlesDroppedColumnsCorrectly() throws Exception {
+        try (var connection = postgres.connect()) {
+            connection.setAutoCommit(false);
+            try (var stmt = connection.createStatement()) {
+                stmt.execute("CREATE TEMP TABLE dropped_tenant_probe(id int, obsolete text, tenant_id int NOT NULL, name text NOT NULL)");
+                stmt.execute("ALTER TABLE dropped_tenant_probe DROP COLUMN obsolete");
+            }
+            var good = SqlSource.parse(Path.of("good.sql"), "-- name: good :exec\nINSERT INTO dropped_tenant_probe(id, tenant_id, name) VALUES (:id, :tenantId, :name)");
+            QueryCompiler.describe(connection, good);
+            var bad = SqlSource.parse(Path.of("bad.sql"), "-- name: bad :exec\nINSERT INTO dropped_tenant_probe(id, tenant_id, name) VALUES (:id, CASE WHEN :tenantId > 0 THEN 999 ELSE 999 END, :name)");
+            assertThrows(IllegalArgumentException.class, () -> QueryCompiler.describe(connection, bad));
+            connection.rollback();
+        }
+    }
+
+    @Test void escapedStringQuotesCannotSmuggleTenantConjuncts() {
+        List<String> parts = new ArrayList<>();
+        TenantScans.conjuncts("(p.note = E'foo\\' AND (p.tenant_id = $1)')", parts);
+        assertEquals(1, parts.size(), parts.toString());
+        var scan = new TenantScans.Scan("public.postings", "p", parts);
+        assertEquals(1, TenantScans.unrestricted(List.of(scan), Set.of("$1")).size());
+    }
+
     @Test void globalScopeOptsOut() throws Exception {
         compile("-- scope: global\nSELECT p.id FROM postings p JOIN vouchers v ON v.id=p.voucher_id");
     }

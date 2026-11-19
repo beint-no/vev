@@ -8,8 +8,8 @@ import java.sql.Connection;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -62,7 +62,8 @@ public final class QueryCompiler {
             if (!types.add(domain)) throw SqlSource.error(queries, "Generated type name collision: " + domain);
         }
         for (Query query : compiled) {
-            if (!query.columns.isEmpty() && !types.add(KotlinWriter.rowName(query.source.name()))) {
+            if (!query.columns.isEmpty() && !query.source.cardinality().equals("void")
+                    && !types.add(KotlinWriter.rowName(query.source.name()))) {
                 throw SqlSource.error(query.source.path(), "Generated row type name collision");
             }
         }
@@ -86,8 +87,9 @@ public final class QueryCompiler {
             if (!Files.exists(file) || !Files.readString(file).equals(entry.getValue())) Files.writeString(file, entry.getValue(), StandardCharsets.UTF_8);
         }
         Files.writeString(owner, String.join("\n", generated.keySet()) + "\n", StandardCharsets.UTF_8);
-        String manifest = compiled.stream().map(q -> q.source.path().getFileName() + " " + q.source.name()
-                + " " + q.source.cardinality() + " " + digest(q.source.sql())).collect(java.util.stream.Collectors.joining("\n"));
+        String manifest = compiled.stream().map(q -> queries.relativize(q.source.path()).toString().replace('\\', '/')
+                + " " + q.source.name() + " " + q.source.cardinality() + " " + digest(q.source.sql()))
+                .collect(java.util.stream.Collectors.joining("\n"));
         Files.writeString(output.resolve("queries.sha256"), manifest + "\n", StandardCharsets.UTF_8);
     }
 
@@ -105,15 +107,17 @@ public final class QueryCompiler {
                 Value previous = parameters.putIfAbsent(name, value);
                 if (previous != null && !previous.type.equals(type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
             }
-            // The binding lambda captures each API argument and the scoped tenant. Its method handle
-            // also needs the Bindings argument and receiver; Kotlin compilation alone misses overflow.
-            int bindingSlots = parameters.values().stream().mapToInt(QueryCompiler::jvmSlots).sum() + 2;
-            if (bindingSlots > 255) throw SqlSource.error(source.path(), "Query bindings require " + bindingSlots
+            // Kotlin compiles @JvmStatic object methods to an instance method taking `this` plus API arguments.
+            int methodSlots = 1 + (source.cardinality().equals("stream") ? 1 : 0)
+                    + parameters.values().stream()
+                    .filter(p -> !p.name.equals(source.tenant()))
+                    .mapToInt(QueryCompiler::jvmSlots).sum();
+            if (methodSlots > 255) throw SqlSource.error(source.path(), "Query parameters require " + methodSlots
                     + " JVM parameter slots; at most 255 are supported. Use a PostgreSQL array or fewer parameters");
             ResultSetMetaData result = statement.getMetaData();
             if ((result == null) != source.cardinality().equals("exec")) {
                 throw SqlSource.error(source.path(), "Declared cardinality does not match the SQL result;"
-                        + " use :exec for row counts, :void to call a void function for its effect, and :one/:optional/:many for rows");
+                        + " use :exec for row counts, :void to call a void function for its effect, and :one/:optional/:many/:stream for rows");
             }
             List<Value> columns = new ArrayList<>();
             HashSet<String> labels = new HashSet<>();
@@ -146,7 +150,7 @@ public final class QueryCompiler {
             }
             boolean valueless = !columns.isEmpty() && columns.stream().allMatch(c -> c.type.valueless());
             if (source.cardinality().equals("void")) {
-                if (!valueless) throw SqlSource.error(source.path(), ":void requires every result column to be a void function call; use :many, :one or :optional to read values");
+                if (!valueless) throw SqlSource.error(source.path(), ":void requires every result column to be a void function call; use :many, :one, :optional or :stream to read values");
             } else if (columns.stream().anyMatch(c -> c.type.valueless())) {
                 throw SqlSource.error(source.path(), "A void result carries no value; declare the query :void to call it for its effect");
             }

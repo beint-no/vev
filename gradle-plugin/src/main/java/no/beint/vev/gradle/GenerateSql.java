@@ -20,12 +20,13 @@ import org.gradle.api.services.ServiceReference;
 import org.gradle.api.tasks.Classpath;
 import org.gradle.api.tasks.Input;
 import org.gradle.api.tasks.InputDirectory;
+import org.gradle.api.tasks.Internal;
 import org.gradle.api.tasks.OutputDirectory;
 import org.gradle.api.tasks.PathSensitive;
 import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.api.tasks.TaskAction;
-import org.gradle.workers.WorkerExecutor;
 import org.gradle.work.DisableCachingByDefault;
+import org.gradle.workers.WorkerExecutor;
 
 /** Generation is incremental locally; external PostgreSQL binaries intentionally disable shared caching. */
 @DisableCachingByDefault(because = "PostgreSQL patch version and extensions are external build inputs")
@@ -38,6 +39,7 @@ public abstract class GenerateSql extends DefaultTask {
     @Input public abstract Property<String> getClassName();
     @Input public abstract Property<String> getPostgresBin();
     @Input public abstract Property<String> getPostgresVersion();
+    @Internal public abstract Property<String> getSchemaCacheDir();
     @Classpath public abstract ConfigurableFileCollection getCompilerClasspath();
     @ServiceReference("vevCluster") public abstract Property<VevCluster> getCluster();
     @Inject protected abstract WorkerExecutor getWorkerExecutor();
@@ -45,7 +47,7 @@ public abstract class GenerateSql extends DefaultTask {
     @TaskAction public void generate() {
         VevCluster cluster = getCluster().get();
         String database = "vev_" + schemaDigest();
-        cluster.withSchema(database, getPostgresBin().get(), (details, name) -> compiler(List.of(
+        cluster.withSchema(database, getPostgresBin().get(), getSchemaCacheDir().getOrElse(""), (details, name) -> compiler(List.of(
                 "--mode", "migrate",
                 "--migrations", getMigrations().get().getAsFile().toString(),
                 "--url", details.url(), "--user", details.user(), "--password", details.password(),

@@ -49,8 +49,7 @@ public class QueryBenchmark {
     @Benchmark public List<CustomersRow> jdbc() throws Exception {
         List<CustomersRow> rows = new ArrayList<>();
         try (var statement = connection.prepareStatement(sql)) {
-            statement.setFetchSize(5);
-            statement.setObject(1, 7, java.sql.Types.INTEGER);
+            statement.setInt(1, 7);
             statement.setObject(2, null, java.sql.Types.VARCHAR);
             statement.setObject(3, null, java.sql.Types.VARCHAR);
             try (var result = statement.executeQuery()) {

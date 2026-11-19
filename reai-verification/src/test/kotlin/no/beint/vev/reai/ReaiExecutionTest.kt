@@ -15,7 +15,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.sql.SQLException
 import java.time.LocalDate
-import java.time.OffsetDateTime
+import java.time.Instant
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ReaiExecutionTest {
@@ -316,7 +316,7 @@ class ReaiExecutionTest {
     }
 
     @Test fun `database rejects cross tenant composite foreign key`() {
-        val created=OffsetDateTime.parse("2026-01-01T00:00:00Z")
+        val created=Instant.parse("2026-01-01T00:00:00Z")
         val day=LocalDate.of(2026,1,1)
         vev.write(1) { Queries.createDepartment(900,"Tenant One Only") }
         val error=assertThrows(SQLException::class.java) {
@@ -332,7 +332,7 @@ class ReaiExecutionTest {
 
     @Test fun `real deferred trigger rejects voucher without postings and preserves original SQLState`() {
         val error=assertThrows(SQLException::class.java) {
-            vev.write(1) { Queries.createVoucher(998L,OffsetDateTime.parse("2026-01-01T00:00:00Z"),LocalDate.of(2026,1,1),998.toShort(),"No postings") }
+            vev.write(1) { Queries.createVoucher(998L,Instant.parse("2026-01-01T00:00:00Z"),LocalDate.of(2026,1,1),998.toShort(),"No postings") }
         }
         assertNotNull(error.sqlState)
         assertTrue(vev.read(1) { Queries.vouchers(listOf(998L)).isEmpty() })

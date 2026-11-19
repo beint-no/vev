@@ -21,8 +21,7 @@ public class InsertBenchmark {
     }
     @Benchmark public CreateDepartmentRow jdbcInsert() throws Exception {
         try(var statement=fixture.connection.prepareStatement(sql)) {
-            statement.setFetchSize(2);
-            statement.setObject(1,900,java.sql.Types.INTEGER);statement.setObject(2,1,java.sql.Types.INTEGER);statement.setObject(3,"Synthetic Insert",java.sql.Types.VARCHAR);
+            statement.setInt(1,900);statement.setInt(2,1);statement.setString(3,"Synthetic Insert");
             try(var result=statement.executeQuery()) {
                 if(!result.next()) throw new IllegalStateException("Expected one returned row");
                 var row=new CreateDepartmentRow(java.util.Objects.requireNonNull(result.getObject(1,Integer.class)),java.util.Objects.requireNonNull(result.getString(2)));

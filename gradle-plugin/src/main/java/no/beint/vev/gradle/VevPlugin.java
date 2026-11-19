@@ -21,6 +21,7 @@ public final class VevPlugin implements Plugin<Project> {
             generate.getOutput().convention(project.getLayout().getBuildDirectory().dir("generated/vev"));
             generate.getClassName().convention("Queries");
             generate.getPostgresBin().convention(project.getProviders().of(PostgresBin.class, specification -> {}));
+            generate.getSchemaCacheDir().convention(project.getGradle().getGradleUserHomeDir().toPath().resolve("vev/schemas").toString());
             generate.usesService(cluster);
             generate.getPostgresVersion().convention(project.getProviders().of(PostgresVersion.class,
                     specification -> specification.getParameters().getBin().set(generate.getPostgresBin())));

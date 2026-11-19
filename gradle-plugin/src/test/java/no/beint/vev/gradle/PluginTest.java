@@ -30,12 +30,16 @@ class PluginTest {
     @Test void generatedSourcesConfigurationCacheAndMigrationInvalidation() throws Exception {
         Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
         String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
         Files.writeString(project.resolve("build.gradle.kts"), """
                 plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
                 repositories { maven { url = uri("%s") }; mavenCentral() }
                 kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
-                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") { packageName.set("sample") }
-                """.formatted(repository));
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(repository, cacheDir));
         Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
         Path sql = Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql");
         Path migration = Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql");
@@ -45,19 +49,24 @@ class PluginTest {
         Files.writeString(consumer, "package sample\nfun name(): String? = Queries.find(1)?.name\n");
         var first = runner().build();
         assertTrue(first.getOutput().contains("BUILD SUCCESSFUL"));
+        assertTrue(first.getOutput().contains("Vev migrating build database"));
         var second = runner().build();
         assertTrue(second.getOutput().contains("Reusing configuration cache"));
         assertTrue(second.getOutput().contains(":generateVev UP-TO-DATE"));
         Path facade = project.resolve("build/generated/vev/Queries.kt");
         var facadeTime = Files.getLastModifiedTime(facade);
         Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
-        assertTrue(runner().build().getOutput().contains("BUILD SUCCESSFUL"));
+        var sqlEdit = runner().build();
+        assertTrue(sqlEdit.getOutput().contains("BUILD SUCCESSFUL"));
+        assertTrue(sqlEdit.getOutput().contains("Vev reused cached PostgreSQL 18 schema"), sqlEdit.getOutput());
+        assertEquals(0, count(sqlEdit.getOutput(), "Vev migrating build database"), sqlEdit.getOutput());
         assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite the Kotlin facade");
         assertTrue(Files.readString(project.resolve("build/generated/vev/Queries_find_Sql.kt")).contains("changed"));
         Files.writeString(migration.resolveSibling("V2__index.sql"), "CREATE INDEX ON item(id);");
         var schemaOnly = runner().build();
         assertTrue(schemaOnly.getOutput().contains(":compileKotlin UP-TO-DATE"), schemaOnly.getOutput());
         assertFalse(schemaOnly.getOutput().contains(":generateVev UP-TO-DATE"), schemaOnly.getOutput());
+        assertTrue(schemaOnly.getOutput().contains("Vev migrating build database"), schemaOnly.getOutput());
         Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, renamed text NOT NULL);");
         var failure = runner().buildAndFail();
         assertTrue(failure.getOutput().contains("find.sql"));
@@ -78,6 +87,7 @@ class PluginTest {
     /** A repository with many modules must pay for one cluster and one migration replay, not one per module. */
     @Test void modulesSharingASchemaStartOneClusterAndMigrateOnce() throws Exception {
         String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
         Files.writeString(project.resolve("settings.gradle.kts"),
                 "rootProject.name = \"consumer\"\ninclude(\"first\", \"second\")\n");
         Files.writeString(project.resolve("build.gradle.kts"), """
@@ -93,9 +103,10 @@ class PluginTest {
                     tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
                         packageName.set("sample." + project.name)
                         migrations.set(rootProject.layout.projectDirectory.dir("migration"))
+                        schemaCacheDir.set("%s")
                     }
                 }
-                """.formatted(repository));
+                """.formatted(repository, cacheDir));
         Files.writeString(project.resolve("gradle.properties"),
                 "org.gradle.configuration-cache=true\n");
         Files.writeString(Files.createDirectories(project.resolve("migration")).resolve("V1__item.sql"),
@@ -121,6 +132,7 @@ class PluginTest {
                 """);
         Path storage = Files.createDirectories(project.resolve("storage"));
         Path app = Files.createDirectories(project.resolve("app"));
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
         Files.writeString(project.resolve("build.gradle.kts"), """
                 plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
                 subprojects {
@@ -133,8 +145,9 @@ class PluginTest {
                 plugins { id("no.beint.vev") }
                 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
                     packageName.set("storage.sql")
+                    schemaCacheDir.set("%s")
                 }
-                """);
+                """.formatted(cacheDir));
         Files.writeString(app.resolve("build.gradle.kts"), "dependencies { \"implementation\"(project(\":storage\")) }");
         Files.writeString(Files.createDirectories(storage.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
                 "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");

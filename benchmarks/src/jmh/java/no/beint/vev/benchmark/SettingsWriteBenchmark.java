@@ -73,7 +73,7 @@ public class SettingsWriteBenchmark {
     }
     @Benchmark public BigDecimal jdbcSettingsSave() throws Exception {
         try(var statement=fixture.connection.prepareStatement(sql)) {
-            statement.setFetchSize(2);statement.setObject(1,tenant,java.sql.Types.INTEGER);statement.setObject(2,amount,java.sql.Types.NUMERIC);
+            statement.setInt(1,tenant);statement.setObject(2,amount,java.sql.Types.NUMERIC);
             try(var rows=statement.executeQuery()) {
                 if(!rows.next())throw new IllegalStateException("Expected one settings row");
                 var result=rows.getBigDecimal(1);

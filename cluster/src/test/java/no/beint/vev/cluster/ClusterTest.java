@@ -4,10 +4,14 @@ import java.net.InetAddress;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.DriverManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ClusterTest {
+    @TempDir Path tempDir;
+
     @Test void startsAcceptsConnectionsAndRemovesItself() throws Exception {
         Path directory;
         int port;
@@ -24,6 +28,27 @@ class ClusterTest {
             assertTrue(Files.isDirectory(directory));
         }
         assertFalse(Files.exists(directory), "closing a cluster must remove its data directory");
+    }
+
+    @Test void cachesCleanTemplateAndClonesItForFastReuse() throws Exception {
+        Path template = tempDir.resolve("schemas/vev_cached");
+        Cluster initial = new Cluster("");
+        String initialPassword = initial.password();
+        initial.closeAndCacheTemplate(template);
+        assertTrue(Files.isDirectory(template.resolve("data")));
+        assertEquals(initialPassword, Files.readString(template.resolve("password")).strip());
+
+        Path clonedDir;
+        try (Cluster cloned = Cluster.fromTemplate("", template)) {
+            assertEquals(initialPassword, cloned.password());
+            try (Socket socket = new Socket(InetAddress.getLoopbackAddress(), cloned.port())) {
+                assertTrue(socket.isConnected());
+            }
+            clonedDir = dataDirectory(cloned);
+            assertNotEquals(template, clonedDir);
+        }
+        assertFalse(Files.exists(clonedDir), "closing a cloned cluster must delete its temporary working directory");
+        assertTrue(Files.isDirectory(template.resolve("data")), "closing a clone must preserve the cached template");
     }
 
     @Test void closeIsIdempotent() throws Exception {

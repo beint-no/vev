@@ -91,16 +91,17 @@ val page = db.read(42) { Queries.customers(after = 0, limit = 100) }
 bind `:tenantId` from its scoped value; it is absent from their parameter lists.
 Tenant IDs must be positive.
 
-At build time Vev checks relation scans in PostgreSQL's generic plan. Each scan of a
-table with a `tenant_id` column must show a restriction to the bound tenant, directly or
-through a tenant-key equality with another checked scan. Vev names the table when it cannot
-establish that restriction. Compare with `:tenantId` directly where a materialized CTE
-or correlated subquery hides the relationship from the planner.
+At build time Vev checks relation scans and mutations in PostgreSQL's generic plan. Each scan
+of a table with a `tenant_id` column must show a restriction to the bound tenant, directly or
+through a tenant-key equality with another checked scan. For mutations on tables with `tenant_id`,
+`INSERT` must assign `:tenantId` (or a proven scan's `tenant_id`), `ON CONFLICT DO UPDATE` must
+arbitrate on a tenant-keyed index or filter `tenant_id = :tenantId`, and `UPDATE`/`MERGE` must
+not reassign `tenant_id`. Compare with `:tenantId` directly where a materialized CTE or
+correlated subquery hides the relationship from the planner.
 
-For writes, review both the tenant value assigned to a row and the key that selects an
-existing row in `ON CONFLICT DO UPDATE`. Those decisions sit outside the scan check.
-Opaque functions, triggers and tables with other tenancy conventions need application
-review. Composite foreign keys enforce tenant consistency between stored references.
+Opaque functions, triggers and tables without a `tenant_id` column remain outside the plan check
+and need application review. Composite foreign keys enforce tenant consistency between stored
+references.
 
 Global queries declare `-- vev.scope: global`. Run them in `readGlobal` / `writeGlobal`,
 or within a tenant transaction. Tenant queries require a tenant transaction.
@@ -117,6 +118,7 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 | `-- vev.name: find :many` | Bounded list; maximum 1,000 rows by default |
 | `-- vev.name: find :one` | Exactly one row |
 | `-- vev.name: find :optional` | Zero or one row |
+| `-- vev.name: export :stream` | Stream rows via server-side cursor (`Consumer<Row>`) |
 | `-- vev.name: change :exec` | Mutation affected-row count as `Long` |
 | `-- vev.name: lock :void` | Execute a void-returning function |
 | `-- vev.scope: global` | No implicit tenant bind |
@@ -148,21 +150,27 @@ automatically. Nested scopes are rejected.
 
 Transactions stay on their owning thread and within the callback. Virtual threads
 work. Suspending a coroutine or sharing the connection with child threads is unsupported.
-Default isolation comes from the connection pool; the constructor accepts an explicit
-JDBC isolation override. Configure the pool with auto-commit enabled for owned scopes.
+Default isolation comes from the connection pool; the constructor accepts explicit
+JDBC isolation and per-statement query timeout overrides. Both auto-commit-enabled and
+auto-commit-disabled pools (such as HikariCP with `auto-commit: false`) are supported.
+Read-only scopes use transaction-scoped `SET TRANSACTION READ ONLY` rather than mutating
+session state on pooled connections.
 
-`Session.borrowTenant(connection, tenantId) { ... }` participates in an existing transaction;
-its connection must have auto-commit disabled. The caller owns commit, rollback and
-close, and must propagate failures to its transaction manager. Flush pending ORM writes
-before borrowing a connection while migrating an application incrementally. The caller also
-enforces framework read-only policies; a framework hint need not make PostgreSQL read-only.
+`Session.borrowTenant(connection, tenantId, queryTimeoutSeconds) { ... }` participates in an
+existing transaction; its connection must have auto-commit disabled. The caller owns commit,
+rollback and close, and must propagate failures to its transaction manager. Flush pending ORM
+writes before borrowing a connection while migrating an application incrementally. The caller
+also enforces framework read-only policies; a framework hint need not make PostgreSQL read-only.
 
 ## Build behavior
 
-Generation uses a fresh build-local PostgreSQL cluster, shared across modules with
-the same migrations. Unchanged generation is skipped. SQL edits rewrite only changed
-implementations; schema changes revalidate queries. Identical generated files retain
-their timestamps. The Kotlin facade remains stable when signatures do.
+Generation uses a disposable build-local PostgreSQL cluster, shared across modules with
+the same migrations. Cleanly stopped migrated data directories are cached per schema digest
+(under `~/.gradle/vev/schemas` by default, configurable via `schemaCacheDir`) and cloned with
+copy-on-write on subsequent builds, skipping `initdb` and Flyway replay on SQL-only edits.
+Unchanged generation is skipped. SQL edits rewrite only changed implementations; schema changes
+revalidate queries. Identical generated files retain their timestamps. The Kotlin facade remains
+stable when signatures do.
 
 Application statements are described, not executed. Runtime constraints, permissions,
 concurrency and business rules remain database/execution concerns. Match deployment's

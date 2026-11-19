@@ -283,4 +283,69 @@ class QueryTest {
         assertEquals("read committed",Vev(configured,Connection.TRANSACTION_READ_COMMITTED).read(7) { level() })
         assertEquals("serializable",Vev(configured).read(7) { level() })
     }
+
+    @Test fun `stream queries deliver rows beyond the list ceiling and poison on consumer errors`() {
+        var count = 0
+        var sum = 0L
+        vev.readGlobal {
+            Queries.streamSeries(2500) { row ->
+                count++
+                sum += row.n
+            }
+        }
+        assertEquals(2500, count)
+        assertEquals(2500L * 2501L / 2L, sum)
+
+        assertThrows(IllegalStateException::class.java) {
+            vev.write(7) {
+                Queries.createCustomer("rolled back on stream failure")
+                try {
+                    Queries.streamSeries(10) { row ->
+                        if (row.n == 3) throw IllegalArgumentException("stop streaming")
+                    }
+                } catch (_: IllegalArgumentException) { }
+            }
+        }
+        assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
+    }
+
+    @Test fun `query timeout cancels slow statements and rolls back writes`() {
+        val timed = Vev(source, Vev.DEFAULT_ISOLATION, 1)
+        val failure = assertThrows(SQLException::class.java) {
+            timed.write(7) {
+                Queries.createCustomer("rolled back on timeout")
+                Queries.sleepSeconds(5.0)
+            }
+        }
+        assertEquals("57014", failure.sqlState)
+        assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
+    }
+
+    @Test fun `bounded reads keep fetchSize at zero so PostgreSQL parallel workers can run`() {
+        var observedFetchSizes = mutableListOf<Int>()
+        postgres.connect().use { actual ->
+            actual.autoCommit = false
+            val observed = java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(Connection::class.java)) { _, method, args ->
+                val result = try { method.invoke(actual, *(args ?: emptyArray())) }
+                catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
+                if (method.name == "prepareStatement" && result is java.sql.PreparedStatement) {
+                    java.lang.reflect.Proxy.newProxyInstance(javaClass.classLoader, arrayOf(java.sql.PreparedStatement::class.java)) { _, sm, sargs ->
+                        if (sm.name == "setFetchSize") observedFetchSizes.add(sargs[0] as Int)
+                        try { sm.invoke(result, *(sargs ?: emptyArray())) }
+                        catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
+                    }
+                } else result
+            } as Connection
+            Session.borrow(observed, 7) {
+                Queries.boundedSeries(10)
+                Queries.customers(null)
+            }
+            assertTrue(observedFetchSizes.isEmpty(), "Bounded reads must leave fetchSize at 0: $observedFetchSizes")
+            Session.borrow(observed, 7) {
+                Queries.streamSeries(10) { }
+            }
+            assertEquals(listOf(Session.DEFAULT_STREAM_FETCH_SIZE), observedFetchSizes)
+            actual.rollback()
+        }
+    }
 }

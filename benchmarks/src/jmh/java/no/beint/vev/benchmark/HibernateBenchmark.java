@@ -56,7 +56,7 @@ public class HibernateBenchmark {
                 var rows = session.createNativeQuery(SQL, CustomersRow.class)
                         .setParameter("tenantId", 7, Integer.class)
                         .setParameter("name", null, String.class)
-                        .setFetchSize(5).setReadOnly(true).getResultList();
+                        .setReadOnly(true).getResultList();
                 transaction.commit();
                 return List.copyOf(rows);
             } catch (RuntimeException | Error failure) {
