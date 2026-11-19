@@ -8,7 +8,8 @@ record PgType(String postgres, String kotlin, int jdbc, PgType element) {
     private static final Set<String> TEXTUAL = Set.of("text", "varchar", "bpchar", "name", "citext");
     /** Element types whose JDBC array decoding is verified; others must be cast in SQL. */
     private static final Set<String> ARRAY_ELEMENTS =
-            Set.of("bool", "int2", "int4", "int8", "float4", "float8", "numeric", "text", "varchar", "bpchar", "uuid");
+            Set.of("bool", "int2", "int4", "int8", "float4", "float8", "numeric", "text", "varchar", "bpchar", "uuid",
+                    "date", "time", "timestamp", "timestamptz", "json", "jsonb");
 
     static PgType of(Path source, String postgres) {
         postgres = switch (postgres) { case "serial" -> "int4"; case "bigserial" -> "int8"; case "smallserial" -> "int2"; default -> postgres; };
@@ -33,7 +34,7 @@ record PgType(String postgres, String kotlin, int jdbc, PgType element) {
             case "date" -> scalar(postgres, "java.time.LocalDate", java.sql.Types.DATE);
             case "time" -> scalar(postgres, "java.time.LocalTime", java.sql.Types.TIME);
             case "timestamp" -> scalar(postgres, "java.time.LocalDateTime", java.sql.Types.TIMESTAMP);
-            case "timestamptz" -> scalar(postgres, "java.time.OffsetDateTime", java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
+            case "timestamptz" -> scalar(postgres, "java.time.Instant", java.sql.Types.TIMESTAMP_WITH_TIMEZONE);
             case "bytea" -> scalar(postgres, "ByteArray", java.sql.Types.BINARY);
             // A void result carries no value; only a :void query may select one.
             case "void" -> scalar(postgres, "Unit", java.sql.Types.OTHER);

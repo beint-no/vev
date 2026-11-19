@@ -4,6 +4,9 @@ import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -13,7 +16,7 @@ public final class Bindings implements AutoCloseable {
     private final PreparedStatement statement;
     private List<Array> arrays;
 
-    Bindings(Connection connection, PreparedStatement statement) {
+    public Bindings(Connection connection, PreparedStatement statement) {
         this.connection = connection;
         this.statement = statement;
     }
@@ -22,7 +25,18 @@ public final class Bindings implements AutoCloseable {
 
     public void array(int position, String elementType, Object[] values) throws SQLException {
         if (values == null) { statement.setNull(position, java.sql.Types.ARRAY); return; }
-        Array array = connection.createArrayOf(elementType, values);
+        Object[] adapted = values;
+        if (elementType.equals("timestamptz")) {
+            OffsetDateTime[] converted = new OffsetDateTime[values.length];
+            for (int i = 0; i < values.length; i++) {
+                Object v = values[i];
+                if (v instanceof Instant instant) converted[i] = instant.atOffset(ZoneOffset.UTC);
+                else if (v instanceof OffsetDateTime odt) converted[i] = odt;
+                else if (v != null) throw new java.sql.SQLDataException("Expected Instant for timestamptz[] element");
+            }
+            adapted = converted;
+        }
+        Array array = connection.createArrayOf(elementType, adapted);
         if (arrays == null) arrays = new ArrayList<>();
         arrays.add(array);
         statement.setArray(position, array);

@@ -17,21 +17,28 @@ two 500ms warmups and three 500ms measurements. The default uses three forks, th
 2-second warmups and five 2-second measurements. `-PbenchmarkInclude=HibernateBenchmark`
 selects a focused investigation; the CI gate requires the complete matrix.
 
-## Vev 2.5.0 observations
+## Vev 3.0.0 observations
 
-Local macOS arm64, JDK 27.0.1, Kotlin 2.5.0-Beta2, PostgreSQL 18.6 and pgjdbc 42.7.14.
-The table uses the quick configuration; errors are JMH confidence-interval half-widths.
+Local macOS arm64, JDK 27.0.1, Kotlin 2.5.0-Beta2, PostgreSQL 18.7 and pgjdbc 42.7.14.
+The table uses the quick configuration against optimal `fetchSize = 0` baselines; errors are JMH confidence-interval half-widths.
 
 | Five-row native DTO projection | Mean µs/op | Allocation B/op |
 |---|---:|---:|
-| Vev | 53.95 ± 0.44 | 2,314 |
-| Hibernate 7.4.14 | 56.14 ± 0.83 | 7,822 |
+| Vev | 38.20 ± 0.41 | 1,874 |
+| Handwritten JDBC | 37.84 ± 0.35 | 1,858 |
+| Hibernate 7.4.14 | 41.49 ± 0.44 | 7,495 |
 
-For 1,000 varied queries, schema setup took 1.502s, SQL description/generation
-0.199s and Kotlin compilation 4.025s. The migrated database
-is shared across the 10/100/1,000-query samples; the first Kotlin sample initializes the
-compiler and later samples use its warmed JVM. Gradle separately verifies skipped no-op
-generation, configuration-cache reuse and unchanged output timestamps.
+| Paged ledger read (ReAI schema) | Vev µs/op (B/op) | Handwritten JDBC µs/op (B/op) |
+|---|---:|---:|
+| 1 row | 45.90 ± 1.17 (2,293 B) | 45.81 ± 0.67 (2,293 B) |
+| 100 rows | 111.28 ± 1.93 (63,022 B) | 116.06 ± 1.95 (64,614 B) |
+| 600 rows | 414.67 ± 3.39 (378,077 B) | 424.77 ± 9.31 (399,918 B) |
+
+For 1,000 varied queries, cold schema setup took 1.425s, SQL description/generation
+0.349s and Kotlin compilation 5.973s. On subsequent Gradle builds with unchanged migrations,
+the schema-digest template cache clones the migrated data directory via copy-on-write and skips
+both `initdb` and Flyway replay. Gradle separately verifies skipped no-op generation,
+configuration-cache reuse, schema-template reuse, and unchanged output timestamps.
 
 The Hibernate comparison maps the same native SQL into the same Kotlin result class,
 with identical values, ordering, fetch size and transaction boundaries. Pool acquisition
@@ -40,7 +47,7 @@ The paired JDBC workloads cover five-row projections, 600-row ledger reads, 1/10
 pages, INSERT RETURNING and 1/32/512-row bulk writes. The single-row pair compares the
 current direct decoder with the former list-based path for zero/one result.
 
-The runtime JAR is about 15 KB and depends only on `java.base` and `java.sql`. Hibernate
+The runtime JAR is about 18 KB and depends only on `java.base` and `java.sql`. Hibernate
 7.4.14's core JAR is about 15.35 MB before transitive dependencies. Driver, pool, generated
 classes and Kotlin runtime are additional costs. Keeping Hibernate in an application also
 keeps its entity metadata and startup work. Library timings do not establish a whole-app gain.

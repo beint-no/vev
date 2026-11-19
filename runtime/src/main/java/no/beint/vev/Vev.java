@@ -2,6 +2,7 @@ package no.beint.vev;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.sql.Statement;
 import javax.sql.DataSource;
 
 /** Explicit JDBC transactions; the connection pool owns the default isolation configuration. */
@@ -9,10 +10,14 @@ public final class Vev {
     public static final int DEFAULT_ISOLATION = -1;
     private final DataSource source;
     private final int isolation;
+    private final int queryTimeoutSeconds;
+    private volatile boolean verified;
 
-    public Vev(DataSource source) { this(source, DEFAULT_ISOLATION); }
+    public Vev(DataSource source) { this(source, DEFAULT_ISOLATION, 0); }
 
-    public Vev(DataSource source, int isolation) {
+    public Vev(DataSource source, int isolation) { this(source, isolation, 0); }
+
+    public Vev(DataSource source, int isolation, int queryTimeoutSeconds) {
         this.source = java.util.Objects.requireNonNull(source);
         if (isolation != DEFAULT_ISOLATION
                 && isolation != Connection.TRANSACTION_READ_COMMITTED
@@ -20,7 +25,11 @@ public final class Vev {
                 && isolation != Connection.TRANSACTION_SERIALIZABLE) {
             throw new IllegalArgumentException("Unsupported PostgreSQL transaction isolation");
         }
+        if (queryTimeoutSeconds < 0) {
+            throw new IllegalArgumentException("Query timeout must not be negative");
+        }
         this.isolation = isolation;
+        this.queryTimeoutSeconds = queryTimeoutSeconds;
     }
 
     public <R> R read(int tenantId, Session.Work<R> work) throws SQLException { return tenant(true, tenantId, work); }
@@ -38,20 +47,28 @@ public final class Vev {
         Connection connection = source.getConnection();
         Throwable failure = null;
         boolean committed = false;
-        boolean owned = false;
+        boolean started = false;
         try {
-            if (!connection.getAutoCommit()) throw new IllegalStateException("Vev requires a fresh connection");
-            owned = true;
+            if (!verified) {
+                Session.requirePostgres(connection);
+                verified = true;
+            }
             if (isolation != DEFAULT_ISOLATION) connection.setTransactionIsolation(isolation);
-            connection.setReadOnly(readOnly);
-            connection.setAutoCommit(false);
-            R result = Session.borrow(connection, tenantId, work);
+            if (connection.getAutoCommit()) connection.setAutoCommit(false);
+            started = true;
+            if (readOnly && !connection.isReadOnly()) {
+                // Transaction-scoped read-only avoids mutating pooled session state and extra reset round-trips.
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("SET TRANSACTION READ ONLY");
+                }
+            }
+            R result = Session.borrow(connection, tenantId, queryTimeoutSeconds, work);
             connection.commit();
             committed = true;
             return result;
         } catch (SQLException | RuntimeException | Error exception) {
             failure = exception;
-            if (owned) {
+            if (started) {
                 try { connection.rollback(); } catch (SQLException rollback) { exception.addSuppressed(rollback); }
             }
             throw exception;

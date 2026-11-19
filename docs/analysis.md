@@ -52,10 +52,13 @@ bind the scope's required integer identifier, and SQL states its tenant predicat
 The compiler uses `EXPLAIN (GENERIC_PLAN)` against the migrated build schema. It
 looks for a tenant-key equality on each visible scan of a table with `tenant_id` and
 follows equalities to other tenant-bound scans. This can catch an omitted join key
-inside an expanded view. A valid query can also be rejected when a materialized CTE
-hides the origin of a tenant key. Comparing directly with `:tenantId` makes the
-restriction visible. The same check inspects relation scans in writes. The SQL author
-owns assigned tenant values, conflict keys, opaque function behavior and authorization.
+inside an expanded view. For mutations on tables with `tenant_id`, it also verifies
+that `INSERT` assigns `:tenantId` (or a proven scan's `tenant_id`), that `ON CONFLICT DO UPDATE`
+arbitrates on a tenant-keyed index or filters `tenant_id = :tenantId`, and that `UPDATE`/`MERGE`
+does not reassign `tenant_id`. A valid query can also be rejected when a materialized CTE
+hides the origin of a tenant key; comparing directly with `:tenantId` makes the restriction
+visible. Opaque function bodies, triggers, tables without `tenant_id` and authorization remain
+outside the plan check.
 
 Owned scopes commit or roll back. Borrowed scopes preserve a caller's transaction boundary.
 There is no persistence context, cascade engine, SQL DSL or framework adapter. During

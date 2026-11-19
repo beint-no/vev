@@ -74,8 +74,8 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             if (text.startsWith("name:")) {
                 if (name != null) throw error(path, "Duplicate name directive");
                 String[] parts = text.substring(5).strip().split("\\s+");
-                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":exec", ":void").contains(parts[1])) {
-                    throw error(path, "Use -- name: queryName :many|:one|:optional|:exec|:void");
+                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":stream", ":exec", ":void").contains(parts[1])) {
+                    throw error(path, "Use -- name: queryName :many|:one|:optional|:stream|:exec|:void");
                 }
                 name = identifier(path, parts[0]);
                 cardinality = parts[1].substring(1);
@@ -163,11 +163,13 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                 throw error(path, "Use named :parameters, not PostgreSQL positional parameters");
             }
             if (source.startsWith("::", i)) { sql.append("::"); positional.append("::"); tokens.add("::"); i += 2; continue; }
-            if (c == ':' && i + 1 < source.length() && Character.isJavaIdentifierStart(source.charAt(i + 1))) {
+            if (c == ':' && i + 1 < source.length() && Character.isJavaIdentifierStart(source.charAt(i + 1))
+                    && (i == 0 || !Character.isJavaIdentifierPart(source.charAt(i - 1)))) {
                 int end = i + 2;
                 while (end < source.length() && Character.isJavaIdentifierPart(source.charAt(end))) end++;
                 String parameter = identifier(path, source.substring(i + 1, end));
                 if (parameter.equals("session")) throw error(path, "Parameter name session is reserved");
+                if (cardinality.equals("stream") && parameter.equals("onRow")) throw error(path, "Parameter name onRow is reserved for :stream queries");
                 parameters.add(parameter);
                 sql.append('?'); positional.append('$').append(parameters.size()); tokens.add("<parameter>"); i = end; continue;
             }
@@ -250,7 +252,13 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
     boolean directNullability() {
         if (!tokens.getFirst().equals("SELECT")) return false;
         if (tokens.stream().filter("SELECT"::equals).count() != 1) return false;
-        return tokens.stream().noneMatch(Set.of("WITH", "LEFT", "RIGHT", "FULL", "GROUP", "UNION", "EXCEPT", "INTERSECT", "VALUES", "TABLE")::contains);
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (Set.of("WITH", "GROUP", "UNION", "EXCEPT", "INTERSECT", "VALUES", "TABLE").contains(token)) return false;
+            if (Set.of("LEFT", "RIGHT", "FULL").contains(token) && i + 1 < tokens.size()
+                    && Set.of("OUTER", "JOIN").contains(tokens.get(i + 1))) return false;
+        }
+        return true;
     }
 
     private static final Set<String> SELECT_END = Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING",

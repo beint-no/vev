@@ -63,13 +63,13 @@ class CompilerTest {
                 +(nullable?"-- vev.nullable: "+names+"\n":"")
                 +"SELECT sum(v) AS total FROM (VALUES "+values+") q(v)"+(tenant?" WHERE :tenantId::int > 0":"");
     }
-    @Test void bindingMethodHandleLimitsFailDuringGeneration() throws Exception {
-        assertTrue(compile(inputProjection(252,true,true)).contains("fun `inputs`"));
-        assertTrue(compile(inputProjection(253,true,false)).contains("fun `inputs`"));
-        assertTrue(compile(inputProjection(126,false,true)).contains("fun `inputs`"));
-        for (String sql : java.util.List.of(inputProjection(253,true,true),inputProjection(254,true,false),inputProjection(127,false,true))) {
+    @Test void methodParameterLimitsFailDuringGeneration() throws Exception {
+        assertTrue(compile(inputProjection(254,true,true)).contains("fun `inputs`"));
+        assertTrue(compile(inputProjection(254,true,false)).contains("fun `inputs`"));
+        assertTrue(compile(inputProjection(127,false,true)).contains("fun `inputs`"));
+        for (String sql : java.util.List.of(inputProjection(255,true,true),inputProjection(255,true,false),inputProjection(128,false,true))) {
             var failure=assertThrows(IllegalArgumentException.class, () -> compile(sql));
-            assertTrue(failure.getMessage().contains("Query bindings require"));
+            assertTrue(failure.getMessage().contains("Query parameters require"));
             assertTrue(failure.getMessage().contains("PostgreSQL array"));
         }
     }
@@ -207,8 +207,38 @@ class CompilerTest {
     @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
         String result = compile("-- name: lock :void\n-- scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
         assertTrue(result.contains("fun `lock`(`key`: String): Unit ="), result);
-        assertTrue(result.contains("_vevSession.call("), result);
+        assertTrue(result.contains("_vevStmt.execute()"), result);
         assertFalse(result.contains("LockRow"), result);
+    }
+
+    @Test void streamQueriesGenerateConsumerCallbacksAndRejectRowLimits() throws Exception {
+        String result = compile("-- vev.name: exportItems :stream\n-- vev.scope: global\nSELECT id, name FROM item");
+        assertTrue(result.contains("fun `exportItems`(onRow: java.util.function.Consumer<`ExportItemsRow`>): Unit"), result);
+        assertTrue(result.contains("_vevStmt.setFetchSize(no.beint.vev.Session.DEFAULT_STREAM_FETCH_SIZE)"), result);
+        assertTrue(result.contains("onRow.accept(readRow(_vevResult))"), result);
+        assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: bad :stream\n-- vev.scope: global\n-- vev.rows: 100\nSELECT id FROM item"));
+        assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: bad :stream\n-- vev.scope: global\nSELECT id FROM item WHERE name = :onRow"));
+    }
+
+    @Test void stringFunctionsNamedLeftOrRightPreserveDirectNullability() throws Exception {
+        String result = compile("-- vev.name: prefixes :many\n-- vev.scope: global\nSELECT id, left(name, 3) AS prefix, right(name, 2) AS suffix FROM item");
+        assertTrue(result.contains("val `id`: Int,"), result);
+        assertTrue(result.contains("val `prefix`: String?,"), result);
+        assertTrue(result.contains("val `suffix`: String?,"), result);
+    }
+
+    @Test void arraySliceColonIsNotTreatedAsABindParameter() throws Exception {
+        String result = compile("-- vev.name: slice :one\n-- vev.scope: global\nSELECT (ARRAY[10,20,30])[1:id] AS part FROM item");
+        assertTrue(result.contains("fun `slice`(): `SliceRow`"), result);
+    }
+
+    @Test void timestamptzMapsToInstantAndSupportsTemporalArrays() throws Exception {
+        String result = compile("-- vev.name: times :one\n-- vev.scope: global\nSELECT :at::timestamptz AS at, :dates::date[] AS dates, :instants::timestamptz[] AS instants");
+        assertTrue(result.contains("`at`: java.time.Instant"), result);
+        assertTrue(result.contains("`dates`: List<java.time.LocalDate?>"), result);
+        assertTrue(result.contains("`instants`: List<java.time.Instant?>"), result);
+        assertTrue(result.contains(".atOffset(java.time.ZoneOffset.UTC)"), result);
+        assertTrue(result.contains("no.beint.vev.Values.instantOrNull(_vevResult, 1)"), result);
     }
 
     @Test void voidResultsMustBeDeclaredVoidAndVoidQueriesMustBeValueless() {

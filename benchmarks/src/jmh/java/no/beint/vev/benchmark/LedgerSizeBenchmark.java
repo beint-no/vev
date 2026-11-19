@@ -26,7 +26,7 @@ public class LedgerSizeBenchmark {
     @Benchmark public List<PagedLedgerRow> jdbcPage() throws Exception {
         var result=new ArrayList<PagedLedgerRow>();
         try(var statement=fixture.connection.prepareStatement(sql)) {
-            statement.setFetchSize(256);statement.setObject(1,1,java.sql.Types.INTEGER);statement.setObject(2,rows,java.sql.Types.INTEGER);
+            statement.setInt(1,1);statement.setInt(2,rows);
             try(var r=statement.executeQuery()) {
                 while(r.next()) {
                     if(result.size()==1000) throw new IllegalStateException("Row bound");

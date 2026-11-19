@@ -6,6 +6,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -17,6 +19,7 @@ class SingleRowTest {
     static final class Fixture {
         int remaining;
         int fetchSize;
+        int queryTimeout;
         int mapped;
         boolean resultClosed;
         boolean statementClosed;
@@ -28,6 +31,7 @@ class SingleRowTest {
         });
         final PreparedStatement statement = proxy(PreparedStatement.class, (p, m, a) -> switch (m.getName()) {
             case "setFetchSize" -> { fetchSize = (int) a[0]; yield null; }
+            case "setQueryTimeout" -> { queryTimeout = (int) a[0]; yield null; }
             case "executeQuery" -> result;
             case "close" -> { statementClosed = true; yield null; }
             default -> throw new UnsupportedOperationException(m.getName());
@@ -36,33 +40,59 @@ class SingleRowTest {
             if (m.getName().equals("prepareStatement")) return statement;
             throw new UnsupportedOperationException(m.getName());
         });
-        final Session session = new Session(connection, 7);
+        final Session session;
         final Session.Row<Integer> row = r -> {
             mapped++;
             if (failRead) throw new SQLException("decoder failed", "22000");
             return 42;
         };
-        Fixture(int rows) { remaining = rows; }
+        Fixture(int rows) { this(rows, 0); }
+        Fixture(int rows, int timeoutSeconds) { remaining = rows; session = new Session(connection, 7, timeoutSeconds); }
         void assertClosed() { assertTrue(resultClosed); assertTrue(statementClosed); }
     }
 
-    @Test void emptyOptionalDoesNotMapAndClosesResources() throws Exception {
+    @Test void emptyOptionalDoesNotMapAndKeepsDefaultFetchSize() throws Exception {
         var f = new Fixture(0);
         assertNull(f.session.optional("query", b -> {}, f.row));
         assertEquals(0, f.mapped);
-        assertEquals(2, f.fetchSize);
+        assertEquals(0, f.fetchSize);
         f.assertClosed();
         assertDoesNotThrow(f.session::check);
     }
 
-    @Test void oneMapsExactlyOnceAndClosesResources() throws Exception {
+    @Test void oneMapsExactlyOnceWithoutCursorSuspension() throws Exception {
         for (boolean required : new boolean[] {true, false}) {
             var f = new Fixture(1);
             assertEquals(42, required ? f.session.one("query", b -> {}, f.row) : f.session.optional("query", b -> {}, f.row));
             assertEquals(1, f.mapped);
-            assertEquals(2, f.fetchSize);
+            assertEquals(0, f.fetchSize);
             f.assertClosed();
         }
+    }
+
+    @Test void listLeavesFetchSizeAtZeroSoParallelQueriesRemainEnabled() throws Exception {
+        var f = new Fixture(3);
+        assertEquals(List.of(42, 42, 42), f.session.list("query", 10, b -> {}, f.row));
+        assertEquals(0, f.fetchSize);
+        f.assertClosed();
+    }
+
+    @Test void streamUsesExplicitCursorFetchSizeAndPoisonsOnConsumerFailure() throws Exception {
+        var f = new Fixture(3, 15);
+        List<Integer> seen = new ArrayList<>();
+        f.session.stream("query", Session.DEFAULT_STREAM_FETCH_SIZE, b -> {}, f.row, seen::add);
+        assertEquals(List.of(42, 42, 42), seen);
+        assertEquals(Session.DEFAULT_STREAM_FETCH_SIZE, f.fetchSize);
+        assertEquals(15, f.queryTimeout);
+        f.assertClosed();
+
+        var failing = new Fixture(3);
+        assertThrows(IllegalStateException.class, () -> failing.session.stream("query", 64, b -> {}, failing.row, v -> {
+            throw new IllegalStateException("consumer aborted");
+        }));
+        assertEquals(1, failing.mapped);
+        failing.assertClosed();
+        assertThrows(IllegalStateException.class, failing.session::check);
     }
 
     @Test void cardinalityFailuresPoisonScopeAndNeverMapAnExtraRow() {

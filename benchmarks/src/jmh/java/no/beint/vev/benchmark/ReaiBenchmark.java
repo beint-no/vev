@@ -37,7 +37,7 @@ public class ReaiBenchmark {
     @Benchmark public List<LedgerRow> jdbcLedger() throws Exception {
         var rows=new ArrayList<LedgerRow>();
         try(var statement=connection.prepareStatement(ledger)) {
-            statement.setFetchSize(256);statement.setObject(1,1,java.sql.Types.INTEGER);
+            statement.setInt(1,1);
             try(var result=statement.executeQuery()) {
                 while(result.next()) {
                     if(rows.size()==1000) throw new IllegalStateException("Row bound");

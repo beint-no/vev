@@ -23,10 +23,16 @@ class GeneratedTypesTest {
         true, (short) -32768, Integer.MIN_VALUE, Long.MAX_VALUE, 1.25f, -9.125d, new BigDecimal("12345678901234567890.123456789"),
         "æøå 日本語 😀 ' : ? \\ $", "varchar", "x", "name", "MiXeD@EXAMPLE.INVALID", "<root>æøå</root>", "10.2.3.4", UUID_VALUE,
         LocalDate.of(2000,2,29), LocalTime.of(23,59,59,123456000), LocalDateTime.of(2026,11,17,12,30,45,123456000),
-        OffsetDateTime.of(2026,11,17,12,30,45,123456000,ZoneOffset.UTC), new byte[]{0,-1,42}, "{\"x\":1}", "{\"x\": 1}",
+        Instant.parse("2026-11-17T12:30:45.123456Z"), new byte[]{0,-1,42}, "{\"x\":1}", "{\"x\": 1}",
         Arrays.asList(true,null,false), Arrays.asList((short)1,null,(short)-2), Arrays.asList(1,null,-2), Arrays.asList(Long.MAX_VALUE,null,0L),
         Arrays.asList(1.5f,null,-2.5f), Arrays.asList(1.5d,null,-2.5d), Arrays.asList(BigDecimal.ONE,null,BigDecimal.TEN),
-        Arrays.asList("æøå",null,""), Arrays.asList("x",null,"y"), Arrays.asList("x",null,"y"), Arrays.asList(UUID_VALUE,null,UUID_VALUE)
+        Arrays.asList("æøå",null,""), Arrays.asList("x",null,"y"), Arrays.asList("x",null,"y"), Arrays.asList(UUID_VALUE,null,UUID_VALUE),
+        Arrays.asList(LocalDate.of(2000,2,29),null,LocalDate.of(2026,11,19)),
+        Arrays.asList(LocalTime.of(23,59,59,123456000),null,LocalTime.MIDNIGHT),
+        Arrays.asList(LocalDateTime.of(2026,11,17,12,30,45,123456000),null,LocalDateTime.of(1970,1,1,0,0)),
+        Arrays.asList(Instant.parse("2026-11-17T12:30:45.123456Z"),null,Instant.EPOCH),
+        Arrays.asList("{\"a\":1}",null,"[1,2]"),
+        Arrays.asList("{\"a\": 1}",null,"[1, 2]")
     );
     @BeforeAll void start() throws Exception {
         postgres = new Postgres(""); postgres.migrate(Path.of("src/main/schema"));

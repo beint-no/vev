@@ -1,8 +1,8 @@
 package no.beint.vev.compiler;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 
 final class KotlinWriter {
     private KotlinWriter() {}
@@ -15,63 +15,185 @@ final class KotlinWriter {
 
     static String implementation(String packageName, String className, QueryCompiler.Query query) {
         StringBuilder out = header(packageName);
-        if (!query.columns().isEmpty() && !query.source().cardinality().equals("void")) {
-            out.append("internal data class ").append(id(rowName(query.source().name()))).append("(\n");
+        var source = query.source();
+        boolean hasRow = !query.columns().isEmpty() && !source.cardinality().equals("void");
+        if (hasRow) {
+            out.append("internal data class ").append(id(rowName(source.name()))).append("(\n");
             for (var column : query.columns()) out.append("    val ").append(id(camel(column.name()))).append(": ").append(column.kotlin()).append(",\n");
             out.append(")\n\n");
         }
         out.append("internal object ").append(id(className)).append(" {\n");
-        var source = query.source();
         String row = id(rowName(source.name()));
         String result = resultType(query);
         out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
-        boolean comma = false;
-        for (var parameter : query.parameters()) if (!parameter.name().equals(source.tenant())) {
-            if (comma) out.append(", ");
-            out.append(id(parameter.name())).append(": ").append(parameter.kotlin());
-            comma = true;
+        appendParameters(out, query, true);
+        out.append("): ").append(result).append(" {\n");
+        if (source.tenant() == null) {
+            out.append("        val _vevSession = no.beint.vev.Session.current()\n");
+        } else {
+            out.append("        val _vevSession = no.beint.vev.Session.tenant()\n");
+            out.append("        val _vevTenantId = _vevSession.tenantId()\n");
         }
-        out.append("): ").append(result).append(source.tenant() == null ? " {\n        val _vevSession = no.beint.vev.Session.current()\n        return _vevSession." : " {\n        val _vevSession = no.beint.vev.Session.tenant()\n        val _vevTenantId = _vevSession.tenantId()\n        return _vevSession.").append(switch (source.cardinality()) { case "many" -> "list"; case "exec" -> "execute"; case "void" -> "call"; default -> source.cardinality(); }).append("(\n            ").append(quote(source.sql())).append(",\n");
-        if (source.cardinality().equals("many")) out.append("            ").append(source.maxRows()).append(",\n");
-        out.append(source.parameters().isEmpty() ? "            { _ ->\n" : "            { _vevBindings ->\n");
+        boolean hasArrayParam = query.parameters().stream().anyMatch(p -> p.type().element() != null);
+        out.append("        try {\n");
+        out.append("            _vevSession.prepare(").append(quote(source.sql())).append(").use { _vevStmt ->\n");
+        String indent = hasArrayParam ? "                    " : "                ";
+        if (hasArrayParam) {
+            out.append("                no.beint.vev.Bindings(_vevSession.connection(), _vevStmt).use { _vevBindings ->\n");
+        }
         for (int i = 0; i < source.parameters().size(); i++) {
             String name = source.parameters().get(i);
             var parameter = query.parameters().stream().filter(p -> p.name().equals(name)).findFirst().orElseThrow();
             String value = name.equals(source.tenant()) ? "_vevTenantId" : id(name);
             if (parameter.domain() != null) value += parameter.nullable() ? "?.value" : ".value";
             if (parameter.enumType() != null) value += parameter.nullable() ? "?.name" : ".name";
+            if (parameter.type().postgres().equals("timestamptz")) {
+                value += parameter.nullable() ? "?.atOffset(java.time.ZoneOffset.UTC)" : ".atOffset(java.time.ZoneOffset.UTC)";
+            }
             if (parameter.type().element() != null) {
-                out.append("                _vevBindings.array(").append(i + 1).append(", ").append(quote(parameter.type().element().postgres())).append(", ").append(value).append(parameter.nullable() ? "?.toTypedArray()" : ".toTypedArray()").append(")\n");
+                out.append(indent).append("_vevBindings.array(").append(i + 1).append(", ")
+                        .append(quote(parameter.type().element().postgres())).append(", ")
+                        .append(value).append(parameter.nullable() ? "?.toTypedArray()" : ".toTypedArray()").append(")\n");
             } else if (!parameter.nullable() && primitive(parameter.type())) {
-                out.append("                _vevBindings.statement().set").append(parameter.type().kotlin())
+                out.append(indent).append("_vevStmt.set").append(parameter.type().kotlin())
                         .append("(").append(i + 1).append(", ").append(value).append(")\n");
+            } else if (!parameter.nullable() && parameter.type().jdbc() == java.sql.Types.VARCHAR) {
+                out.append(indent).append("_vevStmt.setString(").append(i + 1).append(", ").append(value).append(")\n");
+            } else if (!parameter.nullable() && parameter.type().postgres().equals("numeric")) {
+                out.append(indent).append("_vevStmt.setBigDecimal(").append(i + 1).append(", ").append(value).append(")\n");
+            } else if (!parameter.nullable() && parameter.type().postgres().equals("bytea")) {
+                out.append(indent).append("_vevStmt.setBytes(").append(i + 1).append(", ").append(value).append(")\n");
             } else {
-                out.append("                _vevBindings.statement().setObject(").append(i + 1).append(", ").append(value).append(", ").append(parameter.type().jdbc()).append(")\n");
+                out.append(indent).append("_vevStmt.setObject(").append(i + 1).append(", ")
+                        .append(value).append(", ").append(parameter.type().jdbc()).append(")\n");
             }
         }
-        out.append("            }");
-        if (!query.columns().isEmpty() && !source.cardinality().equals("void")) {
-            out.append(",\n            { _vevResult ->\n                ").append(row).append("(\n");
+        switch (source.cardinality()) {
+            case "exec" -> out.append(indent).append("return _vevStmt.executeLargeUpdate()\n");
+            case "void" -> out.append(indent).append("_vevStmt.execute()\n");
+            case "one" -> {
+                out.append(indent).append("_vevStmt.executeQuery().use { _vevResult ->\n");
+                out.append(indent).append("    if (!_vevResult.next()) throw IllegalStateException(\"Vev query expected one row, received none\")\n");
+                out.append(indent).append("    val _vevValue = readRow(_vevResult)\n");
+                out.append(indent).append("    if (_vevResult.next()) throw IllegalStateException(\"Vev query expected at most one row, received multiple\")\n");
+                out.append(indent).append("    return _vevValue\n");
+                out.append(indent).append("}\n");
+            }
+            case "optional" -> {
+                out.append(indent).append("_vevStmt.executeQuery().use { _vevResult ->\n");
+                out.append(indent).append("    if (!_vevResult.next()) return null\n");
+                out.append(indent).append("    val _vevValue = readRow(_vevResult)\n");
+                out.append(indent).append("    if (_vevResult.next()) throw IllegalStateException(\"Vev query expected at most one row, received multiple\")\n");
+                out.append(indent).append("    return _vevValue\n");
+                out.append(indent).append("}\n");
+            }
+            case "many" -> {
+                out.append(indent).append("_vevStmt.executeQuery().use { _vevResult ->\n");
+                out.append(indent).append("    if (!_vevResult.next()) return emptyList()\n");
+                out.append(indent).append("    val _vevFirst = readRow(_vevResult)\n");
+                out.append(indent).append("    if (!_vevResult.next()) return listOf(_vevFirst)\n");
+                if (source.maxRows() == 1) {
+                    out.append(indent).append("    throw IllegalStateException(\"Vev query exceeded its row bound: 1\")\n");
+                } else {
+                    out.append(indent).append("    val _vevRows = ArrayList<").append(row).append(">(").append(Math.min(source.maxRows(), 16)).append(")\n");
+                    out.append(indent).append("    _vevRows.add(_vevFirst)\n");
+                    out.append(indent).append("    do {\n");
+                    out.append(indent).append("        if (_vevRows.size == ").append(source.maxRows()).append(") throw IllegalStateException(\"Vev query exceeded its row bound: ").append(source.maxRows()).append("\")\n");
+                    out.append(indent).append("        _vevRows.add(readRow(_vevResult))\n");
+                    out.append(indent).append("    } while (_vevResult.next())\n");
+                    out.append(indent).append("    return java.util.Collections.unmodifiableList(_vevRows)\n");
+                }
+                out.append(indent).append("}\n");
+            }
+            case "stream" -> {
+                out.append(indent).append("_vevStmt.setFetchSize(no.beint.vev.Session.DEFAULT_STREAM_FETCH_SIZE)\n");
+                out.append(indent).append("_vevStmt.executeQuery().use { _vevResult ->\n");
+                out.append(indent).append("    while (_vevResult.next()) {\n");
+                out.append(indent).append("        onRow.accept(readRow(_vevResult))\n");
+                out.append(indent).append("    }\n");
+                out.append(indent).append("}\n");
+            }
+            default -> throw new IllegalStateException("Unexpected cardinality: " + source.cardinality());
+        }
+        if (hasArrayParam) {
+            out.append("                }\n");
+        }
+        out.append("            }\n");
+        out.append("        } catch (_vevFailure: Throwable) {\n");
+        out.append("            _vevSession.markFailed()\n");
+        out.append("            throw _vevFailure\n");
+        out.append("        }\n");
+        out.append("    }\n");
+        if (hasRow) {
+            out.append("\n    private fun readRow(_vevResult: java.sql.ResultSet): ").append(row).append(" = ").append(row).append("(\n");
             for (int i = 0; i < query.columns().size(); i++) {
                 var column = query.columns().get(i);
-                String read = read(column.type(), i + 1);
-                if (!column.nullable()) {
-                    String message = quote(source.name() + ": unexpected NULL for " + column.name());
-                    if (primitive(column.type())) {
-                        read = "_vevResult.get" + column.type().kotlin() + "(" + (i + 1)
-                                + ").also { require(!_vevResult.wasNull()) { " + message + " } }";
-                    } else {
-                        read = "requireNotNull(" + read + ") { " + message + " }";
-                    }
-                }
-                if (column.domain() != null) read = column.nullable() ? read + "?.let { " + id(column.domain()) + "(it) }" : id(column.domain()) + "(" + read + ")";
-                if (column.enumType() != null) read = column.nullable() ? read + "?.let { " + column.enumType() + ".valueOf(it) }" : column.enumType() + ".valueOf(" + read + ")";
-                out.append("                    ").append(read).append(",\n");
+                out.append("        ").append(readColumn(source.name(), column, i + 1)).append(",\n");
             }
-            out.append("                )\n            }");
+            out.append("    )\n");
         }
-        out.append("\n        )\n    }\n\n");
         return out.append("}\n").toString();
+    }
+
+    private static String readColumn(String queryName, QueryCompiler.Value column, int index) {
+        PgType type = column.type();
+        String read;
+        if (!column.nullable()) {
+            String message = quote(queryName + ": unexpected NULL for " + column.name());
+            if (primitive(type)) {
+                read = "no.beint.vev.Values." + primitivePrefix(type) + "Value(_vevResult, " + index + ", " + message + ")";
+            } else if (type.postgres().equals("timestamptz")) {
+                read = "no.beint.vev.Values.instantValue(_vevResult, " + index + ", " + message + ")";
+            } else {
+                read = "requireNotNull(" + readNullable(type, index) + ") { " + message + " }";
+            }
+        } else if (primitive(type)) {
+            read = "no.beint.vev.Values." + primitivePrefix(type) + "OrNull(_vevResult, " + index + ")";
+        } else {
+            read = readNullable(type, index);
+        }
+        if (column.domain() != null) read = column.nullable() ? read + "?.let { " + id(column.domain()) + "(it) }" : id(column.domain()) + "(" + read + ")";
+        if (column.enumType() != null) read = column.nullable() ? read + "?.let { " + column.enumType() + ".valueOf(it) }" : column.enumType() + ".valueOf(" + read + ")";
+        return read;
+    }
+
+    private static String readNullable(PgType type, int index) {
+        if (type.element() != null) return "no.beint.vev.Values.array(_vevResult, " + index + ", " + javaClass(type.element()) + ")";
+        if (type.postgres().equals("bytea")) return "_vevResult.getBytes(" + index + ")";
+        if (type.postgres().equals("numeric")) return "_vevResult.getBigDecimal(" + index + ")";
+        if (type.postgres().equals("timestamptz")) return "no.beint.vev.Values.instantOrNull(_vevResult, " + index + ")";
+        // pgjdbc has no typed conversion for json, xml, citext or inet, and getString is exact for every text-like type.
+        if (type.kotlin().equals("String")) return "_vevResult.getString(" + index + ")";
+        return "_vevResult.getObject(" + index + ", " + javaClass(type) + ")";
+    }
+
+    private static String primitivePrefix(PgType type) {
+        return switch (type.kotlin()) {
+            case "Boolean" -> "boolean";
+            case "Short" -> "short";
+            case "Int" -> "int";
+            case "Long" -> "long";
+            case "Float" -> "float";
+            case "Double" -> "double";
+            default -> throw new IllegalStateException("Not a primitive type: " + type.kotlin());
+        };
+    }
+
+    private static void appendParameters(StringBuilder out, QueryCompiler.Query query, boolean withTypes) {
+        var source = query.source();
+        boolean comma = false;
+        for (var parameter : query.parameters()) {
+            if (parameter.name().equals(source.tenant())) continue;
+            if (comma) out.append(", ");
+            out.append(id(parameter.name()));
+            if (withTypes) out.append(": ").append(parameter.kotlin());
+            comma = true;
+        }
+        if (source.cardinality().equals("stream")) {
+            if (comma) out.append(", ");
+            out.append("onRow");
+            if (withTypes) out.append(": java.util.function.Consumer<").append(id(rowName(source.name()))).append(">");
+        }
     }
 
     /** Stable signatures keep SQL-only edits out of the facade's Kotlin compilation unit. */
@@ -83,11 +205,10 @@ final class KotlinWriter {
         for (var query : queries) {
             var source = query.source();
             String result = resultType(query);
-            var parameters = query.parameters().stream().filter(p -> !p.name().equals(source.tenant())).toList();
             out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
-            out.append(parameters.stream().map(p -> id(p.name()) + ": " + p.kotlin()).collect(java.util.stream.Collectors.joining(", ")));
+            appendParameters(out, query, true);
             out.append("): ").append(result).append(" = ").append(id(implementationName(className, query))).append(".").append(id(source.name())).append("(");
-            out.append(parameters.stream().map(p -> id(p.name())).collect(java.util.stream.Collectors.joining(", ")));
+            appendParameters(out, query, false);
             out.append(")\n\n");
         }
         return out.append("}\n").toString();
@@ -99,21 +220,13 @@ final class KotlinWriter {
             case "many" -> "List<" + row + ">";
             case "optional" -> row + "?";
             case "one" -> row;
-            case "void" -> "Unit";
+            case "void", "stream" -> "Unit";
             default -> "Long";
         };
     }
 
     static String implementationName(String className, QueryCompiler.Query query) {
         return className + "_" + query.source().name() + "_Sql";
-    }
-
-    private static String read(PgType type, int index) {
-        if (type.element() != null) return "no.beint.vev.Values.array(_vevResult, " + index + ", " + javaClass(type.element()) + ")";
-        if (type.postgres().equals("bytea")) return "_vevResult.getBytes(" + index + ")";
-        // pgjdbc has no typed conversion for json, xml, citext or inet, and getString is exact for every text-like type.
-        if (type.kotlin().equals("String")) return "_vevResult.getString(" + index + ")";
-        return "_vevResult.getObject(" + index + ", " + javaClass(type) + ")";
     }
 
     private static boolean primitive(PgType type) {
