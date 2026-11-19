@@ -16,7 +16,7 @@ public final class Main {
     private Main() {}
 
     private static final Set<String> OPTIONS = Set.of("--queries", "--migrations", "--output", "--package", "--class",
-            "--visibility", "--postgres-bin", "--fixtures", "--mode", "--url", "--user", "--password", "--database");
+            "--postgres-bin", "--fixtures", "--mode", "--url", "--user", "--password", "--database");
 
     public static void main(String[] args) throws Exception {
         if (Runtime.version().feature() != 27) throw new IllegalStateException("Vev compiler requires JDK 27");
@@ -84,11 +84,7 @@ public final class Main {
         connection.setReadOnly(true);
         connection.setAutoCommit(false);
         QueryCompiler.compile(connection, Path.of(options.get("--queries")), Path.of(options.get("--output")),
-                options.get("--package"), options.get("--class"), switch (options.getOrDefault("--visibility", "public")) {
-                    case "public" -> false;
-                    case "internal" -> true;
-                    default -> throw new IllegalArgumentException("Use --visibility public or internal");
-                });
+                options.get("--package"), options.get("--class"));
         connection.rollback();
     }
 

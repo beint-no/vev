@@ -40,7 +40,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "2.9.2"
+    id("no.beint.vev") version "3.0.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -48,7 +48,6 @@ kotlin {
 }
 tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
     packageName.set("example.db")
-    internalQueries.set(true)
     migrations.set(rootProject.layout.projectDirectory.dir("db/src/main/resources/db/migration"))
 }
 ```
@@ -57,10 +56,10 @@ The plugin adds `no.beint.vev:runtime`. Supply pgjdbc and your connection pool.
 The default migration directory is `src/main/resources/db/migration`.
 
 Apply the plugin in each module that owns SQL. It reads that module’s `src/main/sql`
-and compiles the generated code into the same module. With `internalQueries.set(true)`,
-Kotlin callers in the module and its tests can use the query facade, result rows and
-generated value classes. Other Kotlin modules must call an API exposed by the owner.
-The default is public. Kotlin internal declarations remain accessible to Java on the JVM.
+and generates Kotlin `internal` query objects, result rows and value classes. Use them
+directly in the owning module and its tests. For operations shared with other Kotlin
+modules, expose a function and return type owned by the module. Java callers can
+access Kotlin `internal` declarations on the JVM.
 
 ## Queries
 
@@ -163,7 +162,7 @@ enforces framework read-only policies; a framework hint need not make PostgreSQL
 Generation uses a fresh build-local PostgreSQL cluster, shared across modules with
 the same migrations. Unchanged generation is skipped. SQL edits rewrite only changed
 implementations; schema changes revalidate queries. Identical generated files retain
-their timestamps. The public Kotlin facade remains stable when signatures do.
+their timestamps. The Kotlin facade remains stable when signatures do.
 
 Application statements are described, not executed. Runtime constraints, permissions,
 concurrency and business rules remain database/execution concerns. Match deployment's
