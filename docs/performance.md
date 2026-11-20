@@ -19,23 +19,23 @@ selects a focused investigation; the CI gate requires the complete matrix.
 
 ## Vev 3.0.0 observations
 
-Local macOS arm64, JDK 27.0.1, Kotlin 2.5.0-Beta2, PostgreSQL 18.7 and pgjdbc 42.7.14.
+Local macOS arm64, JDK 27.0.1, Kotlin 2.5.0-Beta2, PostgreSQL 19.0 and pgjdbc 42.7.14.
 The table uses the quick configuration against optimal `fetchSize = 0` baselines; errors are JMH confidence-interval half-widths.
 
 | Five-row native DTO projection | Mean µs/op | Allocation B/op |
 |---|---:|---:|
-| Vev | 38.20 ± 0.41 | 1,874 |
-| Handwritten JDBC | 37.84 ± 0.35 | 1,858 |
-| Hibernate 7.4.14 | 41.49 ± 0.44 | 7,495 |
+| Vev | 41.51 ± 3.10 | 1,876 |
+| Handwritten JDBC | 38.47 ± 1.19 | 1,858 |
+| Hibernate 7.4.14 | 44.59 ± 10.74 | 7,564 |
 
 | Paged ledger read (ReAI schema) | Vev µs/op (B/op) | Handwritten JDBC µs/op (B/op) |
 |---|---:|---:|
-| 1 row | 45.90 ± 1.17 (2,293 B) | 45.81 ± 0.67 (2,293 B) |
-| 100 rows | 111.28 ± 1.93 (63,022 B) | 116.06 ± 1.95 (64,614 B) |
-| 600 rows | 414.67 ± 3.39 (378,077 B) | 424.77 ± 9.31 (399,918 B) |
+| 1 row | 49.34 ± 4.70 (2,299 B) | 50.10 ± 7.77 (2,303 B) |
+| 100 rows | 104.03 ± 9.69 (63,010 B) | 105.92 ± 4.66 (64,600 B) |
+| 600 rows | 346.43 ± 12.25 (377,964 B) | 355.98 ± 12.88 (399,808 B) |
 
-For 1,000 varied queries, cold schema setup took 1.425s, SQL description/generation
-0.349s and Kotlin compilation 5.973s. On subsequent Gradle builds with unchanged migrations,
+For 1,000 varied queries, cold schema setup took 1.658s, SQL description/generation
+0.440s and Kotlin compilation 8.615s. On subsequent Gradle builds with unchanged migrations,
 the schema-digest template cache clones the migrated data directory via copy-on-write and skips
 both `initdb` and Flyway replay. Gradle separately verifies skipped no-op generation,
 configuration-cache reuse, schema-template reuse, and unchanged output timestamps.
@@ -85,7 +85,7 @@ The schema corpus contains 432 ReAI tables, views, functions, indexes, constrain
 triggers, with pinned provenance. Execution fixtures are synthetic: three tenants,
 900 vouchers and 1,800 postings. The suite checks supported column mappings, invalid SQL,
 nullability, arrays, tenant isolation, constraints, concurrent writes and failure cleanup.
-Write coverage includes PostgreSQL 18 old/new RETURNING values, triggers, generated columns,
+Write coverage includes old/new RETURNING values, triggers, generated columns,
 nullable upserts, concurrent first saves, optimistic conflicts, serialization/deadlock SQLSTATE,
 lock timeouts, read-only enforcement, savepoints and rollback after decoding failures.
 Generated binding lambdas execute at their JVM slot boundaries; oversized inputs fail generation.

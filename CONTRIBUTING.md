@@ -1,6 +1,6 @@
 # Contributing
 
-Use JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 18. Before release run
+Use JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 19. Before release run
 `CI=true ./gradlew clean check releaseBundle :benchmarks:jmhClasses` and the performance suite.
 Keep tests committed. Compiler changes need PostgreSQL rejection cases and independent
 consumer checks; runtime changes need database execution and failure tests.

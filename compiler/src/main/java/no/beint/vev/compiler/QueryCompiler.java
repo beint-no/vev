@@ -27,9 +27,9 @@ public final class QueryCompiler {
 
     public static void compile(Connection connection, Path queries, Path output, String packageName, String className)
             throws SQLException, IOException {
-        if (connection.getMetaData().getDatabaseMajorVersion() != 18
+        if (connection.getMetaData().getDatabaseMajorVersion() != 19
                 || !connection.getMetaData().getDatabaseProductName().equals("PostgreSQL")) {
-            throw new IllegalArgumentException("Vev compiler requires PostgreSQL 18");
+            throw new IllegalArgumentException("Vev compiler requires PostgreSQL 19");
         }
         for (String part : packageName.split("\\.", -1)) SqlSource.identifier(queries, part);
         SqlSource.typeName(queries, className);

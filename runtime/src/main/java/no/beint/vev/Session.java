@@ -98,8 +98,8 @@ public final class Session {
 
     static void requirePostgres(Connection connection) throws SQLException {
         var metadata = connection.getMetaData();
-        if (!metadata.getDatabaseProductName().equals("PostgreSQL") || metadata.getDatabaseMajorVersion() != 18) {
-            throw new IllegalArgumentException("Vev requires PostgreSQL 18");
+        if (!metadata.getDatabaseProductName().equals("PostgreSQL") || metadata.getDatabaseMajorVersion() != 19) {
+            throw new IllegalArgumentException("Vev requires PostgreSQL 19");
         }
     }
 

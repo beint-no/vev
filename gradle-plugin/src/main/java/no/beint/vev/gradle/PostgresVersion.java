@@ -15,7 +15,7 @@ public abstract class PostgresVersion implements ValueSource<String, PostgresVer
         try {
             return version(getParameters().getBin().get(), "postgres");
         } catch (IOException failure) {
-            throw new IllegalStateException("Install PostgreSQL 18 or configure postgresBin", failure);
+            throw new IllegalStateException("Install PostgreSQL 19 or configure postgresBin", failure);
         }
     }
 

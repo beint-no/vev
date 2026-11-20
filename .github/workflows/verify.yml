@@ -26,7 +26,7 @@ jobs:
           distribution: temurin
           java-version: '27'
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-      - name: Install PostgreSQL 18 on Linux
+      - name: Install PostgreSQL 19 on Linux
         if: runner.os == 'Linux'
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -34,13 +34,14 @@ jobs:
           sudo install -m 644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-18 postgresql-contrib-18
-          echo '/usr/lib/postgresql/18/bin' >> "$GITHUB_PATH"
-      - name: Install PostgreSQL 18 on macOS
+          sudo apt-get install -y postgresql-19
+          echo '/usr/lib/postgresql/19/bin' >> "$GITHUB_PATH"
+      - name: Install PostgreSQL 19 on macOS
         if: runner.os == 'macOS'
         run: |
-          brew install postgresql@18
-          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
+          brew update
+          brew install postgresql@19
+          echo "$(brew --prefix postgresql@19)/bin" >> "$GITHUB_PATH"
       - name: Verify toolchains
         run: |
           java -version
@@ -68,15 +69,15 @@ jobs:
           distribution: temurin
           java-version: '27'
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-      - name: Install PostgreSQL 18
+      - name: Install PostgreSQL 19
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           curl --fail --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 --silent --show-error https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/pgdg.asc
           sudo install -m 644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           echo 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main' | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y postgresql-18 postgresql-contrib-18
-          echo '/usr/lib/postgresql/18/bin' >> "$GITHUB_PATH"
+          sudo apt-get install -y postgresql-19
+          echo '/usr/lib/postgresql/19/bin' >> "$GITHUB_PATH"
       - name: Measure schema bootstrap, SQL generation, and Kotlin compilation
         run: ./gradlew :benchmarks:buildPerformance --console=plain
       - name: JDBC, Hibernate projections and entity writes with allocation profiling

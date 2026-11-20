@@ -6,30 +6,26 @@ Write SQL. Vev applies your Flyway migrations to a disposable PostgreSQL databas
 uses PostgreSQL Parse/Describe to validate queries, and generates Kotlin data classes
 and JDBC implementations. The runtime has no external dependencies.
 
-Requires JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 18. The build machine needs the
-PostgreSQL 18 server binaries (`postgres`, `initdb`, `pg_ctl`); the deployed application only
+Requires JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 19. The build machine needs the
+PostgreSQL 19 server binaries (`postgres`, `initdb`, `pg_ctl`); the deployed application only
 needs JDBC and its pool. The plugin uses `PATH`, then the standard Homebrew, Debian/Ubuntu,
 PGDG RPM and Postgres.app locations; set `postgresBin` for any other directory.
 
 ## Setup
 
-Add the public repository to both resolution scopes in `settings.gradle.kts`:
+Vev artifacts and the Gradle plugin marker are published to Maven Central. Include
+`mavenCentral()` in both `pluginManagement` and `dependencyResolutionManagement` in
+`settings.gradle.kts`:
 
 ```kotlin
 pluginManagement {
     repositories {
-        maven("https://beint-no.github.io/vev/maven") {
-            content { includeGroup("no.beint.vev") }
-        }
         gradlePluginPortal()
         mavenCentral()
     }
 }
 dependencyResolutionManagement {
     repositories {
-        maven("https://beint-no.github.io/vev/maven") {
-            content { includeGroup("no.beint.vev") }
-        }
         mavenCentral()
     }
 }

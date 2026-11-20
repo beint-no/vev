@@ -42,7 +42,7 @@ public class SettingsWriteBenchmark {
         }
         fixture.connection.commit();
         registry=new StandardServiceRegistryBuilder()
-                .applySetting("hibernate.dialect",new org.hibernate.dialect.PostgreSQLDialect(org.hibernate.dialect.DatabaseVersion.make(18,6)))
+                .applySetting("hibernate.dialect",new org.hibernate.dialect.PostgreSQLDialect(org.hibernate.dialect.DatabaseVersion.make(19,0)))
                 .applySetting("hibernate.boot.allow_jdbc_metadata_access",false)
                 .applySetting("hibernate.connection.provider_disables_autocommit",true)
                 .applySetting("hibernate.tenant_identifier_resolver",new org.hibernate.context.spi.CurrentTenantIdentifierResolver<Integer>() {

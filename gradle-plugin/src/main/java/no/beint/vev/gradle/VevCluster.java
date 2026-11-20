@@ -40,9 +40,9 @@ public abstract class VevCluster implements BuildService<BuildServiceParameters.
         }
         if (cluster == null) {
             try { cluster = new Cluster(bin); selectedBin = bin; }
-            catch (IOException failure) { throw new IllegalStateException("Vev could not start PostgreSQL 18; install it or set postgresBin", failure); }
+            catch (IOException failure) { throw new IllegalStateException("Vev could not start PostgreSQL 19; install it or set postgresBin", failure); }
             catch (InterruptedException failure) { Thread.currentThread().interrupt(); throw new IllegalStateException("Interrupted starting Vev PostgreSQL", failure); }
-            LOGGER.lifecycle("Vev started PostgreSQL 18 on port {}", cluster.port());
+            LOGGER.lifecycle("Vev started PostgreSQL 19 on port {}", cluster.port());
         }
         return new Details(cluster.url(), cluster.user(), cluster.password());
     }
@@ -64,7 +64,7 @@ public abstract class VevCluster implements BuildService<BuildServiceParameters.
                 selectedBin = bin;
                 loadedFromCache = true;
                 migrated.add(database);
-                LOGGER.lifecycle("Vev reused cached PostgreSQL 18 schema {} on port {}", database, cluster.port());
+                LOGGER.lifecycle("Vev reused cached PostgreSQL 19 schema {} on port {}", database, cluster.port());
                 return;
             } catch (IOException failure) {
                 LOGGER.warn("Vev could not reuse cached schema {}; rebuilding it", database, failure);
