@@ -39,6 +39,7 @@ jobs:
       - name: Install PostgreSQL 19 on macOS
         if: runner.os == 'macOS'
         run: |
+          brew update
           brew install postgresql@19
           echo "$(brew --prefix postgresql@19)/bin" >> "$GITHUB_PATH"
       - name: Verify toolchains
