@@ -58,7 +58,7 @@ class PluginTest {
         Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
         var sqlEdit = runner().build();
         assertTrue(sqlEdit.getOutput().contains("BUILD SUCCESSFUL"));
-        assertTrue(sqlEdit.getOutput().contains("Vev reused cached PostgreSQL 18 schema"), sqlEdit.getOutput());
+        assertTrue(sqlEdit.getOutput().contains("Vev reused cached PostgreSQL 19 schema"), sqlEdit.getOutput());
         assertEquals(0, count(sqlEdit.getOutput(), "Vev migrating build database"), sqlEdit.getOutput());
         assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite the Kotlin facade");
         assertTrue(Files.readString(project.resolve("build/generated/vev/Queries_find_Sql.kt")).contains("changed"));
@@ -73,7 +73,7 @@ class PluginTest {
         assertTrue(failure.getOutput().contains("PostgreSQL rejected query"));
         Path bin = Files.createDirectory(project.resolve("custom-postgres"));
         Path version = bin.resolve("postgres"), init = bin.resolve("initdb");
-        Files.writeString(version, "#!/bin/sh\nprintf 'postgres (PostgreSQL) 18.99\\n'\n");
+        Files.writeString(version, "#!/bin/sh\nprintf 'postgres (PostgreSQL) 19.99\\n'\n");
         Files.writeString(init, "#!/bin/sh\nprintf 'vev-custom-initdb-sentinel\\n'\nexit 42\n");
         assertTrue(version.toFile().setExecutable(true));
         assertTrue(init.toFile().setExecutable(true));
@@ -119,7 +119,7 @@ class PluginTest {
                 .withArguments("compileKotlin", "--console=plain", "--stacktrace").build();
         String output = build.getOutput();
         assertTrue(output.contains("BUILD SUCCESSFUL"), output);
-        assertEquals(1, count(output, "Vev started PostgreSQL 18"), output);
+        assertEquals(1, count(output, "Vev started PostgreSQL 19"), output);
         assertEquals(1, count(output, "Vev migrating build database"), output);
         assertTrue(Files.exists(project.resolve("first/build/generated/vev/Queries.kt")));
         assertTrue(Files.exists(project.resolve("second/build/generated/vev/Queries.kt")));

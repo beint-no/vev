@@ -25,22 +25,22 @@ class PostgresBinTest {
     }
 
     @Test void fallsBackFromIncompleteOrMixedInstallations() throws Exception {
-        String incomplete = fake("incomplete", "18.2");
+        String incomplete = fake("incomplete", "19.0");
         Files.delete(Path.of(incomplete, "initdb"));
-        String mixed = fake("mixed", "18.2");
-        writeVersion(Path.of(mixed), "pg_ctl", "17.6");
-        String complete = fake("complete", "18.2");
+        String mixed = fake("mixed", "19.0");
+        writeVersion(Path.of(mixed), "pg_ctl", "18.7");
+        String complete = fake("complete", "19.0");
         assertEquals(complete, PostgresBin.find(List.of(incomplete, mixed, complete)));
         assertThrows(IllegalStateException.class, () -> PostgresBin.find(List.of(mixed)));
     }
 
     @Test void skipsMissingAndOtherMajorVersions() throws Exception {
-        String old = fake("17", "17.6"), current = fake("18", "18.1"), later = fake("19", "19.0");
+        String old = fake("18", "18.7"), current = fake("19", "19.0"), later = fake("20", "20.0");
         assertEquals(current, PostgresBin.find(List.of(directory.resolve("missing").toString(), old, later, current)));
     }
 
     @Test void explainsWhereItSearched() throws Exception {
-        String old = fake("17", "17.6");
+        String old = fake("18", "18.7");
         var error = assertThrows(IllegalStateException.class, () -> PostgresBin.find(List.of(old)));
         assertTrue(error.getMessage().contains(old) && error.getMessage().contains("postgresBin"), error.getMessage());
     }

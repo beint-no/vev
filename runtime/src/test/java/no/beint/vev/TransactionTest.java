@@ -21,7 +21,7 @@ class TransactionTest {
         boolean failCommit;
         boolean failRollback;
         boolean failClose;
-        int major = 18;
+        int major = 19;
         int queryTimeout;
         final Statement statement = (Statement) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Statement.class}, (p, m, a) -> switch (m.getName()) {
             case "execute" -> { statements.add((String) a[0]); yield false; }
@@ -85,7 +85,7 @@ class TransactionTest {
         assertFalse(f.calls.contains("rollback"));
     }
     @Test void unsupportedPostgresIsRejectedBeforeWork() {
-        Fixture f = new Fixture(); f.major = 17;
+        Fixture f = new Fixture(); f.major = 18;
         assertThrows(IllegalArgumentException.class, () -> new Vev(f.source).readGlobal(s -> fail("work executed")));
         assertFalse(f.calls.contains("commit"));
         assertFalse(f.calls.contains("rollback"));

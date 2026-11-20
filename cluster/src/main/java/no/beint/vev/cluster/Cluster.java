@@ -18,7 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /**
- * A disposable, password-authenticated, loopback-only PostgreSQL 18 cluster.
+ * A disposable, password-authenticated, loopback-only PostgreSQL 19 cluster.
  * Never connects to a user's database. Has no dependencies so that both the
  * compiler and the Gradle plugin can own a cluster without sharing a classpath.
  */
@@ -46,14 +46,14 @@ public final class Cluster implements AutoCloseable {
 
     private Cluster(String bin, Path templateDir) throws IOException, InterruptedException {
         this.bin = bin == null ? "" : bin;
-        directory = Files.createTempDirectory("vev-pg18-");
+        directory = Files.createTempDirectory("vev-pg19-");
         shutdown = new Thread(() -> {
             try { close(); } catch (IOException failure) { System.err.println("Vev could not remove its temporary PostgreSQL cluster: " + directory); }
         }, "vev-postgres-cleanup");
         Runtime.getRuntime().addShutdownHook(shutdown);
         try {
             String version = run(Duration.ofSeconds(10), "postgres", "--version");
-            if (!version.matches("(?s).*PostgreSQL\\) 18\\..*")) throw new IOException("Vev requires PostgreSQL 18 binaries: " + version.strip());
+            if (!version.matches("(?s).*PostgreSQL\\) 19\\..*")) throw new IOException("Vev requires PostgreSQL 19 binaries: " + version.strip());
             if (templateDir == null) {
                 password = UUID.randomUUID().toString();
                 Path passwordFile = directory.resolve("password");

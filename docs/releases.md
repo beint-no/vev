@@ -2,7 +2,7 @@
 
 `vevVersion` in `gradle.properties` controls artifact versions and the plugin's runtime
 and compiler coordinates. Publish matching cluster, runtime, compiler, Gradle plugin
-and plugin marker artifacts.
+and plugin marker artifacts to Maven Central.
 
 1. Run `CI=true ./gradlew clean check releaseBundle :benchmarks:jmhClasses`.
 2. Run `./gradlew :benchmarks:buildPerformance`, then `./gradlew :benchmarks:jmh`.
@@ -12,13 +12,9 @@ and plugin marker artifacts.
 5. Tag the tested merge as `sql-v<version>` and attach the signed Maven bundle and
    SHA-256 checksum to its GitHub release. Attach `results.json` and `build-performance.json`
    from that source tree’s successful performance job before the CI artifacts expire.
-6. Append the validated Maven tree to `maven/` on `codex/maven-repository` in this
-   repository. Preserve published version files, merge the version lists in Maven
-   metadata and regenerate its checksums. GitHub Pages serves that branch directly.
-7. Verify public artifact checksums and compile/run an independent consumer using
-   `https://beint-no.github.io/vev/maven`.
+6. Publish signed artifacts with `./gradlew publishAndReleaseToMavenCentral`.
+7. Verify an independent Kotlin/Java consumer resolves `no.beint.vev` from Maven Central.
 
-Keep signing/publishing credentials outside Git. Published coordinates are immutable.
-Maven Central is a separate publication target; use `publishAndReleaseToMavenCentral`
-when available and verify it independently. The GitHub Pages repository is the supported
-public distribution documented in the README.
+Keep signing/publishing credentials outside Git. Published Maven Central coordinates are
+immutable. Each release targets the current JDK and PostgreSQL major version without
+carrying compatibility layers for older versions.
