@@ -123,7 +123,7 @@ public final class QueryCompiler {
                 Value value = new Value(name, type, source.nullable().contains(name), source.domains().get(name),
                         enumType(source, name, type));
                 Value previous = parameters.putIfAbsent(name, value);
-                if (previous != null && !previous.type.equals(type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
+                if (previous != null && !sameBinding(previous.type, type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
             }
             // Kotlin compiles @JvmStatic object methods to an instance method taking `this` plus API arguments.
             int methodSlots = 1 + (source.cardinality().equals("stream") ? 1 : 0)
@@ -189,6 +189,14 @@ public final class QueryCompiler {
     private static RuntimeException rethrow(Exception failure) throws SQLException {
         if (failure instanceof SQLException sql) throw sql;
         return (RuntimeException) failure;
+    }
+
+    /** text and varchar bind identically as JDBC strings, so a parameter may occur as either. */
+    private static boolean sameBinding(PgType previous, PgType type) {
+        if (previous.equals(type)) return true;
+        var strings = Set.of("text", "varchar");
+        return previous.element() == null && type.element() == null
+                && strings.contains(previous.postgres()) && strings.contains(type.postgres());
     }
 
     private static int jvmSlots(Value value) {

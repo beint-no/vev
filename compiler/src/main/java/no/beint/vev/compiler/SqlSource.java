@@ -213,6 +213,17 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             }
             if (token.equals("(")) depth++;
         }
+        int parameterIndex = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!tokens.get(i).equals("<parameter>")) continue;
+            String parameter = parameters.get(parameterIndex++);
+            boolean jsonOperand = i >= 2 && tokens.get(i - 1).equals(">")
+                    && (tokens.get(i - 2).equals("-") || i >= 3 && tokens.get(i - 2).equals(">") && tokens.get(i - 3).equals("-"));
+            if (jsonOperand && (i + 1 == tokens.size() || !tokens.get(i + 1).equals("::"))) {
+                throw error(path, "Cast :" + parameter + " after -> or ->>; PostgreSQL resolves an uncast parameter to a text key,"
+                        + " never an array index. Use :" + parameter + "::int for an index or :" + parameter + "::text for a key");
+            }
+        }
         if (!new LinkedHashSet<>(parameters).containsAll(nullable)) throw error(path, "nullable names an unknown parameter");
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
         if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- scope: global for global SQL");
