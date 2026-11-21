@@ -348,4 +348,29 @@ class QueryTest {
             actual.rollback()
         }
     }
+
+    @Test fun `tenant stream queries bind array parameters and decode enums across multiple fetch batches`() {
+        val tenant7Ids = vev.write(7) {
+            (1..300).map { i ->
+                val status = if (i % 2 == 0) DocumentStatus.SENT else DocumentStatus.DRAFT
+                Queries.createDocument(status, null, "t7-$i@example.test", null, null).id
+            }
+        }
+        val tenant8Ids = vev.write(8) {
+            (1..10).map { i ->
+                Queries.createDocument(DocumentStatus.PAID, null, "t8-$i@example.test", null, null).id
+            }
+        }
+
+        val streamed = mutableListOf<Pair<Int, DocumentStatus>>()
+        vev.read(7) {
+            Queries.streamDocumentsByIds(tenant7Ids + tenant8Ids) { row ->
+                streamed.add(row.id to row.status)
+            }
+        }
+        assertEquals(300, streamed.size)
+        assertEquals(tenant7Ids, streamed.map { it.first })
+        assertEquals(150, streamed.count { it.second == DocumentStatus.SENT })
+        assertEquals(150, streamed.count { it.second == DocumentStatus.DRAFT })
+    }
 }
