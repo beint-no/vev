@@ -124,7 +124,8 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 | `-- vev.enum: status example.Status` | Map a textual column/input to an existing Kotlin enum |
 | `-- vev.rows: 500` | Optional `:many` result ceiling (default 1,000). Reading one extra row fails the call |
 
-Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`,
+Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`; a parameter after
+`->` or `->>` must be cast (`:index::int` or `:key::text`) because PostgreSQL otherwise picks the text-key operator,
 and use PostgreSQL arrays for lists: `id = ANY(:ids::int[])`. List returned columns
 explicitly; internal CTEs and subqueries may use wildcards. Result names in snake_case become Kotlin camelCase properties.
 Nullability is conservative for expressions, joins, CTEs and aggregates; `notnull`
