@@ -41,6 +41,45 @@ class CompilerTest {
         String sql=java.util.stream.IntStream.rangeClosed(1,columns).mapToObj(i -> "1::bigint AS c"+i).collect(java.util.stream.Collectors.joining(","));
         return "-- vev.name: wide :one\n-- vev.scope: global\n"+(requiredLong?"-- vev.notnull: "+labels+"\n":"")+"SELECT "+sql;
     }
+    @Test void everyFailingQueryIsReportedInOneRunWithoutGeneratingOutput() throws Exception {
+        Path queries = Files.createTempDirectory(directory, "queries");
+        Path output = Files.createTempDirectory(directory, "output");
+        Files.writeString(queries.resolve("a.sql"), "-- vev.name: a :one\n-- vev.scope: global\nSELECT missing FROM item");
+        Files.writeString(queries.resolve("b.sql"), "-- vev.name: b :one\n-- vev.scope: global\nSELECT id FROM item WHERE id = 1");
+        Files.writeString(queries.resolve("c.sql"), "-- vev.name: c :one\n-- vev.scope: global\nSELECT id FROM absent_table");
+        Files.writeString(queries.resolve("d.sql"), "-- vev.name: d :many\n-- vev.unknown: x\nSELECT id FROM item");
+        try (Connection connection = postgres.connect()) {
+            connection.setAutoCommit(false);
+            var failure = assertThrows(IllegalArgumentException.class,
+                    () -> QueryCompiler.compile(connection, queries, output, "example", "Queries"));
+            assertTrue(failure.getMessage().startsWith("3 Vev queries failed:"), failure.getMessage());
+            assertTrue(failure.getMessage().contains("a.sql"));
+            assertTrue(failure.getMessage().contains("c.sql"));
+            assertTrue(failure.getMessage().contains("d.sql"));
+            assertFalse(failure.getMessage().contains("b.sql"));
+            assertEquals(3, failure.getSuppressed().length);
+        }
+        try (var files = Files.list(output)) { assertEquals(0, files.count()); }
+    }
+    @Test void jsonOperatorParametersMustBeCastBecausePostgresqlPicksTheTextKeyOperator() throws Exception {
+        for (String operator : java.util.List.of("->", "->>")) {
+            var failure = assertThrows(IllegalArgumentException.class, () -> compile(
+                    "-- vev.name: element :optional\n-- vev.scope: global\nSELECT ('[1,2]'::jsonb " + operator + " :index) AS element"));
+            assertTrue(failure.getMessage().contains("Cast :index after -> or ->>"), failure.getMessage());
+            assertTrue(compile("-- vev.name: element :optional\n-- vev.scope: global\nSELECT ('[1,2]'::jsonb " + operator
+                    + " :index::int) AS element").contains("`index`: Int"));
+        }
+        assertTrue(compile("-- vev.name: nested :optional\n-- vev.scope: global\nSELECT ('{\"a\":1}'::jsonb -> CAST(:key AS text)) AS value").contains("`key`: String"));
+        assertTrue(compile("-- vev.name: compare :many\n-- vev.scope: global\nSELECT id FROM item WHERE id - 1 > :minimum").contains("`minimum`: Int"));
+    }
+    @Test void textAndVarcharOccurrencesOfOneParameterShareAStringBinding() throws Exception {
+        String result = compile("-- vev.name: tagged :many\n-- vev.scope: global\n"
+                + "SELECT id, :status AS label FROM record WHERE status = :status");
+        assertTrue(result.contains("fun `tagged`(`status`: String)"), result);
+        var failure = assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: mixed :many\n-- vev.scope: global\n"
+                + "SELECT id FROM item WHERE id = :value OR name = :value"));
+        assertTrue(failure.getMessage().contains("incompatible types across occurrences"), failure.getMessage());
+    }
     @Test void wideRowsFailWithAnActionableJvmLimitInsteadOfInvalidGeneratedBytecode() throws Exception {
         assertTrue(compile(wideProjection(245,false)).contains("data class"));
         assertTrue(compile(wideProjection(124,true)).contains("data class"));
