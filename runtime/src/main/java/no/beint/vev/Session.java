@@ -16,7 +16,7 @@ public final class Session {
     private static final ScopedValue<Session> CURRENT = ScopedValue.newInstance();
 
     static {
-        if (Runtime.version().feature() != 27) throw new IllegalStateException("Vev requires JDK 27");
+        if (Runtime.version().feature() < 27) throw new IllegalStateException("Vev requires JDK 27 or newer");
     }
 
     private final Connection connection;
