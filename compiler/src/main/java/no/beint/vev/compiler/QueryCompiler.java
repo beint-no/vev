@@ -36,24 +36,42 @@ public final class QueryCompiler {
         List<Query> compiled = new ArrayList<>();
         HashSet<String> names = new HashSet<>();
         Map<String, PgType> domains = new java.util.TreeMap<>();
+        List<Exception> failures = new ArrayList<>();
         try (var files = Files.walk(queries)) {
             for (Path path : files.filter(p -> p.toString().endsWith(".sql")).sorted().toList()) {
-                SqlSource source = SqlSource.parse(path, Files.readString(path));
-                if (!names.add(source.name())) throw SqlSource.error(path, "Duplicate query name: " + source.name());
-                Query query = describe(connection, source);
-                for (Value value : java.util.stream.Stream.concat(query.parameters.stream(), query.columns.stream()).toList()) {
-                    if (value.domain != null) {
-                        if (value.type.element() != null || value.type.kotlin().equals("ByteArray")) {
-                            throw SqlSource.error(path, "Domain wrappers require a scalar value type");
-                        }
-                        PgType previous = domains.putIfAbsent(value.domain, value.type);
-                        if (previous != null && !previous.kotlin().equals(value.type.kotlin())) {
-                            throw SqlSource.error(path, "Domain " + value.domain + " has conflicting underlying types");
+                // A rejected statement aborts an open describe transaction; the savepoint keeps later files checkable.
+                var savepoint = connection.getAutoCommit() ? null : connection.setSavepoint();
+                try {
+                    SqlSource source = SqlSource.parse(path, Files.readString(path));
+                    if (!names.add(source.name())) throw SqlSource.error(path, "Duplicate query name: " + source.name());
+                    Query query = describe(connection, source);
+                    Map<String, PgType> queryDomains = new java.util.TreeMap<>();
+                    for (Value value : java.util.stream.Stream.concat(query.parameters.stream(), query.columns.stream()).toList()) {
+                        if (value.domain != null) {
+                            if (value.type.element() != null || value.type.kotlin().equals("ByteArray")) {
+                                throw SqlSource.error(path, "Domain wrappers require a scalar value type");
+                            }
+                            PgType previous = domains.containsKey(value.domain) ? domains.get(value.domain) : queryDomains.putIfAbsent(value.domain, value.type);
+                            if (previous != null && !previous.kotlin().equals(value.type.kotlin())) {
+                                throw SqlSource.error(path, "Domain " + value.domain + " has conflicting underlying types");
+                            }
                         }
                     }
+                    queryDomains.forEach(domains::putIfAbsent);
+                    compiled.add(query);
+                    if (savepoint != null) connection.releaseSavepoint(savepoint);
+                } catch (SQLException | IllegalArgumentException failure) {
+                    if (savepoint != null) connection.rollback(savepoint);
+                    failures.add(failure);
                 }
-                compiled.add(query);
             }
+        }
+        if (failures.size() == 1) throw rethrow(failures.getFirst());
+        if (!failures.isEmpty()) {
+            var failure = new IllegalArgumentException(failures.size() + " Vev queries failed:\n" + failures.stream()
+                    .map(Exception::getMessage).collect(java.util.stream.Collectors.joining("\n")));
+            failures.forEach(failure::addSuppressed);
+            throw failure;
         }
         if (compiled.isEmpty()) throw SqlSource.error(queries, "No .sql queries found");
         HashSet<String> types = new HashSet<>();
@@ -166,6 +184,11 @@ public final class QueryCompiler {
         } catch (SQLException exception) {
             throw new SQLException(source.path() + ": PostgreSQL rejected query " + source.name() + " [SQLSTATE " + exception.getSQLState() + "]: " + exception.getMessage(), exception.getSQLState(), exception);
         }
+    }
+
+    private static RuntimeException rethrow(Exception failure) throws SQLException {
+        if (failure instanceof SQLException sql) throw sql;
+        return (RuntimeException) failure;
     }
 
     private static int jvmSlots(Value value) {

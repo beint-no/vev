@@ -6,7 +6,7 @@ Write SQL. Vev applies your Flyway migrations to a disposable PostgreSQL databas
 uses PostgreSQL Parse/Describe to validate queries, and generates Kotlin data classes
 and JDBC implementations. The runtime has no external dependencies.
 
-Requires JDK 27, Kotlin 2.5.0-Beta2 and PostgreSQL 19. The build machine needs the
+Requires JDK 27 or newer, Kotlin 2.5.0-Beta2 and PostgreSQL 19. The build machine needs the
 PostgreSQL 19 server binaries (`postgres`, `initdb`, `pg_ctl`); the deployed application only
 needs JDBC and its pool. The plugin uses `PATH`, then the standard Homebrew, Debian/Ubuntu,
 PGDG RPM and Postgres.app locations; set `postgresBin` for any other directory.
@@ -168,6 +168,7 @@ Unchanged generation is skipped. SQL edits rewrite only changed implementations;
 revalidate queries. Identical generated files retain their timestamps. The Kotlin facade remains
 stable when signatures do.
 
+A failing build reports every rejected query file at once and writes no generated code.
 Application statements are described, not executed. Runtime constraints, permissions,
 concurrency and business rules remain database/execution concerns. Match deployment's
 PostgreSQL major, extensions and search path. Installed extensions are external inputs;

@@ -19,7 +19,7 @@ public final class Main {
             "--postgres-bin", "--fixtures", "--mode", "--url", "--user", "--password", "--database");
 
     public static void main(String[] args) throws Exception {
-        if (Runtime.version().feature() != 27) throw new IllegalStateException("Vev compiler requires JDK 27");
+        if (Runtime.version().feature() < 27) throw new IllegalStateException("Vev compiler requires JDK 27 or newer");
         var options = new HashMap<String, String>();
         for (int i = 0; i < args.length; i += 2) {
             if (i + 1 == args.length || !OPTIONS.contains(args[i]) || options.putIfAbsent(args[i], args[i + 1]) != null) {
