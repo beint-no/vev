@@ -373,4 +373,40 @@ class QueryTest {
         assertEquals(150, streamed.count { it.second == DocumentStatus.SENT })
         assertEquals(150, streamed.count { it.second == DocumentStatus.DRAFT })
     }
+
+    @Test fun `tenant DISTINCT ON and WITH RECURSIVE queries preserve ordering and tenant isolation`() {
+        val (aLatest, bLatest) = vev.write(91) {
+            Queries.createDocument(DocumentStatus.DRAFT, null, "alpha@example.test", null, null)
+            val a2 = Queries.createDocument(DocumentStatus.PAID, null, "alpha@example.test", null, null).id
+            val b1 = Queries.createDocument(DocumentStatus.SENT, null, "beta@example.test", null, null).id
+            a2 to b1
+        }
+        vev.write(92) {
+            Queries.createDocument(DocumentStatus.SENT, null, "alpha@example.test", null, null)
+            Queries.createDocument(DocumentStatus.PAID, null, "gamma@example.test", null, null)
+        }
+
+        val latest = vev.read(91) {
+            Queries.latestDocumentByEmails(listOf("alpha@example.test", "beta@example.test", "gamma@example.test"))
+        }
+        assertEquals(
+            listOf(Triple("alpha@example.test", aLatest, DocumentStatus.PAID), Triple("beta@example.test", bLatest, DocumentStatus.SENT)),
+            latest.map { Triple(it.email, it.id, it.status) },
+        )
+
+        val root = vev.write(91) {
+            val r = Queries.createMessageChainNode(null, "root").id
+            val child = Queries.createMessageChainNode(r, "child").id
+            Queries.createMessageChainNode(child, "grandchild")
+            r
+        }
+        val foreignRoot = vev.write(92) {
+            Queries.createMessageChainNode(root, "cross-tenant-child")
+            Queries.createMessageChainNode(null, "foreign-root").id
+        }
+
+        val tree = vev.read(91) { Queries.messageChainTree(listOf(root, foreignRoot)) }
+        assertEquals(listOf("root", "child", "grandchild"), tree.map { it.label })
+        assertTrue(tree.all { it.rootId == root })
+    }
 }
