@@ -8,6 +8,8 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.TestInstance
 import no.beint.vev.fixture.CustomerId
+import no.beint.vev.fixture.DocumentStatus
+import no.beint.vev.fixture.ReviewState
 import org.junit.jupiter.api.Assertions.*
 import org.postgresql.ds.PGSimpleDataSource
 import java.math.BigDecimal
@@ -30,7 +32,7 @@ class WriteTest {
         vev=Vev(source)
     }
     @AfterAll fun stop() { if (::postgres.isInitialized) postgres.close() }
-    @BeforeEach fun reset() { postgres.connect().use { c -> c.createStatement().use { it.execute("TRUNCATE write_settings,customer RESTART IDENTITY CASCADE") } } }
+    @BeforeEach fun reset() { postgres.connect().use { c -> c.createStatement().use { it.execute("TRUNCATE write_settings,customer,document_record RESTART IDENTITY CASCADE") } } }
 
     @Test fun `upsert returns trigger normalized generated and old-new values`() {
         val first=vev.write(7) { Queries.saveWriteSettings(BigDecimal("12.30"),"  first  ") }
@@ -213,5 +215,31 @@ class WriteTest {
             connection.commit()
         }
         assertEquals("recovered",vev.read(7) { Queries.writeSettings()!!.label })
+    }
+    @Test fun `global skip-locked claims hand distinct rows to concurrent workers and transition enum status`() {
+        val first=vev.write(7) { Queries.createDocument(DocumentStatus.DRAFT,null,"a@example.test",null,null).id }
+        val second=vev.write(8) { Queries.createDocument(DocumentStatus.DRAFT,null,"b@example.test",null,null).id }
+        val barrier=CyclicBarrier(2)
+        val targets=listOf(DocumentStatus.SENT,DocumentStatus.PAID)
+        Executors.newVirtualThreadPerTaskExecutor().use { executor ->
+            val futures=(0..1).map { worker -> executor.submit<Pair<Int,DocumentStatus>> {
+                vev.writeGlobal {
+                    val claimed=Queries.claimNextDocument()!!
+                    assertEquals(DocumentStatus.DRAFT,claimed.status)
+                    barrier.await(10,TimeUnit.SECONDS)
+                    assertEquals(1L,Queries.transitionDocumentStatus(targets[worker],claimed.id))
+                    claimed.id to targets[worker]
+                }
+            } }
+            val results=futures.map { it.get(20,TimeUnit.SECONDS) }.toMap()
+            assertEquals(setOf(first,second),results.keys)
+            assertNull(vev.writeGlobal { Queries.claimNextDocument() })
+            val firstRow=vev.read(7) { Queries.document(first)!! }
+            val secondRow=vev.read(8) { Queries.document(second)!! }
+            assertEquals(results[first],firstRow.status)
+            assertEquals(if (results[first]==DocumentStatus.PAID) ReviewState.APPROVED else null,firstRow.review)
+            assertEquals(results[second],secondRow.status)
+            assertEquals(if (results[second]==DocumentStatus.PAID) ReviewState.APPROVED else null,secondRow.review)
+        }
     }
 }
