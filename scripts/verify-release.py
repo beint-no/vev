@@ -35,8 +35,8 @@ application {{ mainClass.set("sample.ConsumerKt") }}
     (migrations / "V1__customer.sql").write_text("CREATE TABLE customer(id int,tenant_id int NOT NULL,name text NOT NULL,PRIMARY KEY(id,tenant_id));")
     queries = consumer / "src/main/sql"
     queries.mkdir(parents=True)
-    (queries / "create.sql").write_text("-- name: create :exec\nINSERT INTO customer(id,tenant_id,name) VALUES(:id,:tenantId,:name);")
-    (queries / "find.sql").write_text("-- name: find :optional\nSELECT id,name FROM customer WHERE tenant_id=:tenantId AND id=:id;")
+    (queries / "create.sql").write_text("-- vev.name: create :exec\nINSERT INTO customer(id,tenant_id,name) VALUES(:id,:tenantId,:name);")
+    (queries / "find.sql").write_text("-- vev.name: find :optional\nSELECT id,name FROM customer WHERE tenant_id=:tenantId AND id=:id;")
     kotlin = consumer / "src/main/kotlin/sample"
     kotlin.mkdir(parents=True)
     (kotlin / "Consumer.kt").write_text("""

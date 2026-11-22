@@ -3,6 +3,7 @@ package no.beint.vev;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import javax.sql.DataSource;
 
 /** Explicit JDBC transactions; the connection pool owns the default isolation configuration. */
@@ -13,11 +14,12 @@ public final class Vev {
     private final int queryTimeoutSeconds;
     private volatile boolean verified;
 
-    public Vev(DataSource source) { this(source, DEFAULT_ISOLATION, 0); }
+    public Vev(DataSource source) { this(source, DEFAULT_ISOLATION, null); }
 
-    public Vev(DataSource source, int isolation) { this(source, isolation, 0); }
+    public Vev(DataSource source, int isolation) { this(source, isolation, null); }
 
-    public Vev(DataSource source, int isolation, int queryTimeoutSeconds) {
+    /** A null queryTimeout leaves statements without a timeout. */
+    public Vev(DataSource source, int isolation, Duration queryTimeout) {
         this.source = java.util.Objects.requireNonNull(source);
         if (isolation != DEFAULT_ISOLATION
                 && isolation != Connection.TRANSACTION_READ_COMMITTED
@@ -25,11 +27,8 @@ public final class Vev {
                 && isolation != Connection.TRANSACTION_SERIALIZABLE) {
             throw new IllegalArgumentException("Unsupported PostgreSQL transaction isolation");
         }
-        if (queryTimeoutSeconds < 0) {
-            throw new IllegalArgumentException("Query timeout must not be negative");
-        }
         this.isolation = isolation;
-        this.queryTimeoutSeconds = queryTimeoutSeconds;
+        this.queryTimeoutSeconds = Session.timeoutSeconds(queryTimeout);
     }
 
     public <R> R read(int tenantId, Session.Work<R> work) throws SQLException { return tenant(true, tenantId, work); }
@@ -62,7 +61,7 @@ public final class Vev {
                     statement.execute("SET TRANSACTION READ ONLY");
                 }
             }
-            R result = Session.borrow(connection, tenantId, queryTimeoutSeconds, work);
+            R result = Session.run(connection, tenantId, queryTimeoutSeconds, work);
             connection.commit();
             committed = true;
             return result;

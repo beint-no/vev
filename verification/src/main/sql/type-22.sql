@@ -1,4 +1,4 @@
--- name: typeCase22 :one
--- scope: global
--- nullable: value
+-- vev.name: typeCase22 :one
+-- vev.scope: global
+-- vev.nullable: value
 SELECT :value::bool[] AS value;

@@ -49,7 +49,7 @@ class ProjectSettingsWriteTest {
                                 s.setInt(1,tenant);s.setBigDecimal(2,if(initial=="null")null else BigDecimal("100.00"));s.executeUpdate()
                             }
                             val before=c.prepareStatement("SELECT id FROM project_settings WHERE tenant_id=?").use { s -> s.setInt(1,tenant);s.executeQuery().use { r -> if(r.next())r.getInt(1) else null } }
-                            Session.borrow(c,tenant) {
+                            Session.borrowTenant(c, tenant) {
                                 val previous=Queries.defaultHourlyRate()
                                 if(initial=="absent")assertNull(previous) else assertNotNull(previous)
                                 val expected=value?.let { BigDecimal(it).setScale(2) }
@@ -80,7 +80,7 @@ class ProjectSettingsWriteTest {
     @Test fun `numeric rounding remains PostgreSQL behavior rather than application validation`() {
         postgres.connect().use { c ->
             c.autoCommit=false
-            try { Session.borrow(c,1) { assertEquals(BigDecimal("1.01"),Queries.saveDefaultHourlyRate(BigDecimal("1.005")).defaultHourlyRate) } }
+            try { Session.borrowTenant(c, 1) { assertEquals(BigDecimal("1.01"),Queries.saveDefaultHourlyRate(BigDecimal("1.005")).defaultHourlyRate) } }
             finally {c.rollback()}
         }
     }

@@ -43,7 +43,7 @@ class PluginTest {
         Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
         Path sql = Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql");
         Path migration = Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql");
-        Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id;");
+        Files.writeString(sql, "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id;");
         Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
         Path consumer = Files.createDirectories(project.resolve("src/main/kotlin")).resolve("Consumer.kt");
         Files.writeString(consumer, "package sample\nfun name(): String? = Queries.find(1)?.name\n");
@@ -55,7 +55,7 @@ class PluginTest {
         assertTrue(second.getOutput().contains(":generateVev UP-TO-DATE"));
         Path facade = project.resolve("build/generated/vev/Queries.kt");
         var facadeTime = Files.getLastModifiedTime(facade);
-        Files.writeString(sql, "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
+        Files.writeString(sql, "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
         var sqlEdit = runner().build();
         assertTrue(sqlEdit.getOutput().contains("BUILD SUCCESSFUL"));
         assertTrue(sqlEdit.getOutput().contains("Vev reused cached PostgreSQL 19 schema"), sqlEdit.getOutput());
@@ -113,7 +113,7 @@ class PluginTest {
                 "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
         for (String module : List.of("first", "second")) {
             Files.writeString(Files.createDirectories(project.resolve(module + "/src/main/sql")).resolve("find.sql"),
-                    "-- name: find :optional\n-- scope: global\nSELECT id,name FROM item WHERE id=:id;");
+                    "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id;");
         }
         var build = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath()
                 .withArguments("compileKotlin", "--console=plain", "--stacktrace").build();

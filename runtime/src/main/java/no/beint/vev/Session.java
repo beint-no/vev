@@ -2,13 +2,8 @@ package no.beint.vev;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
-import java.util.function.Consumer;
+import java.time.Duration;
 
 /** A thread-confined, lexical execution scope. Generated queries own their JDBC resources. */
 public final class Session {
@@ -25,8 +20,6 @@ public final class Session {
     private final Thread owner = Thread.currentThread();
     private boolean active = true;
     private boolean failed;
-
-    Session(Connection connection, int tenantId) { this(connection, tenantId, 0); }
 
     Session(Connection connection, int tenantId, int queryTimeoutSeconds) {
         this.connection = connection;
@@ -59,33 +52,41 @@ public final class Session {
 
     static boolean bound() { return CURRENT.isBound(); }
 
-    @FunctionalInterface public interface Bind { void apply(Bindings bindings) throws SQLException; }
-    @FunctionalInterface public interface Row<R> { R read(ResultSet result) throws SQLException; }
     @FunctionalInterface public interface Work<R> { R run(Session session) throws SQLException; }
 
-    /** Participate in an existing transaction without committing, rolling back, or closing its connection. */
-    public static <R> R borrow(Connection connection, Work<R> work) throws SQLException {
-        return borrow(connection, 0, 0, work);
-    }
-
-    /** Participate in a caller-owned transaction that must have a positive tenant identifier. */
+    /**
+     * Participate in a caller-owned transaction as a tenant. The caller commits, rolls back and closes the connection,
+     * and must propagate failures to its transaction manager.
+     */
     public static <R> R borrowTenant(Connection connection, int tenantId, Work<R> work) throws SQLException {
-        return borrowTenant(connection, tenantId, 0, work);
+        return borrowTenant(connection, tenantId, null, work);
     }
 
-    /** Participate in a caller-owned tenant transaction with a per-statement JDBC query timeout in seconds. */
-    public static <R> R borrowTenant(Connection connection, int tenantId, int queryTimeoutSeconds, Work<R> work) throws SQLException {
+    /** Like {@link #borrowTenant(Connection, int, Work)}, applying a per-statement query timeout. */
+    public static <R> R borrowTenant(Connection connection, int tenantId, Duration queryTimeout, Work<R> work) throws SQLException {
         if (tenantId <= 0) throw new IllegalArgumentException("Tenant identifier must be positive");
-        return borrow(connection, tenantId, queryTimeoutSeconds, work);
+        return run(connection, tenantId, timeoutSeconds(queryTimeout), work);
     }
 
-    public static <R> R borrow(Connection connection, int tenantId, Work<R> work) throws SQLException {
-        return borrow(connection, tenantId, 0, work);
+    /** Participate in a caller-owned transaction without a tenant; only global queries may run. */
+    public static <R> R borrowGlobal(Connection connection, Work<R> work) throws SQLException {
+        return borrowGlobal(connection, null, work);
     }
 
-    public static <R> R borrow(Connection connection, int tenantId, int queryTimeoutSeconds, Work<R> work) throws SQLException {
-        if (tenantId < 0) throw new IllegalArgumentException("Tenant identifier cannot be negative");
-        if (queryTimeoutSeconds < 0) throw new IllegalArgumentException("Query timeout must not be negative");
+    /** Like {@link #borrowGlobal(Connection, Work)}, applying a per-statement query timeout. */
+    public static <R> R borrowGlobal(Connection connection, Duration queryTimeout, Work<R> work) throws SQLException {
+        return run(connection, 0, timeoutSeconds(queryTimeout), work);
+    }
+
+    /** JDBC timeouts have whole-second precision, so a partial second rounds up rather than disabling the timeout. */
+    static int timeoutSeconds(Duration timeout) {
+        if (timeout == null) return 0;
+        if (timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException("Query timeout must be positive");
+        long seconds = timeout.getSeconds() + (timeout.getNano() > 0 ? 1 : 0);
+        return (int) Math.min(seconds, Integer.MAX_VALUE);
+    }
+
+    static <R> R run(Connection connection, int tenantId, int queryTimeoutSeconds, Work<R> work) throws SQLException {
         if (bound()) throw new IllegalStateException("Nested Vev transactions are not supported");
         if (connection.getAutoCommit()) throw new IllegalStateException("Vev requires an explicit transaction");
         Session session = new Session(connection, tenantId, queryTimeoutSeconds);
@@ -135,110 +136,5 @@ public final class Session {
     /** Poison the scope after a SQL, decoding, or cardinality failure so the caller rolls back. */
     public void markFailed() {
         failed = true;
-    }
-
-    /** Materialize at most maxRows rows; exceeding the bound fails the transaction. */
-    public <R> List<R> list(String sql, int maxRows, Bind bind, Row<R> row) throws SQLException {
-        check();
-        if (maxRows < 1) throw new IllegalArgumentException("Row bound must be positive");
-        try (PreparedStatement statement = prepare(sql);
-             Bindings bindings = new Bindings(connection, statement)) {
-            bind.apply(bindings);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) return List.of();
-                R first = Objects.requireNonNull(row.read(result), "Vev row mapper returned null");
-                if (!result.next()) return List.of(first);
-                if (maxRows == 1) throw new IllegalStateException("Vev query exceeded its row bound: 1");
-                List<R> rows = new ArrayList<>(Math.min(maxRows, 16));
-                rows.add(first);
-                do {
-                    if (rows.size() == maxRows) throw new IllegalStateException("Vev query exceeded its row bound: " + maxRows);
-                    rows.add(Objects.requireNonNull(row.read(result), "Vev row mapper returned null"));
-                } while (result.next());
-                return Collections.unmodifiableList(rows);
-            }
-        } catch (SQLException | RuntimeException | Error failure) {
-            failed = true;
-            throw failure;
-        }
-    }
-
-    /** Stream rows through a server-side cursor without materializing the full result set in memory. */
-    public <R> void stream(String sql, int fetchSize, Bind bind, Row<R> row, Consumer<R> consumer) throws SQLException {
-        check();
-        if (fetchSize < 1) throw new IllegalArgumentException("Fetch size must be positive");
-        Objects.requireNonNull(consumer, "Row consumer must not be null");
-        try (PreparedStatement statement = prepare(sql);
-             Bindings bindings = new Bindings(connection, statement)) {
-            statement.setFetchSize(fetchSize);
-            bind.apply(bindings);
-            try (ResultSet result = statement.executeQuery()) {
-                while (result.next()) {
-                    consumer.accept(Objects.requireNonNull(row.read(result), "Vev row mapper returned null"));
-                }
-            }
-        } catch (SQLException | RuntimeException | Error failure) {
-            failed = true;
-            throw failure;
-        }
-    }
-
-    /** Exactly one row. Zero or multiple rows fail the transaction. */
-    public <R> R one(String sql, Bind bind, Row<R> row) throws SQLException {
-        return single(sql, bind, row, true);
-    }
-
-    /** Zero or one row. Multiple rows fail the transaction. */
-    public <R> R optional(String sql, Bind bind, Row<R> row) throws SQLException {
-        return single(sql, bind, row, false);
-    }
-
-    private <R> R single(String sql, Bind bind, Row<R> row, boolean required) throws SQLException {
-        check();
-        try (PreparedStatement statement = prepare(sql);
-             Bindings bindings = new Bindings(connection, statement)) {
-            bind.apply(bindings);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) {
-                    if (required) throw new IllegalStateException("Vev query expected one row, received none");
-                    return null;
-                }
-                R value = Objects.requireNonNull(row.read(result), "Vev row mapper returned null");
-                if (result.next()) throw new IllegalStateException("Vev query expected at most one row, received multiple");
-                return value;
-            }
-        } catch (SQLException | RuntimeException | Error failure) {
-            failed = true;
-            throw failure;
-        }
-    }
-
-    /**
-     * Call a void-returning function for its effect, such as an advisory lock, discarding any
-     * result set. Nothing is read, so there is no value to map.
-     */
-    public void call(String sql, Bind bind) throws SQLException {
-        check();
-        try (PreparedStatement statement = prepare(sql);
-             Bindings bindings = new Bindings(connection, statement)) {
-            bind.apply(bindings);
-            statement.execute();
-        } catch (SQLException | RuntimeException | Error failure) {
-            failed = true;
-            throw failure;
-        }
-    }
-
-    /** Execute an explicit SQL mutation and return its affected-row count. */
-    public long execute(String sql, Bind bind) throws SQLException {
-        check();
-        try (PreparedStatement statement = prepare(sql);
-             Bindings bindings = new Bindings(connection, statement)) {
-            bind.apply(bindings);
-            return statement.executeLargeUpdate();
-        } catch (SQLException | RuntimeException | Error failure) {
-            failed = true;
-            throw failure;
-        }
     }
 }

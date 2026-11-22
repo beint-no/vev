@@ -89,7 +89,7 @@ class ReaiExecutionTest {
                 """) }
                 val start = LocalDate.of(2026, 1, 1)
                 val end = LocalDate.of(2026, 1, 31)
-                Session.borrow(connection, 1) {
+                Session.borrowTenant(connection, 1) {
                     val totals = Queries.reportTotals(start, end, listOf("4000"), true).associateBy { it.partyId }
                     assertEquals(setOf(901, 902), totals.keys)
                     assertEquals(BigDecimal("-2.00"), totals.getValue(901).amount)
@@ -106,7 +106,7 @@ class ReaiExecutionTest {
                     assertEquals(BigDecimal("-2.00"), filtered.single().amount)
                     assertTrue(Queries.reportSupplierCosts(start, end, emptyList(), true, 901).isEmpty())
                 }
-                Session.borrow(connection, 2) {
+                Session.borrowTenant(connection, 2) {
                     assertTrue(Queries.reportTotals(start, end, listOf("4000"), true).isEmpty())
                     assertTrue(Queries.reportPostings(start, end, listOf("4000"), true, 901).isEmpty())
                 }
@@ -133,7 +133,7 @@ class ReaiExecutionTest {
                         SELECT id,951,tenant_id FROM postings WHERE tenant_id=1 AND voucher_id IN (3,4) AND account_number IN ('2910','1500');
                     UPDATE vouchers SET voucher_type='INCOME' WHERE tenant_id=1 AND id=4;
                 """) }
-                Session.borrow(connection, 1) {
+                Session.borrowTenant(connection, 1) {
                     val suppliers = Queries.supplierPostingGroupCounts(listOf(950, 951), "2400")
                     assertEquals(1, suppliers.size)
                     assertEquals(2L, suppliers.single().postingCount)
@@ -153,7 +153,7 @@ class ReaiExecutionTest {
                     assertNull(sources.single().number)
                     assertTrue(Queries.voucherSearchSources(emptyList()).isEmpty())
                 }
-                Session.borrow(connection, 2) {
+                Session.borrowTenant(connection, 2) {
                     assertEquals(2L,Queries.supplierPostingGroupCounts(listOf(950),"2400").single().postingCount)
                     assertTrue(Queries.employeePostingGroupCounts(listOf(951)).isEmpty())
                     assertTrue(Queries.customerPostingGroupCounts(listOf(951),"1500").isEmpty())
@@ -186,7 +186,7 @@ class ReaiExecutionTest {
                 """) }
                 val start = LocalDate.of(2026,1,1)
                 val end = LocalDate.of(2026,1,31)
-                Session.borrow(connection,1) {
+                Session.borrowTenant(connection, 1) {
                     val basis = Queries.vatBasis(start,end).associate { it.vatCode to it.basisAmount }
                     assertEquals(BigDecimal("45150.00"),basis["87"])
                     assertEquals(BigDecimal("-45150.00"),basis["0"])
@@ -211,7 +211,7 @@ class ReaiExecutionTest {
                     assertTrue(Queries.creditNoteAppliedInvoices(emptyList()).isEmpty())
                     assertTrue(Queries.creditNoteAppliedInvoices(listOf(960)).isEmpty())
                 }
-                Session.borrow(connection,2) {
+                Session.borrowTenant(connection, 2) {
                     assertEquals(963,Queries.voucherDocuments(listOf(1)).single().voucherAttachmentId)
                     assertTrue(Queries.voucherDocuments(listOf(5)).all { it.supplierInvoiceId==null })
                     assertTrue(Queries.vatBasis(start,end).none { it.vatCode=="87" })
@@ -232,14 +232,14 @@ class ReaiExecutionTest {
                     INSERT INTO invoice_ar_credit_note_allocations(tenant_id,invoice_id,credit_note_invoice_id,allocation_type,allocated_amount)
                         VALUES(1,970,972,'MANUAL_PARTIAL_COVER',1),(1,971,972,'MANUAL_PARTIAL_COVER',1);
                 """) }
-                Session.borrow(connection,1) {
+                Session.borrowTenant(connection, 1) {
                     val rows=Queries.creditNoteAppliedInvoices(listOf(972))
                     assertEquals(listOf(971,970),rows.map { it.invoiceId })
                     assertEquals(listOf("REF-B","REF-A"),rows.map { it.invoiceNumber })
                     assertTrue(rows.all { it.creditNoteInvoiceId==972 })
                     assertTrue(Queries.creditNoteAppliedInvoices(listOf(970)).isEmpty())
                 }
-                Session.borrow(connection,2) { assertTrue(Queries.creditNoteAppliedInvoices(listOf(972)).isEmpty()) }
+                Session.borrowTenant(connection, 2) { assertTrue(Queries.creditNoteAppliedInvoices(listOf(972)).isEmpty()) }
             } finally { connection.rollback() }
         }
     }
@@ -259,7 +259,7 @@ class ReaiExecutionTest {
                     UPDATE postings SET account_number='1500',customer_id=961 WHERE tenant_id=1 AND voucher_id=1 AND account_number='3000';
                     UPDATE postings SET account_number='2400',supplier_id=961 WHERE tenant_id=1 AND voucher_id=2 AND account_number='1920';
                 """) }
-                Session.borrow(connection,1) {
+                Session.borrowTenant(connection, 1) {
                     val rows=Queries.voucherOverview(listOf(1,2))
                     assertEquals("Synthetic Registry Name",rows.single { it.accountNumber=="1500" }.subsidiaryLedgerName)
                     val supplier=rows.single { it.accountNumber=="2400" }
@@ -285,7 +285,7 @@ class ReaiExecutionTest {
                     UPDATE vouchers SET voucher_type='CUSTOMER_INVOICE' WHERE tenant_id=1 AND id=1;
                     UPDATE vouchers SET voucher_type='SUPPLIER_INVOICE' WHERE tenant_id=1 AND id=2;
                 """) }
-                Session.borrow(connection,1) {
+                Session.borrowTenant(connection, 1) {
                     val start=LocalDate.of(2026,1,1)
                     val end=LocalDate.of(2026,1,31)
                     val totals=Queries.reportTotals(start,end,listOf("3000"),false).filter { it.partyId==990 }

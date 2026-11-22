@@ -158,23 +158,14 @@ class QueryTest {
         assertTrue(vev.read(7) { Queries.customers(null).isEmpty() })
     }
 
-    @Test fun `cardinality and materialization bounds fail rather than truncate`() {
+    @Test fun `cardinality failures fail rather than truncate`() {
         assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.exactlyOne() } }
         vev.write(7) { repeat(6) { Queries.createCustomer("Person $it") } }
         assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.exactlyOne() } }
-        assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.customers(null) } }
     }
 
-    @Test fun `lists are unbounded unless a row bound is declared`() {
+    @Test fun `lists return every row`() {
         assertEquals(5000, vev.readGlobal { Queries.boundedSeries(5000) }.size)
-    }
-
-    @Test fun `declared list ceiling returns the complete boundary and fails on the next row`() {
-        assertEquals(1000, vev.readGlobal { Queries.cappedSeries(1000) }.size)
-        val failure = assertThrows(IllegalStateException::class.java) {
-            vev.readGlobal { Queries.cappedSeries(1001) }
-        }
-        assertTrue(failure.message!!.contains("exceeded its row bound: 1000"))
     }
 
     @Test fun `custom plan queries never become server-prepared statements`() {
@@ -183,11 +174,11 @@ class QueryTest {
             fun namedStatements(): Int = connection.createStatement().use { statement ->
                 statement.executeQuery("SELECT count(*) FROM pg_prepared_statements WHERE NOT from_sql").use { it.next(); it.getInt(1) }
             }
-            Session.borrow(connection) {
+            Session.borrowGlobal(connection) {
                 repeat(10) { assertEquals(if (it % 2 == 0) 20 else 11, Queries.customPlanSeries(if (it % 2 == 0) null else 10).size) }
             }
             assertEquals(0, namedStatements(), "A custom plan query must stay an unnamed statement")
-            Session.borrow(connection) { repeat(10) { Queries.boundedSeries(3) } }
+            Session.borrowGlobal(connection) { repeat(10) { Queries.boundedSeries(3) } }
             assertTrue(namedStatements() > 0, "Without the directive pgJDBC server-prepares a repeated statement")
             connection.rollback()
         }
@@ -207,11 +198,10 @@ class QueryTest {
     @Test fun `single row returning violations roll back every affected row even when caught`() {
         for (optional in listOf(false, true)) {
             assertThrows(IllegalStateException::class.java) {
-                vev.write(7) { session ->
-                    val insert = "INSERT INTO customer(tenant_id,name) SELECT 7,'Synthetic '||n FROM generate_series(1,3) n RETURNING id"
+                vev.write(7) {
                     try {
-                        if (optional) session.optional(insert, {}, { it.getInt(1) })
-                        else session.one(insert, {}, { it.getInt(1) })
+                        if (optional) Queries.createSyntheticCustomersOptional()
+                        else Queries.createSyntheticCustomersOne()
                     } catch (_: IllegalStateException) { }
                 }
             }
@@ -230,13 +220,13 @@ class QueryTest {
             } }
             assertEquals(1, updates.count { it.get(20, java.util.concurrent.TimeUnit.SECONDS) })
         }
-        assertEquals(1, vev.read(7) { session -> session.one("SELECT version FROM invoice WHERE tenant_id=7 AND id=1", {}, { it.getInt(1) }) })
+        assertEquals(1, vev.read(7) { session -> session.prepare("SELECT version FROM invoice WHERE tenant_id=7 AND id=1").use { s -> s.executeQuery().use { it.next(); it.getInt(1) } } })
     }
 
     @Test fun `borrowed transaction leaves ownership with caller`() {
         postgres.connect().use { c ->
             c.autoCommit = false
-            Session.borrow(c, 7) { Queries.createCustomer("not committed") }
+            Session.borrowTenant(c, 7) { Queries.createCustomer("not committed") }
             assertFalse(c.isClosed)
             c.rollback()
         }
@@ -253,7 +243,7 @@ class QueryTest {
                 try { method.invoke(actual, *(args ?: emptyArray())) }
                 catch (error: java.lang.reflect.InvocationTargetException) { throw error.targetException }
             } as Connection
-            Session.borrow(observed, 7) { Queries.customers(null); Queries.scopedCustomer(CustomerId(1)) }
+            Session.borrowTenant(observed, 7) { Queries.customers(null); Queries.scopedCustomer(CustomerId(1)) }
             actual.rollback()
         }
         assertEquals(2, prepared)
@@ -298,13 +288,13 @@ class QueryTest {
             setURL(postgres.url());user=postgres.user();password=postgres.password()
             options="-c default_transaction_isolation=serializable"
         }
-        fun level() = Session.current().one("SHOW transaction_isolation", {}, { it.getString(1) })
+        fun level() = Session.current().prepare("SHOW transaction_isolation").use { s -> s.executeQuery().use { it.next(); it.getString(1) } }
         assertEquals("serializable",Vev(configured).read(7) { level() })
         assertEquals("read committed",Vev(configured,Connection.TRANSACTION_READ_COMMITTED).read(7) { level() })
         assertEquals("serializable",Vev(configured).read(7) { level() })
     }
 
-    @Test fun `stream queries deliver rows beyond the list ceiling and poison on consumer errors`() {
+    @Test fun `stream queries deliver every row and poison on consumer errors`() {
         var count = 0
         var sum = 0L
         vev.readGlobal {
@@ -330,7 +320,7 @@ class QueryTest {
     }
 
     @Test fun `query timeout cancels slow statements and rolls back writes`() {
-        val timed = Vev(source, Vev.DEFAULT_ISOLATION, 1)
+        val timed = Vev(source, Vev.DEFAULT_ISOLATION, java.time.Duration.ofSeconds(1))
         val failure = assertThrows(SQLException::class.java) {
             timed.write(7) {
                 Queries.createCustomer("rolled back on timeout")
@@ -356,12 +346,12 @@ class QueryTest {
                     }
                 } else result
             } as Connection
-            Session.borrow(observed, 7) {
+            Session.borrowTenant(observed, 7) {
                 Queries.boundedSeries(10)
                 Queries.customers(null)
             }
             assertTrue(observedFetchSizes.isEmpty(), "Bounded reads must leave fetchSize at 0: $observedFetchSizes")
-            Session.borrow(observed, 7) {
+            Session.borrowTenant(observed, 7) {
                 Queries.streamSeries(10) { }
             }
             assertEquals(listOf(Session.DEFAULT_STREAM_FETCH_SIZE), observedFetchSizes)

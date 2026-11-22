@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "3.2.0"
+    id("no.beint.vev") version "4.0.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -107,11 +107,11 @@ or within a tenant transaction. Tenant queries require a tenant transaction.
 Directives are compiler inputs written as SQL comments. Keep them before the SQL,
 starting with `vev.name`. PostgreSQL ignores them, so SQL editors and database tools
 can still read the file. Unknown `vev.` directives and duplicate singleton directives
-fail the build. The original unprefixed spelling (`-- name:` etc.) is also accepted.
+fail the build, and so does a directive without the `vev.` prefix.
 
 | Directive | Meaning |
 |---|---|
-| `-- vev.name: find :many` | List of every result row |
+| `-- vev.name: find :many` | List of every result row; bound it with `LIMIT` in SQL |
 | `-- vev.name: find :one` | Exactly one row |
 | `-- vev.name: find :optional` | Zero or one row |
 | `-- vev.name: export :stream` | Stream rows via server-side cursor (`Consumer<Row>`) |
@@ -122,7 +122,6 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 | `-- vev.notnull: id, total` | Assert and check non-null output values |
 | `-- vev.type: id CustomerId` | Generate a scalar Kotlin value class |
 | `-- vev.enum: status example.Status` | Map a textual column/input to an existing Kotlin enum |
-| `-- vev.rows: 500` | Optional `:many` result ceiling. Reading one extra row fails the call |
 | `-- vev.plan: custom` | Plan every execution with its parameter values (see optional filters) |
 
 Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`; a parameter after
@@ -149,19 +148,21 @@ when shared semantics have an owner and execution tests; SQL text includes are a
 ## Transactions
 
 Vev commits successful callbacks and rolls back failed callbacks. SQL, decoding,
-cardinality and row-bound failures poison the scope even when caught. No retry occurs
+and cardinality failures poison the scope even when caught. No retry occurs
 automatically. Nested scopes are rejected.
 
 Transactions stay on their owning thread and within the callback. Virtual threads
 work. Suspending a coroutine or sharing the connection with child threads is unsupported.
 Default isolation comes from the connection pool; the constructor accepts explicit
-JDBC isolation and per-statement query timeout overrides. Both auto-commit-enabled and
+JDBC isolation and a per-statement query timeout (`Duration`). Both auto-commit-enabled and
 auto-commit-disabled pools (such as HikariCP with `auto-commit: false`) are supported.
 Read-only scopes use transaction-scoped `SET TRANSACTION READ ONLY` rather than mutating
 session state on pooled connections.
 
-`Session.borrowTenant(connection, tenantId, queryTimeoutSeconds) { ... }` participates in an
-existing transaction; its connection must have auto-commit disabled. The caller owns commit,
+`Session.borrowTenant(connection, tenantId, queryTimeout) { ... }` and
+`Session.borrowGlobal(connection, queryTimeout) { ... }` participate in an existing transaction
+(the timeout is optional); global scopes run only `-- vev.scope: global` queries. The connection
+must have auto-commit disabled. The caller owns commit,
 rollback and close, and must propagate failures to its transaction manager. Flush pending ORM
 writes before borrowing a connection while migrating an application incrementally. The caller
 also enforces framework read-only policies; a framework hint need not make PostgreSQL read-only.

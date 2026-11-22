@@ -1,2 +1,2 @@
--- name: deleteTenant :exec
+-- vev.name: deleteTenant :exec
 DELETE FROM tenants WHERE id=:tenantId;

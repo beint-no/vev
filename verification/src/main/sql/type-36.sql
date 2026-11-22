@@ -1,4 +1,4 @@
--- name: typeCase36 :one
--- scope: global
--- nullable: value
+-- vev.name: typeCase36 :one
+-- vev.scope: global
+-- vev.nullable: value
 SELECT :value::timestamptz[] AS value;

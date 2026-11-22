@@ -21,7 +21,7 @@ class TenantScanTest {
     @AfterAll void stop() throws Exception { if (postgres != null) postgres.close(); }
 
     private void compile(String sql) throws Exception {
-        var source = SqlSource.parse(Path.of("tenant.sql"), "-- name: query :many\n" + sql);
+        var source = SqlSource.parse(Path.of("tenant.sql"), "-- vev.name: query :many\n" + sql);
         try (var connection = postgres.connect()) {
             connection.setReadOnly(true);
             connection.setAutoCommit(false);
@@ -63,8 +63,8 @@ class TenantScanTest {
     }) void provenTenantReadsCompile(String sql) throws Exception { compile(sql); }
 
     @Test void provenTenantWritesCompile() throws Exception {
-        var source = SqlSource.parse(Path.of("write.sql"), "-- name: rename :exec\nUPDATE departments SET name=:name WHERE tenant_id=:tenantId AND id=:id");
-        var delete = SqlSource.parse(Path.of("delete.sql"), "-- name: remove :exec\nDELETE FROM departments d USING postings p WHERE d.tenant_id=:tenantId AND p.tenant_id=d.tenant_id AND p.department_id=d.id");
+        var source = SqlSource.parse(Path.of("write.sql"), "-- vev.name: rename :exec\nUPDATE departments SET name=:name WHERE tenant_id=:tenantId AND id=:id");
+        var delete = SqlSource.parse(Path.of("delete.sql"), "-- vev.name: remove :exec\nDELETE FROM departments d USING postings p WHERE d.tenant_id=:tenantId AND p.tenant_id=d.tenant_id AND p.department_id=d.id");
         try (var connection = postgres.connect()) {
             connection.setReadOnly(true);
             connection.setAutoCommit(false);
@@ -101,7 +101,7 @@ class TenantScanTest {
     }) void unprovenTenantReadsFail(String sql) { rejected(sql); }
 
     @Test void unprovenTenantWritesFail() throws Exception {
-        var source = SqlSource.parse(Path.of("write.sql"), "-- name: rename :exec\nUPDATE departments SET name=:name WHERE id=:id AND :tenantId > 0");
+        var source = SqlSource.parse(Path.of("write.sql"), "-- vev.name: rename :exec\nUPDATE departments SET name=:name WHERE id=:id AND :tenantId > 0");
         try (var connection = postgres.connect()) {
             connection.setReadOnly(true);
             connection.setAutoCommit(false);
@@ -151,9 +151,9 @@ class TenantScanTest {
                 stmt.execute("CREATE TEMP TABLE dropped_tenant_probe(id int, obsolete text, tenant_id int NOT NULL, name text NOT NULL)");
                 stmt.execute("ALTER TABLE dropped_tenant_probe DROP COLUMN obsolete");
             }
-            var good = SqlSource.parse(Path.of("good.sql"), "-- name: good :exec\nINSERT INTO dropped_tenant_probe(id, tenant_id, name) VALUES (:id, :tenantId, :name)");
+            var good = SqlSource.parse(Path.of("good.sql"), "-- vev.name: good :exec\nINSERT INTO dropped_tenant_probe(id, tenant_id, name) VALUES (:id, :tenantId, :name)");
             QueryCompiler.describe(connection, good);
-            var bad = SqlSource.parse(Path.of("bad.sql"), "-- name: bad :exec\nINSERT INTO dropped_tenant_probe(id, tenant_id, name) VALUES (:id, CASE WHEN :tenantId > 0 THEN 999 ELSE 999 END, :name)");
+            var bad = SqlSource.parse(Path.of("bad.sql"), "-- vev.name: bad :exec\nINSERT INTO dropped_tenant_probe(id, tenant_id, name) VALUES (:id, CASE WHEN :tenantId > 0 THEN 999 ELSE 999 END, :name)");
             assertThrows(IllegalArgumentException.class, () -> QueryCompiler.describe(connection, bad));
             connection.rollback();
         }
@@ -168,7 +168,7 @@ class TenantScanTest {
     }
 
     @Test void globalScopeOptsOut() throws Exception {
-        compile("-- scope: global\nSELECT p.id FROM postings p JOIN vouchers v ON v.id=p.voucher_id");
+        compile("-- vev.scope: global\nSELECT p.id FROM postings p JOIN vouchers v ON v.id=p.voucher_id");
     }
 
     @Test void qualifierParsingKeepsOnlyTopLevelConjuncts() {

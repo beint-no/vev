@@ -11,15 +11,19 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Lexes bind parameters without interpreting SQL semantics; PostgreSQL owns SQL validation. */
-public record SqlSource(Path path, String name, String cardinality, int maxRows, String sql,
+public record SqlSource(Path path, String name, String cardinality, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
                         Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
                         String positionalSql, boolean customPlan) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
-    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|scope|plan):.*";
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan):.*";
 
+    /** Returns the directive without its prefix, or null for an ordinary comment. */
     private static String directive(Path path, String comment) {
-        if (!comment.startsWith("vev.")) return comment;
+        if (!comment.startsWith("vev.")) {
+            if (comment.matches(DIRECTIVES)) throw error(path, "Prefix Vev directives with vev.: -- vev." + comment);
+            return null;
+        }
         String value = comment.substring(4);
         if (!value.matches(DIRECTIVES)) throw error(path, "Unknown Vev directive: " + comment);
         return value;
@@ -49,7 +53,6 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         String cardinality = null;
         String tenant = "tenantId";
         boolean scopeDeclared = false;
-        int maxRows = 0;
         boolean customPlan = false;
         Set<String> nullable = new LinkedHashSet<>();
         Set<String> notNull = new LinkedHashSet<>();
@@ -67,16 +70,16 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             int end = lineEnd(source, sqlStart + 2);
             String text = directive(path, source.substring(sqlStart + 2, end).strip());
             sqlStart = end;
-            if (!text.matches(DIRECTIVES)) continue;
+            if (text == null) continue;
             String key = text.substring(0, text.indexOf(':'));
-            if (Set.of("name", "rows", "scope", "plan").contains(key) && !singletonDirectives.add(key)) {
+            if (Set.of("name", "scope", "plan").contains(key) && !singletonDirectives.add(key)) {
                 throw error(path, "Duplicate " + key + " directive");
             }
             if (text.startsWith("name:")) {
                 if (name != null) throw error(path, "Duplicate name directive");
                 String[] parts = text.substring(5).strip().split("\\s+");
                 if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":stream", ":exec", ":void").contains(parts[1])) {
-                    throw error(path, "Use -- name: queryName :many|:one|:optional|:stream|:exec|:void");
+                    throw error(path, "Use -- vev.name: queryName :many|:one|:optional|:stream|:exec|:void");
                 }
                 name = identifier(path, parts[0]);
                 cardinality = parts[1].substring(1);
@@ -86,29 +89,24 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                 for (String value : text.substring(8).strip().split("[ ,]+")) notNull.add(identifier(path, value));
             } else if (text.startsWith("enum:")) {
                 String[] parts = text.substring(5).strip().split("\\s+");
-                if (parts.length != 2) throw error(path, "Use -- enum: parameterOrColumn fully.qualified.KotlinEnum");
+                if (parts.length != 2) throw error(path, "Use -- vev.enum: parameterOrColumn fully.qualified.KotlinEnum");
                 String previous = enums.put(identifier(path, parts[0]), enumName(path, parts[1]));
                 if (previous != null) throw error(path, "Duplicate enum declaration: " + parts[0]);
             } else if (text.startsWith("type:")) {
                 String[] parts = text.substring(5).strip().split("\\s+");
-                if (parts.length != 2) throw error(path, "Use -- type: parameterOrColumn DomainType");
+                if (parts.length != 2) throw error(path, "Use -- vev.type: parameterOrColumn DomainType");
                 String previous = domains.put(identifier(path, parts[0]), typeName(path, parts[1]));
                 if (previous != null) throw error(path, "Duplicate type declaration: " + parts[0]);
             } else if (text.startsWith("scope:")) {
-                if (scopeDeclared || !text.substring(6).strip().equals("global")) throw error(path, "Use -- scope: global once to opt out of tenant binding");
+                if (scopeDeclared || !text.substring(6).strip().equals("global")) throw error(path, "Use -- vev.scope: global once to opt out of tenant binding");
                 scopeDeclared = true;
                 tenant = null;
-            } else if (text.startsWith("plan:")) {
-                if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- plan: custom to plan every execution with its parameter values");
-                customPlan = true;
             } else {
-                try { maxRows = Integer.parseInt(text.substring(5).strip()); }
-                catch (NumberFormatException failure) { throw error(path, "rows must be an integer"); }
-                if (maxRows < 1 || maxRows > 1_000_000) throw error(path, "rows must be between 1 and 1000000");
+                if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- vev.plan: custom to plan every execution with its parameter values");
+                customPlan = true;
             }
         }
-        if (name == null) throw error(path, "Missing -- name: queryName :cardinality");
-        if (singletonDirectives.contains("rows") && !cardinality.equals("many")) throw error(path, "rows requires :many");
+        if (name == null) throw error(path, "Missing -- vev.name: queryName :cardinality");
         for (String both : enums.keySet()) {
             if (domains.containsKey(both)) throw error(path, "Declare either type or enum for " + both + ", not both");
         }
@@ -124,7 +122,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             if (source.startsWith("--", i)) {
                 int end = lineEnd(source, i + 2);
                 String comment = directive(path, source.substring(i + 2, end).strip());
-                if (!tokens.isEmpty() && comment.matches(DIRECTIVES)) throw error(path, "Query directives must precede SQL");
+                if (!tokens.isEmpty() && comment != null) throw error(path, "Query directives must precede SQL");
                 i = end;
                 sql.append(' '); positional.append(' ');
                 continue;
@@ -230,9 +228,9 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         }
         if (!new LinkedHashSet<>(parameters).containsAll(nullable)) throw error(path, "nullable names an unknown parameter");
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
-        if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- scope: global for global SQL");
+        if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- vev.scope: global for global SQL");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
-        return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
+        return new SqlSource(path, name, cardinality, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
                 Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), customPlan);
     }

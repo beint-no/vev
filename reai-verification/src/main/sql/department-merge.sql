@@ -1,5 +1,5 @@
--- name: mergeDepartment :one
--- notnull: id,name
+-- vev.name: mergeDepartment :one
+-- vev.notnull: id,name
 MERGE INTO departments d
 USING (VALUES (:id::int,:tenantId::int,:name::varchar)) AS source(id,tenant_id,name)
 ON d.id=source.id AND d.tenant_id=source.tenant_id

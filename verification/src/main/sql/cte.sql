@@ -1,4 +1,4 @@
--- name: totals :many
+-- vev.name: totals :many
 WITH totals AS (
     SELECT customer_id, sum(amount) AS total FROM invoice
     WHERE tenant_id = :tenantId GROUP BY customer_id

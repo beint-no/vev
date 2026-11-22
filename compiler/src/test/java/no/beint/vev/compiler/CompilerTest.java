@@ -139,39 +139,39 @@ class CompilerTest {
         "SELECT missing FROM item", "SELECT id FROM absent", "SELECT id FROM item WHERE id = :id::uuid",
         "SELECT id, id FROM item", "SELECT id AS \"bad label\" FROM item", "SELECT point(1,2) AS p",
         "SELECT :same::int, :same::uuid", "SELECT id FROM item WHERE :unknown IS NULL"
-    }) void postgresRejectsInvalidContracts(String sql) { assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n" + sql)); }
+    }) void postgresRejectsInvalidContracts(String sql) { assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n" + sql)); }
 
     @Test void resultNullabilityComesFromQuery() throws Exception {
-        String plain = compile("-- name: query :many\n-- scope: global\nSELECT id,name,note FROM item");
+        String plain = compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT id,name,note FROM item");
         assertTrue(plain.contains("val `id`: Int,"));
         assertTrue(plain.contains("val `name`: String,"));
         assertTrue(plain.contains("val `note`: String?,"));
-        String outer = compile("-- name: query :many\n-- scope: global\nSELECT b.id FROM item a LEFT JOIN item b ON false");
+        String outer = compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT b.id FROM item a LEFT JOIN item b ON false");
         assertTrue(outer.contains("val `id`: Int?,"));
-        String union = compile("-- name: query :many\n-- scope: global\nSELECT id FROM item UNION ALL SELECT NULL");
+        String union = compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT id FROM item UNION ALL SELECT NULL");
         assertTrue(union.contains("val `id`: Int?,"));
     }
     @Test void describesWritesWithoutExecutingThem() throws Exception {
-        compile("-- name: insert :exec\n-- scope: global\nINSERT INTO item VALUES (1,'not executed',null)");
+        compile("-- vev.name: insert :exec\n-- vev.scope: global\nINSERT INTO item VALUES (1,'not executed',null)");
         try (var c = postgres.connect(); var s = c.createStatement(); var r = s.executeQuery("SELECT count(*) FROM item")) {
             assertTrue(r.next()); assertEquals(0, r.getInt(1));
         }
     }
     @Test void requiredExpressionsDoNotMakeNullableExpressionsRequired() throws Exception {
-        String result = compile("-- name: query :one\n-- scope: global\nSELECT EXISTS(SELECT 1 FROM item) AS present, count(*) AS total FROM item");
+        String result = compile("-- vev.name: query :one\n-- vev.scope: global\nSELECT EXISTS(SELECT 1 FROM item) AS present, count(*) AS total FROM item");
         assertTrue(result.contains("val `present`: Boolean,"));
         assertTrue(result.contains("val `total`: Long,"));
-        String nullable = compile("-- name: query :one\n-- scope: global\nSELECT EXISTS(SELECT 1) AND NULL AS present, count(*) + NULL::bigint AS total FROM item");
+        String nullable = compile("-- vev.name: query :one\n-- vev.scope: global\nSELECT EXISTS(SELECT 1) AND NULL AS present, count(*) + NULL::bigint AS total FROM item");
         assertTrue(nullable.contains("val `present`: Boolean?,"));
         assertTrue(nullable.contains("val `total`: Long?,"));
-        String union = compile("-- name: query :many\n-- scope: global\nSELECT EXISTS(SELECT 1) AS present UNION ALL SELECT NULL");
+        String union = compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT EXISTS(SELECT 1) AS present UNION ALL SELECT NULL");
         assertTrue(union.contains("val `present`: Boolean?,"));
     }
 
     @Test void renamedOutputRemovesOnlyItsPreviouslyOwnedSource() throws Exception {
         Path queries = Files.createTempDirectory(directory, "rename-queries");
         Path output = Files.createTempDirectory(directory, "rename-output");
-        Files.writeString(queries.resolve("query.sql"), "-- name: query :many\n-- scope: global\nSELECT id FROM item");
+        Files.writeString(queries.resolve("query.sql"), "-- vev.name: query :many\n-- vev.scope: global\nSELECT id FROM item");
         Files.writeString(output.resolve("Handwritten.kt"), "// retained");
         try (var connection = postgres.connect()) {
             QueryCompiler.compile(connection, queries, output, "example", "Before");
@@ -182,30 +182,30 @@ class CompilerTest {
         assertEquals("// retained", Files.readString(output.resolve("Handwritten.kt")));
     }
     @Test void namedRepeatedNullableAndDomainParameters() throws Exception {
-        String result = compile("-- name: query :many\n-- scope: global\n-- nullable: name\n-- type: id ItemId\nSELECT id FROM item WHERE id=:id AND (:name::text IS NULL OR name=:name)");
+        String result = compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.nullable: name\n-- vev.type: id ItemId\nSELECT id FROM item WHERE id=:id AND (:name::text IS NULL OR name=:name)");
         assertTrue(result.contains("`id`: ItemId"));
         assertTrue(result.contains("`name`: String?"));
         assertTrue(result.contains("setObject(3, `name`"));
     }
     @Test void generationIsDeterministicAndDollarSafe() throws Exception {
-        String source = "-- name: query :one\n-- scope: global\nSELECT '$oops'::text AS value";
+        String source = "-- vev.name: query :one\n-- vev.scope: global\nSELECT '$oops'::text AS value";
         assertEquals(compile(source), compile(source));
         assertTrue(compile(source).contains("\\$oops"));
     }
     @Test void cardinalityAndDomainMistakesFailBuild() {
-        assertThrows(Exception.class, () -> compile("-- name: query :exec\n-- scope: global\nSELECT id FROM item"));
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\nDELETE FROM item"));
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- type: absent ItemId\nSELECT id FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :exec\n-- vev.scope: global\nSELECT id FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\nDELETE FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.type: absent ItemId\nSELECT id FROM item"));
     }
     @Test void textualPostgresTypesReachKotlinAsStrings() throws Exception {
-        String result = compile("-- name: query :many\n-- scope: global\nSELECT email, document, address FROM record");
+        String result = compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT email, document, address FROM record");
         assertTrue(result.contains("val `email`: String,"), result);
         assertTrue(result.contains("val `document`: String?,"), result);
         assertTrue(result.contains("val `address`: String?,"), result);
     }
 
     @Test void enumColumnsAndParametersUseTheDeclaredKotlinEnum() throws Exception {
-        String result = compile("-- name: query :many\n-- scope: global\n-- enum: status example.Status\nSELECT status FROM record WHERE status = :status");
+        String result = compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.enum: status example.Status\nSELECT status FROM record WHERE status = :status");
         assertTrue(result.contains("val `status`: example.Status,"), result);
         assertTrue(result.contains("`status`: example.Status"), result);
         assertTrue(result.contains("example.Status.valueOf("), result);
@@ -213,24 +213,24 @@ class CompilerTest {
     }
 
     @Test void nullableEnumsDecodeAndBindThroughLet() throws Exception {
-        String result = compile("-- name: query :many\n-- scope: global\n-- enum: kind example.Kind\n-- nullable: kind\nSELECT kind FROM record WHERE (:kind::text IS NULL OR kind = :kind)");
+        String result = compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.enum: kind example.Kind\n-- vev.nullable: kind\nSELECT kind FROM record WHERE (:kind::text IS NULL OR kind = :kind)");
         assertTrue(result.contains("val `kind`: example.Kind?,"), result);
         assertTrue(result.contains("?.let { example.Kind.valueOf(it) }"), result);
         assertTrue(result.contains("`kind`?.name"), result);
     }
 
     @Test void enumDeclarationsMustBeTextualAndKnown() {
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- enum: id example.Status\nSELECT id FROM record"));
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- enum: absent example.Status\nSELECT id FROM record"));
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- enum: status lowercase\nSELECT status FROM record"));
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- enum: status example.Status\n-- type: status Wrapped\nSELECT status FROM record"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.enum: id example.Status\nSELECT id FROM record"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.enum: absent example.Status\nSELECT id FROM record"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.enum: status lowercase\nSELECT status FROM record"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.enum: status example.Status\n-- vev.type: status Wrapped\nSELECT status FROM record"));
     }
 
     @Test void notnullOverridesConservativeNullabilityWithAGuardedRead() throws Exception {
-        String conservative = compile("-- name: query :many\n-- scope: global\nWITH source AS (SELECT id, name FROM item) SELECT id, name FROM source");
+        String conservative = compile("-- vev.name: query :many\n-- vev.scope: global\nWITH source AS (SELECT id, name FROM item) SELECT id, name FROM source");
         assertTrue(conservative.contains("val `id`: Int?,"), conservative);
         assertTrue(conservative.contains("val `name`: String?,"), conservative);
-        String declared = compile("-- name: query :many\n-- scope: global\n-- notnull: id, name\nWITH source AS (SELECT id, name FROM item) SELECT id, name FROM source");
+        String declared = compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.notnull: id, name\nWITH source AS (SELECT id, name FROM item) SELECT id, name FROM source");
         assertTrue(declared.contains("val `id`: Int,"), declared);
         assertTrue(declared.contains("val `name`: String,"), declared);
         // A wrong declaration must fail loudly at the row, never decode as a wrong value.
@@ -238,24 +238,23 @@ class CompilerTest {
     }
 
     @Test void notnullMustNameAResultColumn() {
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- notnull: absent\nSELECT id FROM item"));
-        assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\n-- notnull: missing\nSELECT id FROM item WHERE id = :id"));
-        assertThrows(Exception.class, () -> compile("-- name: query :exec\n-- scope: global\n-- notnull: id\nDELETE FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.notnull: absent\nSELECT id FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.notnull: missing\nSELECT id FROM item WHERE id = :id"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: query :exec\n-- vev.scope: global\n-- vev.notnull: id\nDELETE FROM item"));
     }
 
     @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
-        String result = compile("-- name: lock :void\n-- scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
+        String result = compile("-- vev.name: lock :void\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
         assertTrue(result.contains("fun `lock`(`key`: String): Unit ="), result);
         assertTrue(result.contains("_vevStmt.execute()"), result);
         assertFalse(result.contains("LockRow"), result);
     }
 
-    @Test void streamQueriesGenerateConsumerCallbacksAndRejectRowLimits() throws Exception {
+    @Test void streamQueriesGenerateConsumerCallbacks() throws Exception {
         String result = compile("-- vev.name: exportItems :stream\n-- vev.scope: global\nSELECT id, name FROM item");
         assertTrue(result.contains("fun `exportItems`(onRow: java.util.function.Consumer<`ExportItemsRow`>): Unit"), result);
         assertTrue(result.contains("_vevStmt.setFetchSize(no.beint.vev.Session.DEFAULT_STREAM_FETCH_SIZE)"), result);
         assertTrue(result.contains("onRow.accept(readRow(_vevResult))"), result);
-        assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: bad :stream\n-- vev.scope: global\n-- vev.rows: 100\nSELECT id FROM item"));
         assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: bad :stream\n-- vev.scope: global\nSELECT id FROM item WHERE name = :onRow"));
     }
 
@@ -281,28 +280,28 @@ class CompilerTest {
     }
 
     @Test void voidResultsMustBeDeclaredVoidAndVoidQueriesMustBeValueless() {
-        assertThrows(Exception.class, () -> compile("-- name: lock :one\n-- scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0)) AS locked"));
-        assertThrows(Exception.class, () -> compile("-- name: lock :void\n-- scope: global\nSELECT id FROM item"));
-        assertThrows(Exception.class, () -> compile("-- name: lock :void\n-- scope: global\nDELETE FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: lock :one\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0)) AS locked"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: lock :void\n-- vev.scope: global\nSELECT id FROM item"));
+        assertThrows(Exception.class, () -> compile("-- vev.name: lock :void\n-- vev.scope: global\nDELETE FROM item"));
     }
 
     @Test void unnamedResultColumnsSayToAddAnAlias() {
-        var failure = assertThrows(Exception.class, () -> compile("-- name: query :one\n-- scope: global\nSELECT count(*) > 0 FROM item"));
+        var failure = assertThrows(Exception.class, () -> compile("-- vev.name: query :one\n-- vev.scope: global\nSELECT count(*) > 0 FROM item"));
         assertTrue(failure.getMessage().contains("has no name"), failure.getMessage());
         assertTrue(failure.getMessage().contains("alias"), failure.getMessage());
     }
 
     @Test void schemaChangesFailGeneration() throws Exception {
-        compile("-- name: query :many\n-- scope: global\nSELECT name FROM item");
+        compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT name FROM item");
         try (var connection = postgres.connect(); var statement = connection.createStatement()) {
             statement.execute("ALTER TABLE item RENAME COLUMN name TO renamed");
-            try { assertThrows(Exception.class, () -> compile("-- name: query :many\n-- scope: global\nSELECT name FROM item")); }
+            try { assertThrows(Exception.class, () -> compile("-- vev.name: query :many\n-- vev.scope: global\nSELECT name FROM item")); }
             finally { statement.execute("ALTER TABLE item RENAME COLUMN renamed TO name"); }
         }
     }
     @ParameterizedTest @ValueSource(strings={"bigint","text","uuid"})
     void automaticTenantBindingsRejectNonIntegerPostgresTypes(String type) throws Exception {
-        var source=SqlSource.parse(Path.of("tenant.sql"),"-- name: tenant :one\nSELECT :tenantId::"+type+" AS tenant_id");
+        var source=SqlSource.parse(Path.of("tenant.sql"),"-- vev.name: tenant :one\nSELECT :tenantId::"+type+" AS tenant_id");
         try(var connection=postgres.connect()) {
             var error=assertThrows(IllegalArgumentException.class,()->QueryCompiler.describe(connection,source));
             assertTrue(error.getMessage().contains("Tenant parameter must be PostgreSQL integer"));
