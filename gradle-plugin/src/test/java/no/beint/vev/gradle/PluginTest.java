@@ -177,6 +177,53 @@ class PluginTest {
         runner.withArguments(":app:compileKotlin", ":storage:compileTestKotlin", "--configuration-cache").build();
     }
 
+    /** Unused queries fail `check` but never generation or compilation, so SQL can be written before its caller. */
+    @Test void checkRejectsQueriesThatMainCodeNeverCalls() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/"),
+                project.resolve(".vev-schema-cache").toString().replace("\\", "/")));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Path sql = Files.createDirectories(project.resolve("src/main/sql/item"));
+        for (String name : List.of("find", "rename", "export", "unused")) {
+            String body = switch (name) {
+                case "rename" -> "-- vev.name: rename :exec\n-- vev.scope: global\nUPDATE item SET name=:name WHERE id=:id;";
+                case "export" -> "-- vev.name: export :stream\n-- vev.scope: global\nSELECT id FROM item;";
+                default -> "-- vev.name: " + name + " :optional\n-- vev.scope: global\nSELECT name FROM item WHERE id=:id;";
+            };
+            Files.writeString(sql.resolve(name + ".sql"), body);
+        }
+        Path kotlin = Files.createDirectories(project.resolve("src/main/kotlin"));
+        // A direct call, a call inside a lambda, and a function reference all count as calls.
+        Files.writeString(kotlin.resolve("Store.kt"), """
+                package sample
+                import sample.sql.Queries
+                fun name(id: Int): String? = Queries.find(id)?.name
+                fun renameAll(ids: List<Int>) = ids.forEach { Queries.rename("x", it) }
+                internal val export: (java.util.function.Consumer<sample.sql.ExportRow>) -> Unit = Queries::export
+                """);
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        runner.withArguments("compileKotlin", "--console=plain").build();
+        var failure = runner.withArguments("check", "--console=plain").buildAndFail();
+        assertTrue(failure.getOutput().contains("src/main/sql/item/unused.sql (Queries.unused)"), failure.getOutput());
+        for (String used : List.of("find.sql", "rename.sql", "export.sql")) {
+            assertFalse(failure.getOutput().contains(used), failure.getOutput());
+        }
+        Files.delete(sql.resolve("unused.sql"));
+        var success = runner.withArguments("check", "--console=plain").build();
+        assertTrue(success.getOutput().contains("BUILD SUCCESSFUL"), success.getOutput());
+        assertTrue(runner.withArguments("check", "--console=plain").build().getOutput().contains("Reusing configuration cache"));
+    }
+
     private static int count(String text, String needle) {
         int total = 0;
         for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) total++;

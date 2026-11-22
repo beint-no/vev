@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "3.0.0"
+    id("no.beint.vev") version "3.1.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -168,6 +168,10 @@ copy-on-write on subsequent builds, skipping `initdb` and Flyway replay on SQL-o
 Unchanged generation is skipped. SQL edits rewrite only changed implementations; schema changes
 revalidate queries. Identical generated files retain their timestamps. The Kotlin facade remains
 stable when signatures do.
+
+`check` (and so `build`) runs `verifyVevUsage`, which reads the module's compiled main classes and fails
+when a generated query is never called. Generation and compilation accept unused queries, so SQL can be written
+and generated before the code that calls it. Delete the SQL file of a query that is no longer called.
 
 A failing build reports every rejected query file at once and writes no generated code.
 Application statements are described, not executed. Runtime constraints, permissions,

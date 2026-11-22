@@ -2,9 +2,12 @@ package no.beint.vev.gradle;
 
 import org.gradle.api.Plugin;
 import org.gradle.api.Project;
+import org.gradle.api.plugins.JavaPluginExtension;
+import org.gradle.api.tasks.SourceSet;
+import org.gradle.language.base.plugins.LifecycleBasePlugin;
 import org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension;
 
-/** Generates main-source Kotlin query APIs before Kotlin compilation. */
+/** Generates main-source Kotlin query APIs before Kotlin compilation and checks that main code calls each one. */
 public final class VevPlugin implements Plugin<Project> {
     @Override public void apply(Project project) {
         String version = version();
@@ -26,6 +29,21 @@ public final class VevPlugin implements Plugin<Project> {
             generate.getPostgresVersion().convention(project.getProviders().of(PostgresVersion.class,
                     specification -> specification.getParameters().getBin().set(generate.getPostgresBin())));
             generate.getCompilerClasspath().from(compiler);
+        });
+        project.getPluginManager().withPlugin("java", ignored -> {
+            var main = project.getExtensions().getByType(JavaPluginExtension.class).getSourceSets()
+                    .getByName(SourceSet.MAIN_SOURCE_SET_NAME);
+            var verify = project.getTasks().register("verifyVevUsage", VerifyQueryUsage.class, check -> {
+                check.setGroup("verification");
+                check.setDescription("Fail when main code never calls a generated query");
+                check.getClasses().from(main.getOutput().getClassesDirs());
+                check.getQueries().set(task.flatMap(GenerateSql::getQueries));
+                check.getPackageName().set(task.flatMap(GenerateSql::getPackageName));
+                check.getClassName().set(task.flatMap(GenerateSql::getClassName));
+                check.getProjectDirectory().set(project.getLayout().getProjectDirectory());
+                check.getReport().set(project.getLayout().getBuildDirectory().file("reports/vev/query-usage.txt"));
+            });
+            project.getTasks().named(LifecycleBasePlugin.CHECK_TASK_NAME).configure(check -> check.dependsOn(verify));
         });
         project.getPluginManager().withPlugin("org.jetbrains.kotlin.jvm", ignored -> {
             var kotlin = project.getExtensions().getByType(KotlinJvmProjectExtension.class);
