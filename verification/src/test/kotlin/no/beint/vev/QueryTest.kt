@@ -165,12 +165,32 @@ class QueryTest {
         assertThrows(IllegalStateException::class.java) { vev.read(7) { Queries.customers(null) } }
     }
 
-    @Test fun `default list ceiling returns the complete boundary and fails on the next row`() {
-        assertEquals(1000, vev.readGlobal { Queries.boundedSeries(1000) }.size)
+    @Test fun `lists are unbounded unless a row bound is declared`() {
+        assertEquals(5000, vev.readGlobal { Queries.boundedSeries(5000) }.size)
+    }
+
+    @Test fun `declared list ceiling returns the complete boundary and fails on the next row`() {
+        assertEquals(1000, vev.readGlobal { Queries.cappedSeries(1000) }.size)
         val failure = assertThrows(IllegalStateException::class.java) {
-            vev.readGlobal { Queries.boundedSeries(1001) }
+            vev.readGlobal { Queries.cappedSeries(1001) }
         }
         assertTrue(failure.message!!.contains("exceeded its row bound: 1000"))
+    }
+
+    @Test fun `custom plan queries never become server-prepared statements`() {
+        postgres.connect().use { connection ->
+            connection.autoCommit = false
+            fun namedStatements(): Int = connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT count(*) FROM pg_prepared_statements WHERE NOT from_sql").use { it.next(); it.getInt(1) }
+            }
+            Session.borrow(connection) {
+                repeat(10) { assertEquals(if (it % 2 == 0) 20 else 11, Queries.customPlanSeries(if (it % 2 == 0) null else 10).size) }
+            }
+            assertEquals(0, namedStatements(), "A custom plan query must stay an unnamed statement")
+            Session.borrow(connection) { repeat(10) { Queries.boundedSeries(3) } }
+            assertTrue(namedStatements() > 0, "Without the directive pgJDBC server-prepares a repeated statement")
+            connection.rollback()
+        }
     }
 
     @Test fun `caught query failures poison and roll back the transaction`() {
