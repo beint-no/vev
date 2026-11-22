@@ -8,7 +8,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.junit.jupiter.api.Assertions.*;
 
 class SqlSourceTest {
-    private SqlSource parse(String sql) { return SqlSource.parse(Path.of("test.sql"), "-- name: find :many\n-- scope: global\n" + sql); }
+    private SqlSource parse(String sql) { return SqlSource.parse(Path.of("test.sql"), "-- vev.name: find :many\n-- vev.scope: global\n" + sql); }
 
     @Test void preservesQuotedTokensAndCasts() {
         var source = parse("SELECT ':hidden', $$:hidden;$$, $tag$:hidden$tag$, \"column:quoted\", :id::int, :id -- :hidden\n /* :hidden /* nested */ */");
@@ -57,9 +57,9 @@ class SqlSourceTest {
     }
 
     @Test void directiveErrorsAreExplicit() {
-        assertThrows(IllegalArgumentException.class, () -> parse("-- nullable: absent\nSELECT :id"));
-        assertThrows(IllegalArgumentException.class, () -> parse("-- rows: 0\nSELECT 1"));
-        assertThrows(IllegalArgumentException.class, () -> parse("SELECT 1\n-- rows: 4"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.nullable: absent\nSELECT :id"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.rows: 10\nSELECT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT 1\n-- vev.plan: custom"));
         assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(Path.of("x.sql"), "SELECT 1"));
     }
 }

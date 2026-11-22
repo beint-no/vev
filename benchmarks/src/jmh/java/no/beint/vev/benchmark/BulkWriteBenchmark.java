@@ -20,7 +20,7 @@ public class BulkWriteBenchmark {
     }
     @TearDown(Level.Trial) public void close() throws Exception { if(fixture!=null) fixture.close(); }
     @Benchmark public long generatedBulk() throws Exception {
-        try { return Session.borrow(fixture.connection,1,s->Queries.bulkDepartments(ids)); }
+        try { return Session.borrowTenant(fixture.connection, 1,s->Queries.bulkDepartments(ids)); }
         finally { fixture.connection.rollback(); }
     }
     @Benchmark public long jdbcBulk() throws Exception {

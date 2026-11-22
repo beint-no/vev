@@ -36,7 +36,7 @@ public final class BuildPerformance {
                             case 3 -> "SELECT d.id,p.total FROM departments d CROSS JOIN LATERAL (SELECT sum(amount) AS total FROM postings p WHERE p.department_id=d.id AND p.tenant_id=d.tenant_id) p WHERE d.tenant_id=:tenantId AND d.id>"+i;
                             default -> "SELECT id,amount FROM postings WHERE tenant_id=:tenantId AND id=ANY(:ids::bigint[]) AND id>"+i;
                         };
-                        Files.writeString(queries.resolve("query"+i+".sql"), "-- name: query"+i+" :many\n"+query);
+                        Files.writeString(queries.resolve("query"+i+".sql"), "-- vev.name: query"+i+" :many\n"+query);
                     }
                     start=System.nanoTime(); QueryCompiler.compile(connection, queries, output, "benchmark.generated", "Queries");
                     double generation=seconds(start);

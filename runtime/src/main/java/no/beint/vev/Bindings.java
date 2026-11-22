@@ -21,8 +21,6 @@ public final class Bindings implements AutoCloseable {
         this.statement = statement;
     }
 
-    public PreparedStatement statement() { return statement; }
-
     public void array(int position, String elementType, Object[] values) throws SQLException {
         if (values == null) { statement.setNull(position, java.sql.Types.ARRAY); return; }
         Object[] adapted = values;

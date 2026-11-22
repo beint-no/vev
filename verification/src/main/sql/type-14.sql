@@ -1,4 +1,4 @@
--- name: typeCase14 :one
--- scope: global
--- nullable: value
+-- vev.name: typeCase14 :one
+-- vev.scope: global
+-- vev.nullable: value
 SELECT :value::uuid AS value;

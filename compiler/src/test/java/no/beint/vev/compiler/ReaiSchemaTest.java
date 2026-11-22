@@ -36,7 +36,7 @@ class ReaiSchemaTest {
     @AfterAll void stop() throws Exception { if (postgres != null) postgres.close(); }
 
     private QueryCompiler.Query describe(String sql, String cardinality) throws Exception {
-        var source = SqlSource.parse(Path.of("reai.sql"), "-- name: query :" + cardinality + "\n-- scope: global\n" + sql);
+        var source = SqlSource.parse(Path.of("reai.sql"), "-- vev.name: query :" + cardinality + "\n-- vev.scope: global\n" + sql);
         try (var connection = postgres.connect()) { return QueryCompiler.describe(connection, source); }
     }
     private static String quoted(String name) { return "\"" + name.replace("\"", "\"\"") + "\""; }
@@ -78,7 +78,7 @@ class ReaiSchemaTest {
     @TestFactory Stream<DynamicTest> tenantQueriesBindInferredIntegerParametersAcrossRealTables() {
         return columns.stream().filter(c -> c.name.equals("tenant_id") && c.type.equals("int4")).map(column ->
             DynamicTest.dynamicTest(column.table + " tenant", () -> {
-                var source = SqlSource.parse(Path.of("tenant.sql"), "-- name: scoped :many\nSELECT tenant_id FROM " + quoted(column.table) + " WHERE tenant_id=:tenantId");
+                var source = SqlSource.parse(Path.of("tenant.sql"), "-- vev.name: scoped :many\nSELECT tenant_id FROM " + quoted(column.table) + " WHERE tenant_id=:tenantId");
                 try (var connection = postgres.connect()) {
                     var query = QueryCompiler.describe(connection, source);
                     assertEquals("Int", query.parameters().getFirst().type().kotlin());

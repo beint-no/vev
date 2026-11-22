@@ -1,5 +1,5 @@
--- name: vouchers :many
--- notnull: id,date,total
+-- vev.name: vouchers :many
+-- vev.notnull: id,date,total
 WITH amounts AS (
     SELECT voucher_id,tenant_id,sum(amount) AS total FROM postings
     WHERE tenant_id=:tenantId GROUP BY voucher_id,tenant_id

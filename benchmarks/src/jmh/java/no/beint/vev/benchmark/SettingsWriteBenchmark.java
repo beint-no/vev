@@ -67,7 +67,7 @@ public class SettingsWriteBenchmark {
     }
     @Benchmark public BigDecimal generatedSettingsSave() throws Exception {
         try {
-            var result=Session.borrow(fixture.connection,tenant,s->Queries.saveDefaultHourlyRate(amount)).getDefaultHourlyRate();
+            var result=Session.borrowTenant(fixture.connection, tenant,s->Queries.saveDefaultHourlyRate(amount)).getDefaultHourlyRate();
             checkStored();return result;
         }finally {fixture.connection.rollback();}
     }

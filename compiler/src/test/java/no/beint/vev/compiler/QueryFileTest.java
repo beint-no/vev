@@ -18,7 +18,8 @@ class QueryFileTest {
 
     @ParameterizedTest @ValueSource(strings = {
         "-- vev.scpoe: global\nSELECT :tenantId::int AS id;",
-        "-- vev.rows: 5\n-- rows: 10\nSELECT :tenantId::int AS id;",
+        "-- vev.rows: 5\nSELECT :tenantId::int AS id;",
+        "-- nullable: id\nSELECT :tenantId::int AS id;",
         "SELECT :tenantId::int AS id\n-- vev.name: next :one\nSELECT 1;",
         "SELECT :tenantId::int AS id;\n-- vev.notnull: id",
         "SELECT :tenantId::int AS id;\nDELETE FROM customer;",
@@ -29,22 +30,20 @@ class QueryFileTest {
                 () -> SqlSource.parse(FILE, "-- vev.name: first :one\n" + body));
     }
 
-    @Test void ordinaryCommentsBetweenDirectivesPreserveTheRowBound() {
-        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\n/* outer /* nested */ */\n"
-                + "-- vev.rows: 7\nSELECT :tenantId::int AS id");
-        assertEquals(7, query.maxRows());
+    @Test void ordinaryCommentsBetweenDirectivesKeepLaterDirectives() {
+        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\n/* outer /* nested */ */\n-- a note: kept\n"
+                + "-- vev.plan: custom\nSELECT :tenantId::int AS id");
+        assertTrue(query.customPlan());
     }
 
-    @ParameterizedTest @ValueSource(strings = {":one", ":optional", ":exec", ":void"})
-    void rowBoundRequiresAListResult(String cardinality) {
+    @Test void unprefixedDirectivesNameTheirPrefixedSpelling() {
         var error = assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(FILE,
-                "-- vev.name: customers " + cardinality + "\n-- vev.rows: 7\nSELECT :tenantId::int AS id"));
-        assertTrue(error.getMessage().contains("rows requires :many"));
+                "-- name: customers :many\nSELECT :tenantId::int AS id"));
+        assertTrue(error.getMessage().contains("-- vev.name: customers :many"), error.getMessage());
     }
 
-    @Test void listsAreUnboundedUnlessARowBoundIsDeclared() {
+    @Test void plansAreGenericUnlessCustomIsDeclared() {
         var query = SqlSource.parse(FILE, "-- vev.name: customers :many\nSELECT :tenantId::int AS id");
-        assertEquals(0, query.maxRows());
         assertFalse(query.customPlan());
     }
 
@@ -54,14 +53,14 @@ class QueryFileTest {
     }
 
     @Test void carriageReturnsEndDirectivesAndSqlComments() {
-        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\r-- vev.rows: 7\r"
+        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\r-- vev.plan: custom\r"
                 + "SELECT -- an ordinary comment\r:tenantId::int AS id");
-        assertEquals(7, query.maxRows());
+        assertTrue(query.customPlan());
         assertEquals(java.util.List.of("tenantId"), query.parameters());
     }
 
     @Test void singleQueryApiRejectsMultipleQueries() {
         assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(FILE,
-                "-- name: first :one\nSELECT :tenantId::int AS id;\n-- name: next :one\nSELECT :tenantId::int AS id;"));
+                "-- vev.name: first :one\nSELECT :tenantId::int AS id;\n-- vev.name: next :one\nSELECT :tenantId::int AS id;"));
     }
 }

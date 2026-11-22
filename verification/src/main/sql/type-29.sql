@@ -1,4 +1,4 @@
--- name: typeCase29 :one
--- scope: global
--- nullable: value
+-- vev.name: typeCase29 :one
+-- vev.scope: global
+-- vev.nullable: value
 SELECT :value::text[] AS value;

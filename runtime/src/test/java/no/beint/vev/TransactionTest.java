@@ -112,21 +112,30 @@ class TransactionTest {
     }
     @Test void appliesConfiguredQueryTimeoutOnPreparedStatements() throws Exception {
         Fixture f = new Fixture();
-        new Vev(f.source, Vev.DEFAULT_ISOLATION, 30).read(7, s -> {
+        new Vev(f.source, Vev.DEFAULT_ISOLATION, java.time.Duration.ofSeconds(30)).read(7, s -> {
             try (var stmt = s.prepare("SELECT 1")) { return stmt; }
         });
         assertEquals(30, f.queryTimeout);
 
         Fixture borrowed = new Fixture(); borrowed.autoCommit = false;
-        Session.borrowTenant(borrowed.connection, 7, 12, s -> {
+        Session.borrowTenant(borrowed.connection, 7, java.time.Duration.ofSeconds(12), s -> {
             try (var stmt = s.prepare("SELECT 1")) { return stmt; }
         });
         assertEquals(12, borrowed.queryTimeout);
         assertFalse(borrowed.calls.contains("getMetaData"));
     }
+    @Test void borrowedGlobalScopeAppliesItsTimeoutWithoutATenant() throws Exception {
+        Fixture f = new Fixture(); f.autoCommit = false;
+        Session.borrowGlobal(f.connection, java.time.Duration.ofMillis(1500), s -> {
+            try (var stmt = s.prepare("SELECT 1")) { return stmt; }
+        });
+        assertThrows(IllegalStateException.class, () -> Session.borrowGlobal(f.connection, java.time.Duration.ofSeconds(30), s -> Session.tenant()));
+        assertEquals(2, f.queryTimeout, "A partial second rounds up instead of disabling the timeout");
+        assertThrows(IllegalArgumentException.class, () -> Session.borrowGlobal(f.connection, java.time.Duration.ZERO, s -> 1));
+    }
     @Test void borrowedScopeDoesNotCommitCloseOrRollback() throws Exception {
         Fixture f = new Fixture(); f.autoCommit = false;
-        assertEquals(7, Session.<Integer>borrow(f.connection, s -> 7).intValue());
+        assertEquals(7, Session.<Integer>borrowGlobal(f.connection, s -> 7).intValue());
         assertFalse(f.calls.contains("commit"));
         assertFalse(f.calls.contains("close"));
         assertFalse(f.calls.contains("rollback"));
@@ -134,7 +143,7 @@ class TransactionTest {
     @Test void isolationIsDeliberate() {
         Fixture f = new Fixture();
         assertThrows(IllegalArgumentException.class, () -> new Vev(f.source, Connection.TRANSACTION_NONE));
-        assertThrows(IllegalArgumentException.class, () -> new Vev(f.source, Vev.DEFAULT_ISOLATION, -1));
+        assertThrows(IllegalArgumentException.class, () -> new Vev(f.source, Vev.DEFAULT_ISOLATION, java.time.Duration.ofSeconds(-1)));
         assertDoesNotThrow(() -> new Vev(f.source, Connection.TRANSACTION_SERIALIZABLE));
     }
     @Test void defaultIsolationDoesNotIssueRedundantDatabaseCommands() throws Exception {

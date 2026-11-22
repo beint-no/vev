@@ -41,7 +41,7 @@ public class QueryBenchmark {
     }
 
     @Benchmark public List<CustomersRow> generated() throws Exception {
-        var rows = Session.borrow(connection, 7, session -> Queries.customers(null));
+        var rows = Session.borrowTenant(connection, 7, session -> Queries.customers(null));
         connection.commit();
         return rows;
     }
@@ -54,7 +54,6 @@ public class QueryBenchmark {
             statement.setObject(3, null, java.sql.Types.VARCHAR);
             try (var result = statement.executeQuery()) {
                 while (result.next()) {
-                    if (rows.size() == 5) throw new IllegalStateException("row bound");
                     rows.add(new CustomersRow(java.util.Objects.requireNonNull(result.getObject(1, Integer.class)), java.util.Objects.requireNonNull(result.getObject(2, String.class))));
                 }
             }

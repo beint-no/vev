@@ -17,11 +17,10 @@ for result in results:
 indexed = {(r["benchmark"].rsplit(".", 1)[-1], tuple(sorted(r.get("params", {}).items()))): r for r in results}
 pairs = [("generated", "jdbc"), ("generatedLedger", "jdbcLedger"),
          ("generatedPage", "jdbcPage"), ("generatedInsert", "jdbcInsert"), ("generatedBulk", "jdbcBulk"),
-         ("singleRow", "legacyListSingleRow"), ("generatedSettingsSave", "jdbcSettingsSave")]
+         ("generatedSettingsSave", "jdbcSettingsSave")]
 for generated, jdbc in pairs:
     variants = [(params, value) for (name, params), value in indexed.items() if name == generated]
-    expected_rows = {"generatedPage": {"1", "100", "600"}, "generatedBulk": {"1", "32", "512"},
-                     "singleRow": {"0", "1"}}
+    expected_rows = {"generatedPage": {"1", "100", "600"}, "generatedBulk": {"1", "32", "512"}}
     if generated == "generatedSettingsSave":
         expected = {(operation, value) for operation in ("insert", "update", "unchanged") for value in ("null", "12.50")}
         actual = {(dict(params).get("operation"), dict(params).get("value")) for params, _ in variants}
@@ -36,7 +35,7 @@ for generated, jdbc in pairs:
     for params, a in variants:
         b = indexed[(jdbc, params)]
         label = f"{generated}{dict(params)}"
-        baseline = "Vev 2.0 list path" if jdbc == "legacyListSingleRow" else "JDBC"
+        baseline = "JDBC"
         left, right = a["primaryMetric"], b["primaryMetric"]
         if left["scoreUnit"] != right["scoreUnit"]:
             failures.append(f"{label}: incompatible units")

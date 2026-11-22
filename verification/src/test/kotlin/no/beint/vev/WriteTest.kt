@@ -172,7 +172,7 @@ class WriteTest {
             Queries.renameCustomers("owner",listOf(id))
             Executors.newVirtualThreadPerTaskExecutor().use { executor ->
                 val state=executor.submit<String> {
-                    try { vev.write(7) { s -> s.execute("SET LOCAL lock_timeout='50ms'",{});Queries.renameCustomers("waiter",listOf(id)) };"unexpected" }
+                    try { vev.write(7) { s -> s.prepare("SET LOCAL lock_timeout='50ms'").use { it.execute() };Queries.renameCustomers("waiter",listOf(id)) };"unexpected" }
                     catch (failure: SQLException) { failure.sqlState }
                 }.get(10,TimeUnit.SECONDS)
                 assertEquals("55P03",state)
@@ -187,7 +187,7 @@ class WriteTest {
             val futures=(0..1).map { n -> executor.submit<Pair<Int,String>> {
                 try {
                     vev.write(7) { s ->
-                        s.execute("SET LOCAL deadlock_timeout='50ms'",{})
+                        s.prepare("SET LOCAL deadlock_timeout='50ms'").use { it.execute() }
                         Queries.renameCustomers("$n first",listOf(ids[n]))
                         barrier.await(10,TimeUnit.SECONDS)
                         Queries.renameCustomers("$n second",listOf(ids[1-n]))
@@ -203,15 +203,15 @@ class WriteTest {
     @Test fun `borrowed caller can recover at a savepoint only by starting a new scope`() {
         postgres.connect().use { connection ->
             connection.autoCommit=false
-            Session.borrow(connection,7) { Queries.saveWriteSettings(BigDecimal.ONE,"before") }
+            Session.borrowTenant(connection, 7) { Queries.saveWriteSettings(BigDecimal.ONE,"before") }
             val point=connection.setSavepoint()
             assertThrows(IllegalStateException::class.java) {
-                Session.borrow(connection,7) {
+                Session.borrowTenant(connection, 7) {
                     try { Queries.saveWriteSettings(BigDecimal.ZERO,"invalid") } catch (_: SQLException) { connection.rollback(point) }
                     Queries.writeSettings()
                 }
             }
-            Session.borrow(connection,7) { Queries.renameWriteSettings("recovered",0) }
+            Session.borrowTenant(connection, 7) { Queries.renameWriteSettings("recovered",0) }
             connection.commit()
         }
         assertEquals("recovered",vev.read(7) { Queries.writeSettings()!!.label })

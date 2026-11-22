@@ -1,4 +1,4 @@
--- name: typeCase23 :one
--- scope: global
--- nullable: value
+-- vev.name: typeCase23 :one
+-- vev.scope: global
+-- vev.nullable: value
 SELECT :value::int2[] AS value;

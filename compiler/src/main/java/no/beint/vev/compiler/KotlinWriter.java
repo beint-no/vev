@@ -92,22 +92,10 @@ final class KotlinWriter {
                 out.append(indent).append("    if (!_vevResult.next()) return emptyList()\n");
                 out.append(indent).append("    val _vevFirst = readRow(_vevResult)\n");
                 out.append(indent).append("    if (!_vevResult.next()) return listOf(_vevFirst)\n");
-                if (source.maxRows() == 0) {
-                    out.append(indent).append("    val _vevRows = ArrayList<").append(row).append(">(16)\n");
-                    out.append(indent).append("    _vevRows.add(_vevFirst)\n");
-                    out.append(indent).append("    do _vevRows.add(readRow(_vevResult)) while (_vevResult.next())\n");
-                    out.append(indent).append("    return java.util.Collections.unmodifiableList(_vevRows)\n");
-                } else if (source.maxRows() == 1) {
-                    out.append(indent).append("    throw IllegalStateException(\"Vev query exceeded its row bound: 1\")\n");
-                } else {
-                    out.append(indent).append("    val _vevRows = ArrayList<").append(row).append(">(").append(Math.min(source.maxRows(), 16)).append(")\n");
-                    out.append(indent).append("    _vevRows.add(_vevFirst)\n");
-                    out.append(indent).append("    do {\n");
-                    out.append(indent).append("        if (_vevRows.size == ").append(source.maxRows()).append(") throw IllegalStateException(\"Vev query exceeded its row bound: ").append(source.maxRows()).append("\")\n");
-                    out.append(indent).append("        _vevRows.add(readRow(_vevResult))\n");
-                    out.append(indent).append("    } while (_vevResult.next())\n");
-                    out.append(indent).append("    return java.util.Collections.unmodifiableList(_vevRows)\n");
-                }
+                out.append(indent).append("    val _vevRows = ArrayList<").append(row).append(">(16)\n");
+                out.append(indent).append("    _vevRows.add(_vevFirst)\n");
+                out.append(indent).append("    do _vevRows.add(readRow(_vevResult)) while (_vevResult.next())\n");
+                out.append(indent).append("    return java.util.Collections.unmodifiableList(_vevRows)\n");
                 out.append(indent).append("}\n");
             }
             case "stream" -> {
