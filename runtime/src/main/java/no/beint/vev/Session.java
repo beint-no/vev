@@ -116,6 +116,16 @@ public final class Session {
         return statement;
     }
 
+    /**
+     * Prepare a statement PostgreSQL plans with each execution's parameter values. pgJDBC otherwise switches to a
+     * server-side prepared statement after a few executions, whose cached generic plan cannot drop optional filters.
+     */
+    public PreparedStatement prepareCustomPlan(String sql) throws SQLException {
+        PreparedStatement statement = prepare(sql);
+        statement.unwrap(org.postgresql.PGStatement.class).setPrepareThreshold(0);
+        return statement;
+    }
+
     /** Return the active transaction connection for statement-local JDBC helpers such as array creation. */
     public Connection connection() {
         check();

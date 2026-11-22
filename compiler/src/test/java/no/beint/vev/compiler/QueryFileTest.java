@@ -21,7 +21,9 @@ class QueryFileTest {
         "-- vev.rows: 5\n-- rows: 10\nSELECT :tenantId::int AS id;",
         "SELECT :tenantId::int AS id\n-- vev.name: next :one\nSELECT 1;",
         "SELECT :tenantId::int AS id;\n-- vev.notnull: id",
-        "SELECT :tenantId::int AS id;\nDELETE FROM customer;"
+        "SELECT :tenantId::int AS id;\nDELETE FROM customer;",
+        "-- vev.plan: generic\nSELECT :tenantId::int AS id;",
+        "-- vev.plan: custom\n-- vev.plan: custom\nSELECT :tenantId::int AS id;"
     }) void invalidContractCannotBeSilentlyIgnored(String body) {
         assertThrows(IllegalArgumentException.class,
                 () -> SqlSource.parse(FILE, "-- vev.name: first :one\n" + body));
@@ -38,6 +40,17 @@ class QueryFileTest {
         var error = assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(FILE,
                 "-- vev.name: customers " + cardinality + "\n-- vev.rows: 7\nSELECT :tenantId::int AS id"));
         assertTrue(error.getMessage().contains("rows requires :many"));
+    }
+
+    @Test void listsAreUnboundedUnlessARowBoundIsDeclared() {
+        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\nSELECT :tenantId::int AS id");
+        assertEquals(0, query.maxRows());
+        assertFalse(query.customPlan());
+    }
+
+    @Test void customPlanDirectiveIsRecorded() {
+        var query = SqlSource.parse(FILE, "-- vev.name: customers :many\n-- vev.plan: custom\nSELECT :tenantId::int AS id");
+        assertTrue(query.customPlan());
     }
 
     @Test void carriageReturnsEndDirectivesAndSqlComments() {

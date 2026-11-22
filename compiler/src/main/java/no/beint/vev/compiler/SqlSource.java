@@ -14,9 +14,9 @@ import java.util.regex.Pattern;
 public record SqlSource(Path path, String name, String cardinality, int maxRows, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
                         Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
-                        String positionalSql) {
+                        String positionalSql, boolean customPlan) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
-    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|scope):.*";
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|rows|scope|plan):.*";
 
     private static String directive(Path path, String comment) {
         if (!comment.startsWith("vev.")) return comment;
@@ -49,7 +49,8 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         String cardinality = null;
         String tenant = "tenantId";
         boolean scopeDeclared = false;
-        int maxRows = 1000;
+        int maxRows = 0;
+        boolean customPlan = false;
         Set<String> nullable = new LinkedHashSet<>();
         Set<String> notNull = new LinkedHashSet<>();
         Map<String, String> domains = new LinkedHashMap<>();
@@ -68,7 +69,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
             sqlStart = end;
             if (!text.matches(DIRECTIVES)) continue;
             String key = text.substring(0, text.indexOf(':'));
-            if (Set.of("name", "rows", "scope").contains(key) && !singletonDirectives.add(key)) {
+            if (Set.of("name", "rows", "scope", "plan").contains(key) && !singletonDirectives.add(key)) {
                 throw error(path, "Duplicate " + key + " directive");
             }
             if (text.startsWith("name:")) {
@@ -97,6 +98,9 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
                 if (scopeDeclared || !text.substring(6).strip().equals("global")) throw error(path, "Use -- scope: global once to opt out of tenant binding");
                 scopeDeclared = true;
                 tenant = null;
+            } else if (text.startsWith("plan:")) {
+                if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- plan: custom to plan every execution with its parameter values");
+                customPlan = true;
             } else {
                 try { maxRows = Integer.parseInt(text.substring(5).strip()); }
                 catch (NumberFormatException failure) { throw error(path, "rows must be an integer"); }
@@ -230,7 +234,7 @@ public record SqlSource(Path path, String name, String cardinality, int maxRows,
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
         return new SqlSource(path, name, cardinality, maxRows, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip());
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), customPlan);
     }
 
     static String identifier(Path path, String name) {

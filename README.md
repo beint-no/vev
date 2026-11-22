@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "3.1.0"
+    id("no.beint.vev") version "3.2.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -111,7 +111,7 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 
 | Directive | Meaning |
 |---|---|
-| `-- vev.name: find :many` | Bounded list; maximum 1,000 rows by default |
+| `-- vev.name: find :many` | List of every result row |
 | `-- vev.name: find :one` | Exactly one row |
 | `-- vev.name: find :optional` | Zero or one row |
 | `-- vev.name: export :stream` | Stream rows via server-side cursor (`Consumer<Row>`) |
@@ -122,7 +122,8 @@ fail the build. The original unprefixed spelling (`-- name:` etc.) is also accep
 | `-- vev.notnull: id, total` | Assert and check non-null output values |
 | `-- vev.type: id CustomerId` | Generate a scalar Kotlin value class |
 | `-- vev.enum: status example.Status` | Map a textual column/input to an existing Kotlin enum |
-| `-- vev.rows: 500` | Optional `:many` result ceiling (default 1,000). Reading one extra row fails the call |
+| `-- vev.rows: 500` | Optional `:many` result ceiling. Reading one extra row fails the call |
+| `-- vev.plan: custom` | Plan every execution with its parameter values (see optional filters) |
 
 Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`; a parameter after
 `->` or `->>` must be cast (`:index::int` or `:key::text`) because PostgreSQL otherwise picks the text-key operator,
@@ -133,6 +134,12 @@ is a checked assertion rather than an inference. Unsupported types and result ro
 exceeding Kotlin’s JVM parameter limit fail generation with a query-local diagnostic.
 The same check covers captured query arguments; use PostgreSQL arrays instead of hundreds
 of separate binds.
+
+Optional filters stay one static query: `WHERE (:status::text IS NULL OR status = :status)`, with sorting by
+`CASE` or separate queries. pgJDBC server-prepares a statement after a few executions, and PostgreSQL may then
+reuse a generic plan that keeps every optional filter and cannot pick the index the given filters need. Declare
+`-- vev.plan: custom` on such queries. Each execution is then planned with its parameter values, so PostgreSQL
+folds the unused filters away as if the SQL had been built for that combination.
 
 Keep one query per file so agents can discover, read and change its complete contract
 without loading neighboring queries. Multiple statements or named queries in a file
