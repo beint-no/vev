@@ -1,7 +1,8 @@
 package no.beint.vev.reai
 
+import no.beint.vev.Db
 import no.beint.vev.Session
-import no.beint.vev.Vev
+import no.beint.vev.VevSqlException
 import no.beint.vev.compiler.Postgres
 import no.beint.vev.reai.fixture.Queries
 import org.junit.jupiter.api.Test
@@ -15,7 +16,6 @@ import org.postgresql.ds.PGSimpleDataSource
 import java.math.BigDecimal
 import java.nio.file.Files
 import java.nio.file.Path
-import java.sql.SQLException
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ProjectSettingsWriteTest {
     private lateinit var postgres: Postgres
-    private lateinit var vev: Vev
+    private lateinit var db: Db
     @BeforeAll fun start() {
         postgres=Postgres("")
         postgres.migrate(Path.of("../test-fixtures/reai/migration"))
@@ -32,7 +32,7 @@ class ProjectSettingsWriteTest {
             c.createStatement().use { it.execute(Files.readString(Path.of("../test-fixtures/reai/seed.sql"))) }
             c.commit()
         }
-        vev=Vev(PGSimpleDataSource().apply { setURL(postgres.url());user=postgres.user();password=postgres.password() })
+        db=Db(PGSimpleDataSource().apply { setURL(postgres.url());user=postgres.user();password=postgres.password() })
     }
     @AfterAll fun stop() { if (::postgres.isInitialized) postgres.close() }
 
@@ -49,12 +49,12 @@ class ProjectSettingsWriteTest {
                                 s.setInt(1,tenant);s.setBigDecimal(2,if(initial=="null")null else BigDecimal("100.00"));s.executeUpdate()
                             }
                             val before=c.prepareStatement("SELECT id FROM project_settings WHERE tenant_id=?").use { s -> s.setInt(1,tenant);s.executeQuery().use { r -> if(r.next())r.getInt(1) else null } }
-                            Session.borrowTenant(c, tenant) {
-                                val previous=Queries.defaultHourlyRate()
+                            Session.borrowTenantWrite(c, tenant) { tx ->
+                                val previous=Queries.defaultHourlyRate(tx)
                                 if(initial=="absent")assertNull(previous) else assertNotNull(previous)
                                 val expected=value?.let { BigDecimal(it).setScale(2) }
-                                assertEquals(expected,Queries.saveDefaultHourlyRate(value?.let(::BigDecimal)).defaultHourlyRate)
-                                assertEquals(expected,Queries.defaultHourlyRate()!!.defaultHourlyRate)
+                                assertEquals(expected,Queries.saveDefaultHourlyRate(tx, value?.let(::BigDecimal)).defaultHourlyRate)
+                                assertEquals(expected,Queries.defaultHourlyRate(tx)!!.defaultHourlyRate)
                                 assertEquals(1,c.prepareStatement("SELECT count(*) FROM project_settings WHERE tenant_id=?").use { s -> s.setInt(1,tenant);s.executeQuery().use { r -> r.next();r.getInt(1) } })
                                 if(before!=null)assertEquals(before,c.prepareStatement("SELECT id FROM project_settings WHERE tenant_id=?").use { s -> s.setInt(1,tenant);s.executeQuery().use { r -> r.next();r.getInt(1) } })
                                 c.prepareStatement("SELECT default_hourly_rate FROM project_settings WHERE tenant_id<>?").use { s -> s.setInt(1,tenant);s.executeQuery().use { r -> assertTrue(r.next());assertEquals(BigDecimal("77.00"),r.getBigDecimal(1));assertFalse(r.next()) } }
@@ -68,19 +68,18 @@ class ProjectSettingsWriteTest {
     @TestFactory fun `real schema constraint SQLSTATE survives generated write APIs`() =
         listOf("0" to "23514","-1" to "23514","10000000.01" to "23514","100000000" to "22003").map { (value,state) ->
             DynamicTest.dynamicTest("invalid numeric $value") {
-                assertEquals(state,assertThrows(SQLException::class.java) { vev.write(1) { Queries.saveDefaultHourlyRate(BigDecimal(value)) } }.sqlState)
+                assertEquals(state,assertThrows(VevSqlException::class.java) { db.write(1) { Queries.saveDefaultHourlyRate(it, BigDecimal(value)) } }.sqlState())
             }
         }
     @Test fun `actual tenant foreign key rejects nonexisting tenant`() {
-        assertEquals("23503",assertThrows(SQLException::class.java) { vev.write(Int.MAX_VALUE) { Queries.saveDefaultHourlyRate(BigDecimal.ONE) } }.sqlState)
-    }
-    @Test fun `real settings write respects read-only transactions`() {
-        assertEquals("25006",assertThrows(SQLException::class.java) { vev.read(1) { Queries.saveDefaultHourlyRate(BigDecimal.ONE) } }.sqlState)
+        val err = assertThrows(VevSqlException::class.java) { db.write(Int.MAX_VALUE) { Queries.saveDefaultHourlyRate(it, BigDecimal.ONE) } }
+        assertEquals("23503", err.sqlState())
+        assertTrue(err.isForeignKeyViolation())
     }
     @Test fun `numeric rounding remains PostgreSQL behavior rather than application validation`() {
         postgres.connect().use { c ->
             c.autoCommit=false
-            try { Session.borrowTenant(c, 1) { assertEquals(BigDecimal("1.01"),Queries.saveDefaultHourlyRate(BigDecimal("1.005")).defaultHourlyRate) } }
+            try { Session.borrowTenantWrite(c, 1) { assertEquals(BigDecimal("1.01"),Queries.saveDefaultHourlyRate(it, BigDecimal("1.005")).defaultHourlyRate) } }
             finally {c.rollback()}
         }
     }
@@ -91,11 +90,11 @@ class ProjectSettingsWriteTest {
             Executors.newVirtualThreadPerTaskExecutor().use { executor ->
                 val futures=(0 until 12).map { n -> executor.submit {
                     barrier.await(10,TimeUnit.SECONDS)
-                    vev.write(1+n%3) { Queries.saveDefaultHourlyRate(BigDecimal(n+1)) }
+                    db.write(1+n%3) { Queries.saveDefaultHourlyRate(it, BigDecimal(n+1)) }
                 } }
                 futures.forEach { it.get(20,TimeUnit.SECONDS) }
             }
-            for(tenant in 1..3)assertNotNull(vev.read(tenant) { Queries.defaultHourlyRate() })
+            for(tenant in 1..3)assertNotNull(db.read(tenant) { Queries.defaultHourlyRate(it) })
             postgres.connect().use { c -> c.createStatement().use { s -> s.executeQuery("SELECT count(*) FROM project_settings").use { r -> r.next();assertEquals(3,r.getInt(1)) } } }
         }finally {postgres.connect().use { c -> c.createStatement().use { it.execute("DELETE FROM project_settings") } }}
     }

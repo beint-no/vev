@@ -18,8 +18,17 @@ class TypeSafetyTest {
 
     private fun compile(body: String): Pair<ExitCode, String> {
         val source = directory.resolve("Consumer.kt")
-        Files.writeString(source, "import no.beint.vev.*\nimport no.beint.vev.fixture.*\nfun example(session: Session) { $body }\n")
-        val classpath = listOf(Queries::class.java, Session::class.java, Unit::class.java)
+        Files.writeString(
+            source,
+            """
+            import no.beint.vev.*
+            import no.beint.vev.fixture.*
+            fun example(read: ReadScope, write: WriteScope, tenantRead: TenantReadScope, tenantWrite: TenantWriteScope) {
+                $body
+            }
+            """.trimIndent() + "\n"
+        )
+        val classpath = listOf(Queries::class.java, Db::class.java, Unit::class.java)
             .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toString() }.joinToString(java.io.File.pathSeparator)
         val generatedClasses = Path.of(Queries::class.java.protectionDomain.codeSource.location.toURI())
         val output = ByteArrayOutputStream()
@@ -32,17 +41,31 @@ class TypeSafetyTest {
     }
 
     @ParameterizedTest @ValueSource(strings = [
-        "Queries.customer(1)",
-        "Queries.customer(InvoiceId(1))",
-        "Queries.customer(session, \"tenant\", CustomerId(1))",
-        "Queries.customer(null)",
-        "Queries.createCustomer(null)",
-        "val id: Int = Queries.invoiceSummary().first().invoiceId",
-        "val name: String = Queries.customer(CustomerId(1)).name",
-        "Queries.customerIds(listOf(\"wrong\"))",
-        "Queries.missingQuery()",
-        "Queries.customer(CustomerId(1))!!.missingColumn",
-        "Queries.customer(tenantId = 7, id = CustomerId(1))"
+        "Queries.customer(CustomerId(1))",
+        "Queries.customer(tenantRead, 1)",
+        "Queries.customer(tenantRead, InvoiceId(1))",
+        "Queries.customer(read, CustomerId(1))",
+        "Queries.customer(write, CustomerId(1))",
+        "Queries.customer(tenantRead, null)",
+        "Queries.createCustomer(tenantRead, \"Alice\")",
+        "Queries.createCustomer(read, \"Alice\")",
+        "Queries.createCustomer(write, \"Alice\")",
+        "Queries.createCustomer(tenantWrite, null)",
+        "Queries.post(read, 1, java.math.BigDecimal.ONE)",
+        "Queries.post(tenantRead, 1, java.math.BigDecimal.ONE)",
+        "Queries.lockTenant(tenantRead, \"k\")",
+        "Queries.claimNextDocument(read)",
+        "Queries.claimNextDocument(tenantRead)",
+        "read.beforeCommit {}",
+        "tenantRead.beforeCommit {}",
+        "read.tenantId()",
+        "write.tenantId()",
+        "val id: Int = Queries.invoiceSummary(tenantRead).first().invoiceId",
+        "val name: String = Queries.customer(tenantRead, CustomerId(1)).name",
+        "Queries.customerIds(tenantRead, listOf(\"wrong\"))",
+        "Queries.missingQuery(tenantRead)",
+        "Queries.customer(tenantRead, CustomerId(1))!!.missingColumn",
+        "Queries.customer(tenantRead, tenantId = 7, id = CustomerId(1))"
     ]) fun `invalid application programs fail Kotlin compilation`(body: String) {
         val (result, diagnostics) = compile(body)
         assertEquals(ExitCode.COMPILATION_ERROR, result, diagnostics)
@@ -50,20 +73,38 @@ class TypeSafetyTest {
         assertFalse(diagnostics.contains("Cannot access"), diagnostics)
     }
 
-    @Test fun `valid generated contracts compile with module access`() {
-        val (result, diagnostics) = compile("val name: String? = Queries.customer(CustomerId(1))?.name; Queries.customers(null)")
+    @Test fun `valid generated contracts and capability subtyping compile with module access`() {
+        val (result, diagnostics) = compile("""
+            val name: String? = Queries.customer(tenantRead, CustomerId(1))?.name
+            Queries.customers(tenantRead, null)
+            Queries.customers(tenantWrite, null)
+            Queries.createCustomer(tenantWrite, "Alice")
+            Queries.quoted(read)
+            Queries.quoted(write)
+            Queries.quoted(tenantRead)
+            Queries.quoted(tenantWrite)
+            Queries.post(write, 1, java.math.BigDecimal.ONE)
+            Queries.post(tenantWrite, 1, java.math.BigDecimal.ONE)
+            Queries.claimNextDocument(write)
+            Queries.claimNextDocument(tenantWrite)
+            write.beforeCommit {}
+            tenantWrite.beforeCommit {}
+        """.trimIndent())
         assertEquals(ExitCode.OK, result, diagnostics)
     }
+
     @Test fun `generated static APIs are usable by an independent Java consumer`() {
         val source = directory.resolve("JavaConsumer.java")
         Files.writeString(source, """
+            import no.beint.vev.ReadScope;
+            import no.beint.vev.TenantReadScope;
             import no.beint.vev.fixture.*;
             class JavaConsumer {
-                String name() { return Queries.customer(1).getName(); }
-                Object values() { return Queries.typeCase2(42); }
+                String name(TenantReadScope tx) { return Queries.customer(tx, 1).getName(); }
+                Object values(ReadScope tx) { return Queries.typeCase2(tx, 42); }
             }
         """.trimIndent())
-        val classpath = listOf(Queries::class.java, Session::class.java, Unit::class.java)
+        val classpath = listOf(Queries::class.java, Db::class.java, Unit::class.java)
             .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toString() }.joinToString(java.io.File.pathSeparator)
         val diagnostics = ByteArrayOutputStream()
         val result = javax.tools.ToolProvider.getSystemJavaCompiler().run(null, diagnostics, diagnostics,

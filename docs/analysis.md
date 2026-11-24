@@ -46,24 +46,30 @@ bytecode would not inherently make JDBC execution faster.
 
 ## Tenant and transaction scope
 
-A private ScopedValue resolves a lexical, thread-confined JDBC session. Tenant queries
-bind the scope's required integer identifier, and SQL states its tenant predicates and joins.
+`Db` binds an active transaction in a private `ScopedValue` for re-entrant calls and passes
+a sealed capability handle (`ReadScope`, `WriteScope`, `TenantReadScope`, or `TenantWriteScope`)
+directly to each block. Every generated query requires the capability matching its tenant scope
+and read/write classification, so calling a write or locking query inside a read block, a tenant
+query inside a global block, or any query outside a transaction fails Kotlin compilation. Tenant
+queries bind the scope's required integer identifier, and SQL states its tenant predicates and joins.
 
-The compiler uses `EXPLAIN (GENERIC_PLAN)` against the migrated build schema. It
-looks for a tenant-key equality on each visible scan of a table with `tenant_id` and
-follows equalities to other tenant-bound scans. This can catch an omitted join key
-inside an expanded view. For mutations on tables with `tenant_id`, it also verifies
-that `INSERT` assigns `:tenantId` (or a proven scan's `tenant_id`), that `ON CONFLICT DO UPDATE`
-arbitrates on a tenant-keyed index or filters `tenant_id = :tenantId`, and that `UPDATE`/`MERGE`
-does not reassign `tenant_id`. A valid query can also be rejected when a materialized CTE
-hides the origin of a tenant key; comparing directly with `:tenantId` makes the restriction
-visible. Opaque function bodies, triggers, tables without `tenant_id` and authorization remain
-outside the plan check.
+The compiler uses `EXPLAIN (GENERIC_PLAN)` against the migrated build schema both to classify
+queries as read or write/locking (`ModifyTable`, `LockRows`, mutating/locking built-ins, `:exec`,
+`:void`, or `-- vev.access: write`) and to verify tenant isolation. It looks for a tenant-key
+equality on each visible scan of a table with `tenant_id` and follows equalities to other
+tenant-bound scans. This can catch an omitted join key inside an expanded view. For mutations on
+tables with `tenant_id`, it also verifies that `INSERT` assigns `:tenantId` (or a proven scan's
+`tenant_id`), that `ON CONFLICT DO UPDATE` arbitrates on a tenant-keyed index or filters
+`tenant_id = :tenantId`, and that `UPDATE`/`MERGE` does not reassign `tenant_id`. A valid query
+can also be rejected when a materialized CTE hides the origin of a tenant key; comparing directly
+with `:tenantId` makes the restriction visible. Opaque function bodies, triggers, tables without
+`tenant_id` and authorization remain outside the plan check.
 
-Owned scopes commit or roll back. Borrowed scopes preserve a caller's transaction boundary.
-There is no persistence context, cascade engine, SQL DSL or framework adapter. During
-incremental adoption the application owns transaction integration and flushes pending
-entity changes before executing SQL on the shared connection.
+Outermost `Db` calls commit or roll back and run `beforeCommit` / `afterCommit` / `afterCompletion`
+hooks; nested calls join the enclosing transaction on the same connection while rejecting
+read-to-write escalation and cross-tenant switching. Borrowed scopes and `Db.TransactionBackend`
+preserve a caller's transaction boundary during incremental adoption. There is no persistence
+context, cascade engine, SQL DSL or framework adapter.
 
 ## Adoption
 

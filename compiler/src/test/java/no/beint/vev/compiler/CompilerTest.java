@@ -75,7 +75,7 @@ class CompilerTest {
     @Test void textAndVarcharOccurrencesOfOneParameterShareAStringBinding() throws Exception {
         String result = compile("-- vev.name: tagged :many\n-- vev.scope: global\n"
                 + "SELECT id, :status AS label FROM record WHERE status = :status");
-        assertTrue(result.contains("fun `tagged`(`status`: String)"), result);
+        assertTrue(result.contains("fun `tagged`(tx: no.beint.vev.ReadScope, `status`: String)"), result);
         var failure = assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: mixed :many\n-- vev.scope: global\n"
                 + "SELECT id FROM item WHERE id = :value OR name = :value"));
         assertTrue(failure.getMessage().contains("incompatible types across occurrences"), failure.getMessage());
@@ -103,10 +103,10 @@ class CompilerTest {
                 +"SELECT sum(v) AS total FROM (VALUES "+values+") q(v)"+(tenant?" WHERE :tenantId::int > 0":"");
     }
     @Test void methodParameterLimitsFailDuringGeneration() throws Exception {
-        assertTrue(compile(inputProjection(254,true,true)).contains("fun `inputs`"));
-        assertTrue(compile(inputProjection(254,true,false)).contains("fun `inputs`"));
-        assertTrue(compile(inputProjection(127,false,true)).contains("fun `inputs`"));
-        for (String sql : java.util.List.of(inputProjection(255,true,true),inputProjection(255,true,false),inputProjection(128,false,true))) {
+        assertTrue(compile(inputProjection(253,true,true)).contains("fun `inputs`"));
+        assertTrue(compile(inputProjection(253,true,false)).contains("fun `inputs`"));
+        assertTrue(compile(inputProjection(126,false,true)).contains("fun `inputs`"));
+        for (String sql : java.util.List.of(inputProjection(254,true,true),inputProjection(254,true,false),inputProjection(127,false,true))) {
             var failure=assertThrows(IllegalArgumentException.class, () -> compile(sql));
             assertTrue(failure.getMessage().contains("Query parameters require"));
             assertTrue(failure.getMessage().contains("PostgreSQL array"));
@@ -114,7 +114,7 @@ class CompilerTest {
     }
     @Test void repeatedBindsCaptureOneApiValueRatherThanOneValuePerPlaceholder() throws Exception {
         String values=java.util.stream.IntStream.range(0,500).mapToObj(n -> "(:value::bigint)").collect(java.util.stream.Collectors.joining(","));
-        assertTrue(compile("-- vev.name: repeated :one\n-- vev.scope: global\nSELECT sum(v) AS total FROM (VALUES "+values+") q(v)").contains("fun `repeated`(`value`: Long)"));
+        assertTrue(compile("-- vev.name: repeated :one\n-- vev.scope: global\nSELECT sum(v) AS total FROM (VALUES "+values+") q(v)").contains("fun `repeated`(tx: no.beint.vev.ReadScope, `value`: Long)"));
     }
 
     @Test void postgres18ReturningAliasesDescribeOldAndNewValuesWithoutExecutingWrites() throws Exception {
@@ -234,7 +234,7 @@ class CompilerTest {
         assertTrue(declared.contains("val `id`: Int,"), declared);
         assertTrue(declared.contains("val `name`: String,"), declared);
         // A wrong declaration must fail loudly at the row, never decode as a wrong value.
-        assertTrue(declared.contains("requireNotNull("), declared);
+        assertTrue(declared.contains("no.beint.vev.Values.requireNonNull("), declared);
     }
 
     @Test void notnullMustNameAResultColumn() {
@@ -245,17 +245,36 @@ class CompilerTest {
 
     @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
         String result = compile("-- vev.name: lock :void\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
-        assertTrue(result.contains("fun `lock`(`key`: String): Unit ="), result);
+        assertTrue(result.contains("fun `lock`(tx: no.beint.vev.WriteScope, `key`: String): Unit ="), result);
         assertTrue(result.contains("_vevStmt.execute()"), result);
         assertFalse(result.contains("LockRow"), result);
     }
 
     @Test void streamQueriesGenerateConsumerCallbacks() throws Exception {
         String result = compile("-- vev.name: exportItems :stream\n-- vev.scope: global\nSELECT id, name FROM item");
-        assertTrue(result.contains("fun `exportItems`(onRow: java.util.function.Consumer<`ExportItemsRow`>): Unit"), result);
+        assertTrue(result.contains("fun `exportItems`(tx: no.beint.vev.ReadScope, onRow: java.util.function.Consumer<`ExportItemsRow`>): Unit"), result);
         assertTrue(result.contains("_vevStmt.setFetchSize(no.beint.vev.Session.DEFAULT_STREAM_FETCH_SIZE)"), result);
         assertTrue(result.contains("onRow.accept(readRow(_vevResult))"), result);
         assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: bad :stream\n-- vev.scope: global\nSELECT id FROM item WHERE name = :onRow"));
+    }
+
+    @Test void capabilityScopesDistinguishReadWriteLockingAndTenantQueries() throws Exception {
+        assertTrue(compile("-- vev.name: readGlobal :many\n-- vev.scope: global\nSELECT id FROM item")
+                .contains("fun `readGlobal`(tx: no.beint.vev.ReadScope)"));
+        assertTrue(compile("-- vev.name: lockGlobal :many\n-- vev.scope: global\nSELECT id FROM item FOR UPDATE")
+                .contains("fun `lockGlobal`(tx: no.beint.vev.WriteScope)"));
+        assertTrue(compile("-- vev.name: lockShare :many\n-- vev.scope: global\nSELECT id FROM item FOR NO KEY UPDATE")
+                .contains("fun `lockShare`(tx: no.beint.vev.WriteScope)"));
+        assertTrue(compile("-- vev.name: cteWrite :many\n-- vev.scope: global\nWITH updated AS (UPDATE item SET name = 'x' RETURNING id) SELECT id FROM updated")
+                .contains("fun `cteWrite`(tx: no.beint.vev.WriteScope)"));
+        assertTrue(compile("-- vev.name: advisory :one\n-- vev.scope: global\nSELECT 1 AS ok FROM pg_advisory_xact_lock(1)")
+                .contains("fun `advisory`(tx: no.beint.vev.WriteScope)"));
+        assertTrue(compile("-- vev.name: explicitWrite :one\n-- vev.scope: global\n-- vev.access: write\nSELECT 1 AS ok")
+                .contains("fun `explicitWrite`(tx: no.beint.vev.WriteScope)"));
+        assertTrue(compile("-- vev.name: readTenant :one\nSELECT :tenantId::int AS tenant_id")
+                .contains("fun `readTenant`(tx: no.beint.vev.TenantReadScope)"));
+        assertTrue(compile("-- vev.name: writeTenant :one\n-- vev.access: write\nSELECT :tenantId::int AS tenant_id")
+                .contains("fun `writeTenant`(tx: no.beint.vev.TenantWriteScope)"));
     }
 
     @Test void stringFunctionsNamedLeftOrRightPreserveDirectNullability() throws Exception {
@@ -267,7 +286,7 @@ class CompilerTest {
 
     @Test void arraySliceColonIsNotTreatedAsABindParameter() throws Exception {
         String result = compile("-- vev.name: slice :one\n-- vev.scope: global\nSELECT (ARRAY[10,20,30])[1:id] AS part FROM item");
-        assertTrue(result.contains("fun `slice`(): `SliceRow`"), result);
+        assertTrue(result.contains("fun `slice`(tx: no.beint.vev.ReadScope): `SliceRow`"), result);
     }
 
     @Test void timestamptzMapsToInstantAndSupportsTemporalArrays() throws Exception {

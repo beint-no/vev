@@ -64,8 +64,22 @@ final class TenantScans {
               AND n->>'Relation Name' IS NOT NULL
             """;
 
-    static void require(Connection connection, SqlSource source) throws SQLException {
-        if (source.tenant() == null) return;
+    private static final String HAS_WRITE_OR_LOCK = """
+            SELECT jsonb_path_exists(
+                ?::jsonb,
+                'strict $.** ? (@."Node Type" == "ModifyTable" || @."Node Type" == "LockRows")'
+            )
+            """;
+
+    /**
+     * Proves tenant scan/mutation restrictions for tenant queries and classifies whether the query
+     * writes or acquires row/advisory locks (requiring a {@code WriteScope} / {@code TenantWriteScope}).
+     */
+    static boolean analyze(Connection connection, SqlSource source) throws SQLException {
+        boolean writes = Set.of("exec", "void").contains(source.cardinality())
+                || source.forceWrite()
+                || source.hasMutatingOrLockingSyntax();
+        if (source.tenant() == null && writes) return true;
         String plan;
         // The simple protocol leaves $n to EXPLAIN; the extended protocol would expect bound values.
         try (var statement = connection.createStatement().unwrap(org.postgresql.core.BaseStatement.class)) {
@@ -76,6 +90,15 @@ final class TenantScans {
                 plan = result.getString(1);
             }
         }
+        if (!writes) {
+            try (var statement = connection.prepareStatement(HAS_WRITE_OR_LOCK)) {
+                statement.setString(1, plan);
+                try (var result = statement.executeQuery()) {
+                    if (result.next() && result.getBoolean(1)) writes = true;
+                }
+            }
+        }
+        if (source.tenant() == null) return writes;
         List<Scan> scans = new ArrayList<>();
         try (var statement = connection.prepareStatement(SCANS)) {
             statement.setString(1, plan);
@@ -141,6 +164,7 @@ final class TenantScans {
                 }
             }
         }
+        return writes;
     }
 
     /**

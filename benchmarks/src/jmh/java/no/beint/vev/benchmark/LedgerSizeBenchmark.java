@@ -20,7 +20,7 @@ public class LedgerSizeBenchmark {
     }
     @TearDown(Level.Trial) public void close() throws Exception { if(fixture!=null) fixture.close(); }
     @Benchmark public List<PagedLedgerRow> generatedPage() throws Exception {
-        var result=Session.borrowTenant(fixture.connection, 1,s->Queries.pagedLedger(rows));
+        var result=Session.borrowTenantRead(fixture.connection, 1, tx -> Queries.pagedLedger(tx, rows));
         fixture.connection.commit();return result;
     }
     @Benchmark public List<PagedLedgerRow> jdbcPage() throws Exception {

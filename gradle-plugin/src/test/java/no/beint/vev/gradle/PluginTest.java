@@ -46,7 +46,7 @@ class PluginTest {
         Files.writeString(sql, "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id;");
         Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
         Path consumer = Files.createDirectories(project.resolve("src/main/kotlin")).resolve("Consumer.kt");
-        Files.writeString(consumer, "package sample\nfun name(): String? = Queries.find(1)?.name\n");
+        Files.writeString(consumer, "package sample\nimport no.beint.vev.ReadScope\nfun name(tx: ReadScope): String? = Queries.find(tx, 1)?.name\n");
         var first = runner().build();
         assertTrue(first.getOutput().contains("BUILD SUCCESSFUL"));
         assertTrue(first.getOutput().contains("Vev migrating build database"));
@@ -158,13 +158,13 @@ class PluginTest {
                 SELECT id, name FROM item WHERE id=:key;
                 """);
         Files.writeString(Files.createDirectories(storage.resolve("src/main/kotlin")).resolve("Store.kt"),
-                "package storage\nfun name(key: Int): String? = storage.sql.Queries.find(key)?.name");
+                "package storage\nfun name(key: Int): String? { val tx: no.beint.vev.ReadScope = error(\"stub\"); return storage.sql.Queries.find(tx, key)?.name }");
         Files.writeString(Files.createDirectories(storage.resolve("src/test/kotlin")).resolve("Friend.kt"),
-                "internal fun friend(key: Int): storage.sql.FindRow? = storage.sql.Queries.find(key)");
+                "internal fun friend(tx: no.beint.vev.ReadScope, key: Int): storage.sql.FindRow? = storage.sql.Queries.find(tx, key)");
         Path client = Files.createDirectories(app.resolve("src/main/kotlin")).resolve("Client.kt");
         Files.writeString(client, """
                 package storage.sql
-                internal fun row(key: Int): FindRow? = Queries.find(key)
+                internal fun row(key: Int): FindRow? = Queries.find(error("stub"), key)
                 internal fun id(value: Int): ItemId = ItemId(value)
                 """);
         var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
@@ -206,10 +206,12 @@ class PluginTest {
         // A direct call, a call inside a lambda, and a function reference all count as calls.
         Files.writeString(kotlin.resolve("Store.kt"), """
                 package sample
+                import no.beint.vev.ReadScope
+                import no.beint.vev.WriteScope
                 import sample.sql.Queries
-                fun name(id: Int): String? = Queries.find(id)?.name
-                fun renameAll(ids: List<Int>) = ids.forEach { Queries.rename("x", it) }
-                internal val export: (java.util.function.Consumer<sample.sql.ExportRow>) -> Unit = Queries::export
+                fun name(tx: ReadScope, id: Int): String? = Queries.find(tx, id)?.name
+                fun renameAll(tx: WriteScope, ids: List<Int>) = ids.forEach { Queries.rename(tx, "x", it) }
+                internal val export: (ReadScope, java.util.function.Consumer<sample.sql.ExportRow>) -> Unit = Queries::export
                 """);
         var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
         runner.withArguments("compileKotlin", "--console=plain").build();
