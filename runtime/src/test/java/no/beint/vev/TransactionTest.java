@@ -301,10 +301,26 @@ class TransactionTest {
                     }
                 })
                 .build();
-        int nested = db.write(99, outer -> db.tenantRead(TenantReadScope::tenantId));
+        int nested = db.write(99, outer -> {
+            assertEquals(99, db.currentTenantId());
+            assertEquals(99, db.currentTenantIdOrNull());
+            return db.tenantRead(TenantReadScope::tenantId);
+        });
         assertEquals(99, nested, "tenantRead inside explicit tenant 99 inherits 99 instead of ambient 42");
+        assertEquals(42, db.currentTenantId());
+        assertEquals(42, db.currentTenantIdOrNull());
         assertEquals(42, db.tenantRead(TenantReadScope::tenantId).intValue());
         assertEquals(List.of("begin:false:99", "end:tok:true:true", "begin:true:42", "end:tok:true:true"), observed);
+
+        AtomicReference<Integer> nullableTenant = new AtomicReference<>(null);
+        Db nullableDb = Db.builder(f.source).tenantSupplier(nullableTenant::get).build();
+        assertNull(nullableDb.currentTenantIdOrNull());
+        assertThrows(VevSessionException.class, nullableDb::currentTenantId);
+        assertThrows(VevSessionException.class, () -> nullableDb.tenantRead(TenantReadScope::tenantId));
+        assertEquals(Integer.valueOf(11), nullableDb.read(11, tx -> nullableDb.currentTenantIdOrNull()));
+        nullableTenant.set(5);
+        assertEquals(5, nullableDb.currentTenantId());
+        assertEquals(5, nullableDb.currentTenantIdOrNull());
     }
 
     @Test void transactionBackendBridgeDelegatesLifecycleAndEnforcesReadOnly() {

@@ -6,7 +6,7 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Function;
-import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import javax.sql.DataSource;
 
@@ -51,7 +51,7 @@ public final class Db {
     private final TransactionBackend backend;
     private final int isolation;
     private final int queryTimeoutSeconds;
-    private final IntSupplier tenantSupplier;
+    private final Supplier<Integer> tenantSupplier;
     private final TransactionListener listener;
     private final UnaryOperator<Runnable> callbackDecorator;
     private final Function<SQLException, RuntimeException> exceptionTranslator;
@@ -94,7 +94,7 @@ public final class Db {
         private final TransactionBackend backend;
         private int isolation = DEFAULT_ISOLATION;
         private Duration queryTimeout;
-        private IntSupplier tenantSupplier;
+        private Supplier<Integer> tenantSupplier;
         private TransactionListener listener;
         private UnaryOperator<Runnable> callbackDecorator;
         private Function<SQLException, RuntimeException> exceptionTranslator = VevSqlException::new;
@@ -120,7 +120,7 @@ public final class Db {
             return this;
         }
 
-        public Builder tenantSupplier(IntSupplier tenantSupplier) {
+        public Builder tenantSupplier(Supplier<Integer> tenantSupplier) {
             this.tenantSupplier = tenantSupplier;
             return this;
         }
@@ -233,6 +233,20 @@ public final class Db {
         return writeIsolated(resolveTenantId(), work);
     }
 
+    /** Returns the active enclosing tenant identifier if inside a tenant scope, otherwise queries the configured tenantSupplier. */
+    public int currentTenantId() {
+        return resolveTenantId();
+    }
+
+    /** Returns the active enclosing tenant identifier or the configured tenantSupplier's value, or {@code null} when none is bound. */
+    public Integer currentTenantIdOrNull() {
+        int enclosing = currentTenantOrZero();
+        if (enclosing > 0) return enclosing;
+        if (tenantSupplier == null) return null;
+        Integer value = tenantSupplier.get();
+        return value != null ? Session.requireTenant(value) : null;
+    }
+
     // ---- Introspection & lifecycle hooks ----
 
     public boolean inTransaction() {
@@ -303,7 +317,11 @@ public final class Db {
         if (tenantSupplier == null) {
             throw new VevSessionException("No tenantSupplier configured on Db; pass an explicit tenantId or configure tenantSupplier");
         }
-        return Session.requireTenant(tenantSupplier.getAsInt());
+        Integer tenantId = tenantSupplier.get();
+        if (tenantId == null) {
+            throw new VevSessionException("Missing tenant identifier");
+        }
+        return Session.requireTenant(tenantId);
     }
 
     private Session.ActiveTx currentTxOrNull() {
