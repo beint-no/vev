@@ -23,7 +23,7 @@ class SqlSourceTest {
     }
     @ParameterizedTest @ValueSource(strings = {
         "SELECT 1; DELETE FROM customer", "SELECT 'unterminated", "SELECT $$unterminated",
-        "SELECT 1 /* unterminated", "CREATE TABLE x(id int)", "SELECT $1", "SELECT :session"
+        "SELECT 1 /* unterminated", "CREATE TABLE x(id int)", "SELECT $1", "SELECT :session", "SELECT :tx"
     }) void rejectsInvalidSources(String sql) { assertThrows(IllegalArgumentException.class, () -> parse(sql)); }
     @ParameterizedTest @ValueSource(strings = {
         "SELECT t.id FROM t LEFT JOIN u ON true", "SELECT t.id FROM t RIGHT JOIN u ON true",
@@ -59,7 +59,10 @@ class SqlSourceTest {
     @Test void directiveErrorsAreExplicit() {
         assertThrows(IllegalArgumentException.class, () -> parse("-- vev.nullable: absent\nSELECT :id"));
         assertThrows(IllegalArgumentException.class, () -> parse("-- vev.rows: 10\nSELECT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.access: read\nSELECT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.access: write\n-- vev.access: write\nSELECT 1"));
         assertThrows(IllegalArgumentException.class, () -> parse("SELECT 1\n-- vev.plan: custom"));
         assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(Path.of("x.sql"), "SELECT 1"));
+        assertTrue(parse("-- vev.access: write\nSELECT 1").forceWrite());
     }
 }

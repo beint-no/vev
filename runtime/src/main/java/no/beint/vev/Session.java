@@ -4,78 +4,278 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.UnaryOperator;
 
-/** A thread-confined, lexical execution scope. Generated queries own their JDBC resources. */
+/**
+ * Thread-confined, lexical transaction scopes and single-connection borrow helpers.
+ * Generated queries receive one of the four sealed capability scopes directly.
+ */
 public final class Session {
     public static final int DEFAULT_STREAM_FETCH_SIZE = 256;
-    private static final ScopedValue<Session> CURRENT = ScopedValue.newInstance();
 
     static {
         if (Runtime.version().feature() < 27) throw new IllegalStateException("Vev requires JDK 27 or newer");
     }
 
-    private final Connection connection;
-    private final int tenantId;
-    private final int queryTimeoutSeconds;
-    private final Thread owner = Thread.currentThread();
-    private boolean active = true;
-    private boolean failed;
+    private Session() {}
 
-    Session(Connection connection, int tenantId, int queryTimeoutSeconds) {
-        this.connection = connection;
-        this.tenantId = tenantId;
-        this.queryTimeoutSeconds = queryTimeoutSeconds;
-    }
+    static final class ActiveTx {
+        final Connection connection;
+        final boolean readOnly;
+        final int queryTimeoutSeconds;
+        final Thread owner = Thread.currentThread();
+        final Db.TransactionBackend backend;
+        final UnaryOperator<Runnable> callbackDecorator;
+        boolean active = true;
+        boolean failed;
+        List<Runnable> beforeCommit;
+        List<Runnable> afterCommit;
+        List<Runnable> afterCompletion;
 
-    /** Resolve only inside the owning transaction and thread; never propagate JDBC sessions to coroutines. */
-    public static Session current() {
-        if (!CURRENT.isBound()) throw new IllegalStateException("No active Vev transaction");
-        Session session = CURRENT.get();
-        session.check();
-        return session;
-    }
-
-    public static Session tenant() {
-        Session session = current();
-        if (session.tenantId <= 0) {
-            session.failed = true;
-            throw new IllegalStateException("A tenant query requires a tenant transaction");
+        ActiveTx(Connection connection, boolean readOnly, int queryTimeoutSeconds,
+                 Db.TransactionBackend backend, UnaryOperator<Runnable> callbackDecorator) {
+            this.connection = connection;
+            this.readOnly = readOnly;
+            this.queryTimeoutSeconds = queryTimeoutSeconds;
+            this.backend = backend;
+            this.callbackDecorator = callbackDecorator;
         }
-        return session;
+
+        void check() {
+            if (!active || Thread.currentThread() != owner) {
+                throw new VevSessionException("Vev session escaped its thread or scope");
+            }
+            if (failed) {
+                throw new VevSessionException("Vev transaction failed; roll it back");
+            }
+        }
+
+        void beforeCommit(Runnable action) {
+            Objects.requireNonNull(action, "action");
+            check();
+            if (readOnly) throw new VevSessionException("beforeCommit requires a write transaction");
+            if (backend != null) {
+                backend.beforeCommit(action);
+                return;
+            }
+            if (beforeCommit == null) beforeCommit = new ArrayList<>(2);
+            beforeCommit.add(action);
+        }
+
+        void afterCommit(Runnable action) {
+            Objects.requireNonNull(action, "action");
+            check();
+            Runnable decorated = decorate(action);
+            if (backend != null) {
+                backend.afterCommit(decorated);
+                return;
+            }
+            if (afterCommit == null) afterCommit = new ArrayList<>(2);
+            afterCommit.add(decorated);
+        }
+
+        void afterCompletion(Runnable action) {
+            Objects.requireNonNull(action, "action");
+            check();
+            Runnable decorated = decorate(action);
+            if (backend != null) {
+                backend.afterCompletion(decorated);
+                return;
+            }
+            if (afterCompletion == null) afterCompletion = new ArrayList<>(2);
+            afterCompletion.add(decorated);
+        }
+
+        Runnable decorate(Runnable action) {
+            return callbackDecorator != null ? Objects.requireNonNull(callbackDecorator.apply(action)) : action;
+        }
+
+        void runBeforeCommit() {
+            if (beforeCommit == null) return;
+            int index = 0;
+            while (index < beforeCommit.size()) {
+                check();
+                beforeCommit.get(index++).run();
+            }
+        }
+
+        void runAfterCommit() {
+            if (afterCommit == null) return;
+            for (Runnable action : afterCommit) action.run();
+        }
+
+        void runAfterCompletion() {
+            if (afterCompletion == null) return;
+            RuntimeException failure = null;
+            for (Runnable action : afterCompletion) {
+                try { action.run(); }
+                catch (RuntimeException exception) {
+                    if (failure == null) failure = exception; else failure.addSuppressed(exception);
+                }
+            }
+            if (failure != null) throw failure;
+        }
+
+        PreparedStatement prepare(String sql) throws SQLException {
+            check();
+            PreparedStatement statement = connection.prepareStatement(sql);
+            if (queryTimeoutSeconds > 0) statement.setQueryTimeout(queryTimeoutSeconds);
+            return statement;
+        }
+
+        PreparedStatement prepareCustomPlan(String sql) throws SQLException {
+            PreparedStatement statement = prepare(sql);
+            statement.unwrap(org.postgresql.PGStatement.class).setPrepareThreshold(0);
+            return statement;
+        }
+
+        Connection connection() {
+            check();
+            return connection;
+        }
+
+        void markFailed() {
+            failed = true;
+        }
     }
 
-    public int tenantId() {
-        check();
-        if (tenantId <= 0) throw new IllegalStateException("A global transaction has no tenant");
-        return tenantId;
+    abstract static class ScopeBase {
+        final ActiveTx tx;
+        final Thread owner = Thread.currentThread();
+        boolean active = true;
+
+        ScopeBase(ActiveTx tx) { this.tx = tx; }
+
+        void checkScope() {
+            if (!active || Thread.currentThread() != owner) {
+                throw new VevSessionException("Vev session escaped its thread or scope");
+            }
+            tx.check();
+        }
+
+        void deactivate() { active = false; }
+
+        public boolean isReadOnly() { checkScope(); return tx.readOnly; }
+        public void afterCommit(Runnable action) { checkScope(); tx.afterCommit(action); }
+        public void afterCompletion(Runnable action) { checkScope(); tx.afterCompletion(action); }
+        public Connection connection() { checkScope(); return tx.connection(); }
+        public PreparedStatement prepare(String sql) throws SQLException { checkScope(); return tx.prepare(sql); }
+        public PreparedStatement prepareCustomPlan(String sql) throws SQLException { checkScope(); return tx.prepareCustomPlan(sql); }
+        public void markFailed() { tx.markFailed(); }
     }
 
-    static boolean bound() { return CURRENT.isBound(); }
-
-    @FunctionalInterface public interface Work<R> { R run(Session session) throws SQLException; }
-
-    /**
-     * Participate in a caller-owned transaction as a tenant. The caller commits, rolls back and closes the connection,
-     * and must propagate failures to its transaction manager.
-     */
-    public static <R> R borrowTenant(Connection connection, int tenantId, Work<R> work) throws SQLException {
-        return borrowTenant(connection, tenantId, null, work);
+    /** Global read capability handle. */
+    public static final class GlobalRead extends ScopeBase implements ReadScope {
+        GlobalRead(ActiveTx tx) { super(tx); }
     }
 
-    /** Like {@link #borrowTenant(Connection, int, Work)}, applying a per-statement query timeout. */
-    public static <R> R borrowTenant(Connection connection, int tenantId, Duration queryTimeout, Work<R> work) throws SQLException {
+    /** Global write capability handle. */
+    public static final class GlobalWrite extends ScopeBase implements WriteScope {
+        GlobalWrite(ActiveTx tx) { super(tx); }
+        @Override public void beforeCommit(Runnable action) { checkScope(); tx.beforeCommit(action); }
+    }
+
+    /** Tenant read capability handle. */
+    public static final class TenantRead extends ScopeBase implements TenantReadScope {
+        private final int tenantId;
+        TenantRead(ActiveTx tx, int tenantId) { super(tx); this.tenantId = tenantId; }
+        @Override public int tenantId() { checkScope(); return tenantId; }
+    }
+
+    /** Tenant write capability handle. */
+    public static final class TenantWrite extends ScopeBase implements TenantWriteScope {
+        private final int tenantId;
+        TenantWrite(ActiveTx tx, int tenantId) { super(tx); this.tenantId = tenantId; }
+        @Override public int tenantId() { checkScope(); return tenantId; }
+        @Override public void beforeCommit(Runnable action) { checkScope(); tx.beforeCommit(action); }
+    }
+
+    /** Borrow a caller-owned transaction connection for global read queries. */
+    public static <R> R borrowRead(Connection connection, Db.ReadWork<R> work) throws SQLException {
+        return borrowRead(connection, null, work);
+    }
+
+    public static <R> R borrowRead(Connection connection, Duration queryTimeout, Db.ReadWork<R> work) throws SQLException {
+        ActiveTx tx = borrowedTx(connection, true, queryTimeout);
+        GlobalRead scope = new GlobalRead(tx);
+        try {
+            R result = work.run(scope);
+            tx.check();
+            return result;
+        } finally {
+            scope.deactivate();
+            tx.active = false;
+        }
+    }
+
+    /** Borrow a caller-owned transaction connection for global read or write queries. */
+    public static <R> R borrowWrite(Connection connection, Db.WriteWork<R> work) throws SQLException {
+        return borrowWrite(connection, null, work);
+    }
+
+    public static <R> R borrowWrite(Connection connection, Duration queryTimeout, Db.WriteWork<R> work) throws SQLException {
+        ActiveTx tx = borrowedTx(connection, false, queryTimeout);
+        GlobalWrite scope = new GlobalWrite(tx);
+        try {
+            R result = work.run(scope);
+            tx.check();
+            return result;
+        } finally {
+            scope.deactivate();
+            tx.active = false;
+        }
+    }
+
+    /** Borrow a caller-owned transaction connection for tenant read queries. */
+    public static <R> R borrowTenantRead(Connection connection, int tenantId, Db.TenantReadWork<R> work) throws SQLException {
+        return borrowTenantRead(connection, tenantId, null, work);
+    }
+
+    public static <R> R borrowTenantRead(Connection connection, int tenantId, Duration queryTimeout, Db.TenantReadWork<R> work) throws SQLException {
+        requireTenant(tenantId);
+        ActiveTx tx = borrowedTx(connection, true, queryTimeout);
+        TenantRead scope = new TenantRead(tx, tenantId);
+        try {
+            R result = work.run(scope);
+            tx.check();
+            return result;
+        } finally {
+            scope.deactivate();
+            tx.active = false;
+        }
+    }
+
+    /** Borrow a caller-owned transaction connection for tenant read or write queries. */
+    public static <R> R borrowTenantWrite(Connection connection, int tenantId, Db.TenantWriteWork<R> work) throws SQLException {
+        return borrowTenantWrite(connection, tenantId, null, work);
+    }
+
+    public static <R> R borrowTenantWrite(Connection connection, int tenantId, Duration queryTimeout, Db.TenantWriteWork<R> work) throws SQLException {
+        requireTenant(tenantId);
+        ActiveTx tx = borrowedTx(connection, false, queryTimeout);
+        TenantWrite scope = new TenantWrite(tx, tenantId);
+        try {
+            R result = work.run(scope);
+            tx.check();
+            return result;
+        } finally {
+            scope.deactivate();
+            tx.active = false;
+        }
+    }
+
+    private static ActiveTx borrowedTx(Connection connection, boolean readOnly, Duration queryTimeout) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        if (connection.getAutoCommit()) throw new VevSessionException("Vev requires an explicit transaction");
+        return new ActiveTx(connection, readOnly, timeoutSeconds(queryTimeout), null, null);
+    }
+
+    static int requireTenant(int tenantId) {
         if (tenantId <= 0) throw new IllegalArgumentException("Tenant identifier must be positive");
-        return run(connection, tenantId, timeoutSeconds(queryTimeout), work);
-    }
-
-    /** Participate in a caller-owned transaction without a tenant; only global queries may run. */
-    public static <R> R borrowGlobal(Connection connection, Work<R> work) throws SQLException {
-        return borrowGlobal(connection, null, work);
-    }
-
-    /** Like {@link #borrowGlobal(Connection, Work)}, applying a per-statement query timeout. */
-    public static <R> R borrowGlobal(Connection connection, Duration queryTimeout, Work<R> work) throws SQLException {
-        return run(connection, 0, timeoutSeconds(queryTimeout), work);
+        return tenantId;
     }
 
     /** JDBC timeouts have whole-second precision, so a partial second rounds up rather than disabling the timeout. */
@@ -86,55 +286,10 @@ public final class Session {
         return (int) Math.min(seconds, Integer.MAX_VALUE);
     }
 
-    static <R> R run(Connection connection, int tenantId, int queryTimeoutSeconds, Work<R> work) throws SQLException {
-        if (bound()) throw new IllegalStateException("Nested Vev transactions are not supported");
-        if (connection.getAutoCommit()) throw new IllegalStateException("Vev requires an explicit transaction");
-        Session session = new Session(connection, tenantId, queryTimeoutSeconds);
-        try {
-            R result = ScopedValue.where(CURRENT, session).call(() -> work.run(session));
-            session.check();
-            return result;
-        } finally { session.active = false; }
-    }
-
     static void requirePostgres(Connection connection) throws SQLException {
         var metadata = connection.getMetaData();
         if (!metadata.getDatabaseProductName().equals("PostgreSQL") || metadata.getDatabaseMajorVersion() != 19) {
             throw new IllegalArgumentException("Vev requires PostgreSQL 19");
         }
-    }
-
-    void check() {
-        if (!active || Thread.currentThread() != owner) throw new IllegalStateException("Vev session escaped its thread or scope");
-        if (failed) throw new IllegalStateException("Vev transaction failed; roll it back");
-    }
-
-    /** Prepare a statement in this scope, applying the configured query timeout if any. */
-    public PreparedStatement prepare(String sql) throws SQLException {
-        check();
-        PreparedStatement statement = connection.prepareStatement(sql);
-        if (queryTimeoutSeconds > 0) statement.setQueryTimeout(queryTimeoutSeconds);
-        return statement;
-    }
-
-    /**
-     * Prepare a statement PostgreSQL plans with each execution's parameter values. pgJDBC otherwise switches to a
-     * server-side prepared statement after a few executions, whose cached generic plan cannot drop optional filters.
-     */
-    public PreparedStatement prepareCustomPlan(String sql) throws SQLException {
-        PreparedStatement statement = prepare(sql);
-        statement.unwrap(org.postgresql.PGStatement.class).setPrepareThreshold(0);
-        return statement;
-    }
-
-    /** Return the active transaction connection for statement-local JDBC helpers such as array creation. */
-    public Connection connection() {
-        check();
-        return connection;
-    }
-
-    /** Poison the scope after a SQL, decoding, or cardinality failure so the caller rolls back. */
-    public void markFailed() {
-        failed = true;
     }
 }

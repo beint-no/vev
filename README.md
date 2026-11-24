@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "4.0.0"
+    id("no.beint.vev") version "5.0.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -78,17 +78,30 @@ ORDER BY id LIMIT :limit::int;
 ```
 
 ```kotlin
-val db = no.beint.vev.Vev(dataSource)
-val customer = db.read(42) { Queries.customer(id = 123) }
-val page = db.read(42) { Queries.customers(after = 0, limit = 100) }
+val db = no.beint.vev.Db(dataSource)
+val customer = db.read(42) { Queries.customer(it, id = 123) }
+val page = db.read(42) { Queries.customers(it, after = 0, limit = 100) }
 ```
 
-`read(tenantId)` / `write(tenantId)` provide a lexical transaction. Generated methods
-bind `:tenantId` from its scoped value; it is absent from their parameter lists.
+`db.read(tenantId)` / `db.write(tenantId)` (or `db.tenantRead` / `db.tenantWrite` with a configured
+`tenantSupplier`) provide re-entrant, capability-typed lexical transactions. Every generated query
+takes a sealed capability scope as its first parameter:
+
+| Scope | Allowed queries |
+|---|---|
+| `ReadScope` | Global read-only queries |
+| `WriteScope : ReadScope` | Global read and write/locking queries |
+| `TenantReadScope : ReadScope` | Tenant read-only and global read-only queries |
+| `TenantWriteScope : TenantReadScope, WriteScope` | All tenant and global read/write/locking queries |
+
+At build time Vev classifies each query as read or write/locking (DML, `FOR UPDATE`/`SHARE`,
+sequence mutations, advisory locks, `:void`, or `-- vev.access: write`) and checks relation scans
+and mutations in PostgreSQL's generic plan. Calling a write or locking query inside a read scope,
+a tenant query inside a global scope, or any query outside a transaction fails Kotlin compilation.
+Generated methods bind `:tenantId` from the scope; it is absent from their parameter lists.
 Tenant IDs must be positive.
 
-At build time Vev checks relation scans and mutations in PostgreSQL's generic plan. Each scan
-of a table with a `tenant_id` column must show a restriction to the bound tenant, directly or
+Each scan of a table with a `tenant_id` column must show a restriction to the bound tenant, directly or
 through a tenant-key equality with another checked scan. For mutations on tables with `tenant_id`,
 `INSERT` must assign `:tenantId` (or a proven scan's `tenant_id`), `ON CONFLICT DO UPDATE` must
 arbitrate on a tenant-keyed index or filter `tenant_id = :tenantId`, and `UPDATE`/`MERGE` must
@@ -99,8 +112,8 @@ Opaque functions, triggers and tables without a `tenant_id` column remain outsid
 and need application review. Composite foreign keys enforce tenant consistency between stored
 references.
 
-Global queries declare `-- vev.scope: global`. Run them in `readGlobal` / `writeGlobal`,
-or within a tenant transaction. Tenant queries require a tenant transaction.
+Global queries declare `-- vev.scope: global`. Run them in `db.read` / `db.write`,
+or within a tenant transaction. Tenant queries require a tenant scope.
 
 ### Query directives
 
@@ -118,6 +131,7 @@ fail the build, and so does a directive without the `vev.` prefix.
 | `-- vev.name: change :exec` | Mutation affected-row count as `Long` |
 | `-- vev.name: lock :void` | Execute a void-returning function |
 | `-- vev.scope: global` | No implicit tenant bind |
+| `-- vev.access: write` | Require a write scope even for a `SELECT` calling a custom mutating function |
 | `-- vev.nullable: name, note` | Nullable inputs |
 | `-- vev.notnull: id, total` | Assert and check non-null output values |
 | `-- vev.type: id CustomerId` | Generate a scalar Kotlin value class |
@@ -147,25 +161,32 @@ when shared semantics have an owner and execution tests; SQL text includes are a
 
 ## Transactions
 
-Vev commits successful callbacks and rolls back failed callbacks. SQL, decoding,
-and cardinality failures poison the scope even when caught. No retry occurs
-automatically. Nested scopes are rejected.
+`Db` manages re-entrant lexical transactions. Outermost `read` / `write` calls commit successful
+callbacks and roll back failed callbacks. Nested calls join the enclosing transaction on the same
+JDBC connection, reject read-to-write escalation and cross-tenant switching, and never poison an
+enclosing transaction when a caller catches a non-SQL domain exception. SQL, decoding, and
+cardinality failures raise typed `VevException` subclasses (`VevSqlException`, `VevDataException`,
+`VevSessionException`) and poison the transaction even when caught. No retry occurs automatically.
+
+Use `writeNew` for an independent transaction on a separate connection, and `writeIsolated` to
+assert that a write is not nested inside an enclosing transaction. Register hooks via
+`beforeCommit` (write scopes only), `afterCommit` (runs after commit and connection close, outside
+any transaction), and `afterCompletion`.
 
 Transactions stay on their owning thread and within the callback. Virtual threads
 work. Suspending a coroutine or sharing the connection with child threads is unsupported.
-Default isolation comes from the connection pool; the constructor accepts explicit
-JDBC isolation and a per-statement query timeout (`Duration`). Both auto-commit-enabled and
-auto-commit-disabled pools (such as HikariCP with `auto-commit: false`) are supported.
+Default isolation comes from the connection pool; `Db.builder(dataSource)` accepts explicit
+JDBC isolation, a per-statement query timeout (`Duration`), a `tenantSupplier`, a
+`transactionListener`, a `callbackDecorator`, and an `exceptionTranslator`. Both auto-commit-enabled
+and auto-commit-disabled pools (such as HikariCP with `auto-commit: false`) are supported.
 Read-only scopes use transaction-scoped `SET TRANSACTION READ ONLY` rather than mutating
 session state on pooled connections.
 
-`Session.borrowTenant(connection, tenantId, queryTimeout) { ... }` and
-`Session.borrowGlobal(connection, queryTimeout) { ... }` participate in an existing transaction
-(the timeout is optional); global scopes run only `-- vev.scope: global` queries. The connection
-must have auto-commit disabled. The caller owns commit,
-rollback and close, and must propagate failures to its transaction manager. Flush pending ORM
-writes before borrowing a connection while migrating an application incrementally. The caller
-also enforces framework read-only policies; a framework hint need not make PostgreSQL read-only.
+`Session.borrowRead`, `Session.borrowWrite`, `Session.borrowTenantRead`, and
+`Session.borrowTenantWrite` (or `Db.builder(TransactionBackend)`) participate in a caller-owned
+transaction when migrating an application incrementally. The connection must have auto-commit
+disabled. The caller owns commit, rollback and close, and must propagate failures to its
+transaction manager.
 
 ## Build behavior
 

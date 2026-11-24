@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class GeneratedTypesTest {
     private Postgres postgres;
-    private Vev vev;
+    private Db db;
     private static final UUID UUID_VALUE = UUID.fromString("01234567-89ab-cdef-0123-456789abcdef");
     private static final List<Object> VALUES = List.of(
         true, (short) -32768, Integer.MIN_VALUE, Long.MAX_VALUE, 1.25f, -9.125d, new BigDecimal("12345678901234567890.123456789"),
@@ -37,17 +37,15 @@ class GeneratedTypesTest {
     @BeforeAll void start() throws Exception {
         postgres = new Postgres(""); postgres.migrate(Path.of("src/main/schema"));
         var source = new PGSimpleDataSource(); source.setURL(postgres.url()); source.setUser(postgres.user()); source.setPassword(postgres.password());
-        vev = new Vev(source);
+        db = new Db(source);
     }
     @AfterAll void stop() throws Exception { if (postgres != null) postgres.close(); }
     private Object roundTrip(int index, Object input) {
-        try {
-            var method = Arrays.stream(Queries.class.getMethods()).filter(m -> m.getName().equals("typeCase" + index)).findFirst().orElseThrow();
-            return vev.readGlobal(session -> {
-                try { var row = method.invoke(null, input); return row.getClass().getMethod("getValue").invoke(row); }
-                catch (ReflectiveOperationException failure) { throw new IllegalStateException("Generated reader failed", failure); }
-            });
-        } catch (java.sql.SQLException failure) { throw new IllegalStateException(failure); }
+        var method = Arrays.stream(Queries.class.getMethods()).filter(m -> m.getName().equals("typeCase" + index)).findFirst().orElseThrow();
+        return db.read(tx -> {
+            try { var row = method.invoke(null, tx, input); return row.getClass().getMethod("getValue").invoke(row); }
+            catch (ReflectiveOperationException failure) { throw new IllegalStateException("Generated reader failed", failure); }
+        });
     }
     @TestFactory Stream<DynamicTest> allGeneratedBindingsAndReadersRoundTrip() {
         return IntStream.range(0,VALUES.size()).mapToObj(i -> DynamicTest.dynamicTest("type " + i + " round trip", () -> {
@@ -80,15 +78,15 @@ class GeneratedTypesTest {
             else assertEquals(edge.value,actual);
         }));
     }
-    @Test void arrayCommasPreserveNullabilityOfSubsequentProjections() throws Exception {
-        var row = vev.readGlobal(session -> Queries.arrayProjection());
+    @Test void arrayCommasPreserveNullabilityOfSubsequentProjections() {
+        var row = db.read(tx -> Queries.arrayProjection(tx));
         assertEquals(List.of(1, 2), row.getIds());
         assertEquals(1L, row.getTotal());
         assertNull(row.getMissing());
     }
 
-    @Test void requiredPrimitiveBindingsAndReadsPreserveExtremaAndZero() throws Exception {
-        var row = vev.readGlobal(session -> Queries.requiredPrimitives(false, Short.MIN_VALUE, 0,
+    @Test void requiredPrimitiveBindingsAndReadsPreserveExtremaAndZero() {
+        var row = db.read(tx -> Queries.requiredPrimitives(tx, false, Short.MIN_VALUE, 0,
                 Long.MAX_VALUE, Float.NaN, Double.NEGATIVE_INFINITY));
         assertFalse(row.getB());
         assertEquals(Short.MIN_VALUE, row.getS());
@@ -99,9 +97,9 @@ class GeneratedTypesTest {
     }
 
     @Test void unsupportedValuesAndWrongNonNullAssertionsFailInsteadOfDecodingDefaults() {
-        assertThrows(IllegalArgumentException.class,()->vev.readGlobal(s->Queries.assertedNull()));
-        assertThrows(java.sql.SQLException.class,()->vev.readGlobal(s->Queries.multidimensional()));
-        assertThrows(java.sql.SQLException.class,()->vev.readGlobal(s->Queries.nonfiniteNumeric()));
+        assertThrows(VevDataException.class,()->db.read(tx->Queries.assertedNull(tx)));
+        assertThrows(VevSqlException.class,()->db.read(tx->Queries.multidimensional(tx)));
+        assertThrows(VevSqlException.class,()->db.read(tx->Queries.nonfiniteNumeric(tx)));
         assertThrows(IllegalStateException.class,()->roundTrip(7,"\u0000"));
     }
 }

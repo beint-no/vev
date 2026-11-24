@@ -16,7 +16,7 @@ public class InsertBenchmark {
     }
     @TearDown(Level.Trial) public void close() throws Exception { if(fixture!=null) fixture.close(); }
     @Benchmark public CreateDepartmentRow generatedInsert() throws Exception {
-        try { return Session.borrowTenant(fixture.connection, 1,s->Queries.createDepartment(900,"Synthetic Insert")); }
+        try { return Session.borrowTenantWrite(fixture.connection, 1, tx -> Queries.createDepartment(tx, 900,"Synthetic Insert")); }
         finally { fixture.connection.rollback(); }
     }
     @Benchmark public CreateDepartmentRow jdbcInsert() throws Exception {

@@ -23,7 +23,7 @@ public final class QueryCompiler {
             return declared + (nullable ? "?" : "");
         }
     }
-    record Query(SqlSource source, List<Value> parameters, List<Value> columns) {}
+    record Query(SqlSource source, List<Value> parameters, List<Value> columns, boolean writes) {}
 
     public static void compile(Connection connection, Path queries, Path output, String packageName, String className)
             throws SQLException, IOException {
@@ -106,7 +106,7 @@ public final class QueryCompiler {
         }
         Files.writeString(owner, String.join("\n", generated.keySet()) + "\n", StandardCharsets.UTF_8);
         String manifest = compiled.stream().map(q -> queries.relativize(q.source.path()).toString().replace('\\', '/')
-                + " " + q.source.name() + " " + q.source.cardinality() + " " + digest(q.source.sql()))
+                + " " + q.source.name() + " " + q.source.cardinality() + " " + (q.writes ? "write" : "read") + " " + digest(q.source.sql()))
                 .collect(java.util.stream.Collectors.joining("\n"));
         Files.writeString(output.resolve("queries.sha256"), manifest + "\n", StandardCharsets.UTF_8);
     }
@@ -125,8 +125,8 @@ public final class QueryCompiler {
                 Value previous = parameters.putIfAbsent(name, value);
                 if (previous != null && !sameBinding(previous.type, type)) throw SqlSource.error(source.path(), "Parameter " + name + " has incompatible types across occurrences; use separate names or consistent casts");
             }
-            // Kotlin compiles @JvmStatic object methods to an instance method taking `this` plus API arguments.
-            int methodSlots = 1 + (source.cardinality().equals("stream") ? 1 : 0)
+            // Kotlin compiles @JvmStatic object methods to an instance method taking `this`, the capability scope `tx`, plus API arguments.
+            int methodSlots = 2 + (source.cardinality().equals("stream") ? 1 : 0)
                     + parameters.values().stream()
                     .filter(p -> !p.name.equals(source.tenant()))
                     .mapToInt(QueryCompiler::jvmSlots).sum();
@@ -179,8 +179,8 @@ public final class QueryCompiler {
                 if (copySlots > 255) throw SqlSource.error(source.path(), "Result has " + columns.size()
                         + " columns requiring " + copySlots + " JVM parameter slots; Kotlin data-class copy methods allow at most 255. Select a narrower projection");
             }
-            TenantScans.require(connection, source);
-            return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns));
+            boolean writes = TenantScans.analyze(connection, source);
+            return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns), writes);
         } catch (SQLException exception) {
             throw new SQLException(source.path() + ": PostgreSQL rejected query " + source.name() + " [SQLSTATE " + exception.getSQLState() + "]: " + exception.getMessage(), exception.getSQLState(), exception);
         }

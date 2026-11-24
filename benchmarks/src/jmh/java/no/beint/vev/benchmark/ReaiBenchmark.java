@@ -32,7 +32,7 @@ public class ReaiBenchmark {
         try { if(connection!=null) connection.close(); } finally { if(postgres!=null) postgres.close(); }
     }
     @Benchmark public List<LedgerRow> generatedLedger() throws Exception {
-        var result=Session.borrowTenant(connection, 1,s->Queries.ledger()); connection.commit(); return result;
+        var result=Session.borrowTenantRead(connection, 1, tx -> Queries.ledger(tx)); connection.commit(); return result;
     }
     @Benchmark public List<LedgerRow> jdbcLedger() throws Exception {
         var rows=new ArrayList<LedgerRow>();

@@ -16,9 +16,14 @@ import java.util.List;
 public final class Values {
     private Values() {}
 
+    public static <T> T requireNonNull(T value, String message) {
+        if (value == null) throw new VevDataException(message);
+        return value;
+    }
+
     public static boolean booleanValue(ResultSet result, int position, String message) throws SQLException {
         boolean value = result.getBoolean(position);
-        if (result.wasNull()) throw new IllegalArgumentException(message);
+        if (result.wasNull()) throw new VevDataException(message);
         return value;
     }
 
@@ -29,7 +34,7 @@ public final class Values {
 
     public static short shortValue(ResultSet result, int position, String message) throws SQLException {
         short value = result.getShort(position);
-        if (result.wasNull()) throw new IllegalArgumentException(message);
+        if (result.wasNull()) throw new VevDataException(message);
         return value;
     }
 
@@ -40,7 +45,7 @@ public final class Values {
 
     public static int intValue(ResultSet result, int position, String message) throws SQLException {
         int value = result.getInt(position);
-        if (result.wasNull()) throw new IllegalArgumentException(message);
+        if (result.wasNull()) throw new VevDataException(message);
         return value;
     }
 
@@ -51,7 +56,7 @@ public final class Values {
 
     public static long longValue(ResultSet result, int position, String message) throws SQLException {
         long value = result.getLong(position);
-        if (result.wasNull()) throw new IllegalArgumentException(message);
+        if (result.wasNull()) throw new VevDataException(message);
         return value;
     }
 
@@ -62,7 +67,7 @@ public final class Values {
 
     public static float floatValue(ResultSet result, int position, String message) throws SQLException {
         float value = result.getFloat(position);
-        if (result.wasNull()) throw new IllegalArgumentException(message);
+        if (result.wasNull()) throw new VevDataException(message);
         return value;
     }
 
@@ -73,7 +78,7 @@ public final class Values {
 
     public static double doubleValue(ResultSet result, int position, String message) throws SQLException {
         double value = result.getDouble(position);
-        if (result.wasNull()) throw new IllegalArgumentException(message);
+        if (result.wasNull()) throw new VevDataException(message);
         return value;
     }
 
@@ -84,7 +89,7 @@ public final class Values {
 
     public static Instant instantValue(ResultSet result, int position, String message) throws SQLException {
         OffsetDateTime value = result.getObject(position, OffsetDateTime.class);
-        if (value == null) throw new IllegalArgumentException(message);
+        if (value == null) throw new VevDataException(message);
         return value.toInstant();
     }
 

@@ -14,9 +14,9 @@ import java.util.regex.Pattern;
 public record SqlSource(Path path, String name, String cardinality, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
                         Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
-                        String positionalSql, boolean customPlan) {
+                        String positionalSql, boolean customPlan, boolean forceWrite) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
-    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan):.*";
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan|access):.*";
 
     /** Returns the directive without its prefix, or null for an ordinary comment. */
     private static String directive(Path path, String comment) {
@@ -54,6 +54,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         String tenant = "tenantId";
         boolean scopeDeclared = false;
         boolean customPlan = false;
+        boolean forceWrite = false;
         Set<String> nullable = new LinkedHashSet<>();
         Set<String> notNull = new LinkedHashSet<>();
         Map<String, String> domains = new LinkedHashMap<>();
@@ -72,7 +73,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
             sqlStart = end;
             if (text == null) continue;
             String key = text.substring(0, text.indexOf(':'));
-            if (Set.of("name", "scope", "plan").contains(key) && !singletonDirectives.add(key)) {
+            if (Set.of("name", "scope", "plan", "access").contains(key) && !singletonDirectives.add(key)) {
                 throw error(path, "Duplicate " + key + " directive");
             }
             if (text.startsWith("name:")) {
@@ -101,6 +102,9 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
                 if (scopeDeclared || !text.substring(6).strip().equals("global")) throw error(path, "Use -- vev.scope: global once to opt out of tenant binding");
                 scopeDeclared = true;
                 tenant = null;
+            } else if (text.startsWith("access:")) {
+                if (!text.substring(7).strip().equals("write")) throw error(path, "Use -- vev.access: write to require a write scope");
+                forceWrite = true;
             } else {
                 if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- vev.plan: custom to plan every execution with its parameter values");
                 customPlan = true;
@@ -170,7 +174,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
                 int end = i + 2;
                 while (end < source.length() && Character.isJavaIdentifierPart(source.charAt(end))) end++;
                 String parameter = identifier(path, source.substring(i + 1, end));
-                if (parameter.equals("session")) throw error(path, "Parameter name session is reserved");
+                if (parameter.equals("tx") || parameter.equals("session")) throw error(path, "Parameter name " + parameter + " is reserved");
                 if (cardinality.equals("stream") && parameter.equals("onRow")) throw error(path, "Parameter name onRow is reserved for :stream queries");
                 parameters.add(parameter);
                 sql.append('?'); positional.append('$').append(parameters.size()); tokens.add("<parameter>"); i = end; continue;
@@ -232,7 +236,28 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
         return new SqlSource(path, name, cardinality, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), customPlan);
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), customPlan, forceWrite);
+    }
+
+    /** Detects PostgreSQL mutating/locking calls and FOR UPDATE/SHARE clauses directly in lexed tokens. */
+    boolean hasMutatingOrLockingSyntax() {
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (i + 1 < tokens.size() && tokens.get(i + 1).equals("(")) {
+                if (token.equals("NEXTVAL") || token.equals("SETVAL") || token.equals("PG_NOTIFY")
+                        || token.startsWith("PG_ADVISORY_") || token.startsWith("PG_TRY_ADVISORY_")) {
+                    return true;
+                }
+            }
+            if (token.equals("FOR") && i + 1 < tokens.size()) {
+                String next = tokens.get(i + 1);
+                if (next.equals("UPDATE") || next.equals("SHARE")) return true;
+                if (next.equals("KEY") && i + 2 < tokens.size() && tokens.get(i + 2).equals("SHARE")) return true;
+                if (next.equals("NO") && i + 3 < tokens.size()
+                        && tokens.get(i + 2).equals("KEY") && tokens.get(i + 3).equals("UPDATE")) return true;
+            }
+        }
+        return false;
     }
 
     static String identifier(Path path, String name) {

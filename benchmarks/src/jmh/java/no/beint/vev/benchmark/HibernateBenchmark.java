@@ -44,7 +44,7 @@ public class HibernateBenchmark {
     }
 
     @Benchmark public List<CustomersRow> vevNative() throws Exception {
-        var rows = Session.borrowTenant(connection, 7, s -> Queries.customers(null));
+        var rows = Session.borrowTenantRead(connection, 7, tx -> Queries.customers(tx, null));
         connection.commit();
         return rows;
     }

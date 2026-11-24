@@ -28,18 +28,15 @@ final class KotlinWriter {
         out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
         appendParameters(out, query, true);
         out.append("): ").append(result).append(" {\n");
-        if (source.tenant() == null) {
-            out.append("        val _vevSession = no.beint.vev.Session.current()\n");
-        } else {
-            out.append("        val _vevSession = no.beint.vev.Session.tenant()\n");
-            out.append("        val _vevTenantId = _vevSession.tenantId()\n");
+        if (source.tenant() != null) {
+            out.append("        val _vevTenantId = tx.tenantId()\n");
         }
         boolean hasArrayParam = query.parameters().stream().anyMatch(p -> p.type().element() != null);
         out.append("        try {\n");
-        out.append("            _vevSession.").append(source.customPlan() ? "prepareCustomPlan(" : "prepare(").append(quote(source.sql())).append(").use { _vevStmt ->\n");
+        out.append("            tx.").append(source.customPlan() ? "prepareCustomPlan(" : "prepare(").append(quote(source.sql())).append(").use { _vevStmt ->\n");
         String indent = hasArrayParam ? "                    " : "                ";
         if (hasArrayParam) {
-            out.append("                no.beint.vev.Bindings(_vevSession.connection(), _vevStmt).use { _vevBindings ->\n");
+            out.append("                no.beint.vev.Bindings(tx.connection(), _vevStmt).use { _vevBindings ->\n");
         }
         for (int i = 0; i < source.parameters().size(); i++) {
             String name = source.parameters().get(i);
@@ -73,9 +70,9 @@ final class KotlinWriter {
             case "void" -> out.append(indent).append("_vevStmt.execute()\n");
             case "one" -> {
                 out.append(indent).append("_vevStmt.executeQuery().use { _vevResult ->\n");
-                out.append(indent).append("    if (!_vevResult.next()) throw IllegalStateException(\"Vev query expected one row, received none\")\n");
+                out.append(indent).append("    if (!_vevResult.next()) throw no.beint.vev.VevDataException(\"Vev query expected one row, received none\")\n");
                 out.append(indent).append("    val _vevValue = readRow(_vevResult)\n");
-                out.append(indent).append("    if (_vevResult.next()) throw IllegalStateException(\"Vev query expected at most one row, received multiple\")\n");
+                out.append(indent).append("    if (_vevResult.next()) throw no.beint.vev.VevDataException(\"Vev query expected at most one row, received multiple\")\n");
                 out.append(indent).append("    return _vevValue\n");
                 out.append(indent).append("}\n");
             }
@@ -83,7 +80,7 @@ final class KotlinWriter {
                 out.append(indent).append("_vevStmt.executeQuery().use { _vevResult ->\n");
                 out.append(indent).append("    if (!_vevResult.next()) return null\n");
                 out.append(indent).append("    val _vevValue = readRow(_vevResult)\n");
-                out.append(indent).append("    if (_vevResult.next()) throw IllegalStateException(\"Vev query expected at most one row, received multiple\")\n");
+                out.append(indent).append("    if (_vevResult.next()) throw no.beint.vev.VevDataException(\"Vev query expected at most one row, received multiple\")\n");
                 out.append(indent).append("    return _vevValue\n");
                 out.append(indent).append("}\n");
             }
@@ -113,7 +110,7 @@ final class KotlinWriter {
         }
         out.append("            }\n");
         out.append("        } catch (_vevFailure: Throwable) {\n");
-        out.append("            _vevSession.markFailed()\n");
+        out.append("            tx.markFailed()\n");
         out.append("            throw _vevFailure\n");
         out.append("        }\n");
         out.append("    }\n");
@@ -138,7 +135,7 @@ final class KotlinWriter {
             } else if (type.postgres().equals("timestamptz")) {
                 read = "no.beint.vev.Values.instantValue(_vevResult, " + index + ", " + message + ")";
             } else {
-                read = "requireNotNull(" + readNullable(type, index) + ") { " + message + " }";
+                read = "no.beint.vev.Values.requireNonNull(" + readNullable(type, index) + ", " + message + ")";
             }
         } else if (primitive(type)) {
             read = "no.beint.vev.Values." + primitivePrefix(type) + "OrNull(_vevResult, " + index + ")";
@@ -172,19 +169,23 @@ final class KotlinWriter {
         };
     }
 
+    private static String scopeType(QueryCompiler.Query query) {
+        boolean tenant = query.source().tenant() != null;
+        if (tenant) return query.writes() ? "no.beint.vev.TenantWriteScope" : "no.beint.vev.TenantReadScope";
+        return query.writes() ? "no.beint.vev.WriteScope" : "no.beint.vev.ReadScope";
+    }
+
     private static void appendParameters(StringBuilder out, QueryCompiler.Query query, boolean withTypes) {
         var source = query.source();
-        boolean comma = false;
+        out.append("tx");
+        if (withTypes) out.append(": ").append(scopeType(query));
         for (var parameter : query.parameters()) {
             if (parameter.name().equals(source.tenant())) continue;
-            if (comma) out.append(", ");
-            out.append(id(parameter.name()));
+            out.append(", ").append(id(parameter.name()));
             if (withTypes) out.append(": ").append(parameter.kotlin());
-            comma = true;
         }
         if (source.cardinality().equals("stream")) {
-            if (comma) out.append(", ");
-            out.append("onRow");
+            out.append(", onRow");
             if (withTypes) out.append(": java.util.function.Consumer<").append(id(rowName(source.name()))).append(">");
         }
     }

@@ -41,24 +41,24 @@ application {{ mainClass.set("sample.ConsumerKt") }}
     kotlin.mkdir(parents=True)
     (kotlin / "Consumer.kt").write_text("""
 package sample
-import no.beint.vev.Vev
+import no.beint.vev.Db
 import no.beint.vev.compiler.Postgres
 import org.postgresql.ds.PGSimpleDataSource
 import java.nio.file.Path
 fun main() {
     Postgres("").use { pg ->
         pg.migrate(Path.of("src/main/resources/db/migration"))
-        val db=Vev(PGSimpleDataSource().apply { setURL(pg.url()); user=pg.user(); password=pg.password() })
-        db.write(7) { Queries.create(1,"synthetic") }
-        check(db.read(7) { Queries.find(id=1)?.name }=="synthetic")
-        check(db.read(8) { Queries.find(id=1) }==null)
-        check(db.read(7) { JavaConsumer.name() }=="synthetic")
+        val db=Db(PGSimpleDataSource().apply { setURL(pg.url()); user=pg.user(); password=pg.password() })
+        db.write(7) { Queries.create(it, 1,"synthetic") }
+        check(db.read(7) { Queries.find(it, id=1)?.name }=="synthetic")
+        check(db.read(8) { Queries.find(it, id=1) }==null)
+        check(db.read(7) { JavaConsumer.name(it) }=="synthetic")
         println("Published Kotlin/Java consumer and tenant isolation verified")
     }
 }
 """)
     java = consumer / "src/main/java/sample"
     java.mkdir(parents=True)
-    (java / "JavaConsumer.java").write_text("package sample; public class JavaConsumer { public static String name() { return Queries.find(1).getName(); } }")
+    (java / "JavaConsumer.java").write_text("package sample; import no.beint.vev.TenantReadScope; public class JavaConsumer { public static String name(TenantReadScope tx) { return Queries.find(tx, 1).getName(); } }")
     for invocation in range(2):
         subprocess.run([str(root / "gradlew"), "check", "run", "--console=plain", "--configuration-cache"], cwd=consumer, check=True)
