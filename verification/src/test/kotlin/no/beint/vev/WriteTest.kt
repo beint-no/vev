@@ -238,4 +238,61 @@ class WriteTest {
             assertEquals(if (results[second]==DocumentStatus.PAID) ReviewState.APPROVED else null,secondRow.review)
         }
     }
+
+    @Test fun `savepoint recovers from PostgreSQL constraint errors and keeps outer writes atomic`() {
+        val events = mutableListOf<String>()
+        db.write(7) { outer ->
+            Queries.saveWriteSettings(outer, BigDecimal.ONE, "before")
+            outer.afterCommit { events.add("outer") }
+            val failure = assertThrows(VevSqlException::class.java) {
+                db.tenantSavepoint { sp ->
+                    sp.afterCommit { events.add("rolled-back") }
+                    Queries.saveWriteSettings(sp, BigDecimal.ZERO, "invalid")
+                }
+            }
+            assertTrue(failure.isCheckViolation())
+            // Outer transaction recovered cleanly from PostgreSQL 25P02 aborted state.
+            val current = Queries.writeSettings(outer)!!
+            assertEquals("before", current.label)
+            Queries.renameWriteSettings(outer, "after-recovery", 0)
+        }
+        assertEquals(listOf("outer"), events)
+        assertEquals("after-recovery", db.read(7) { Queries.writeSettings(it)!!.label })
+    }
+
+    @Test fun `readRepeatable, writeSerializable, readNew, and withTimeout work against PostgreSQL 19`() {
+        fun level(tx: ReadScope) = tx.prepare("SHOW transaction_isolation").use { s -> s.executeQuery().use { it.next(); it.getString(1) } }
+        fun timeout(tx: ReadScope) = tx.prepare("SHOW statement_timeout").use { s -> s.executeQuery().use { it.next(); it.getString(1) } }
+
+        assertEquals("repeatable read", db.readRepeatable(7) { level(it) })
+        assertEquals("serializable", db.writeSerializable(7) { level(it) })
+
+        db.write(7) { outer ->
+            Queries.createCustomer(outer, "uncommitted")
+            val visibleInReadNew = db.readNew(7) { inner ->
+                assertFalse(db.inWriteTransaction())
+                Queries.customers(inner, null)
+            }
+            assertTrue(visibleInReadNew.isEmpty(), "readNew must only see committed data")
+        }
+        assertEquals(1, db.read(7) { Queries.customers(it, null).size })
+
+        // Raw JDBC statements on tx.connection() inherit PostgreSQL SET LOCAL statement_timeout from withTimeout / Db.queryTimeout.
+        val timedDb = Db.builder(source).queryTimeout(java.time.Duration.ofSeconds(30)).build()
+        val canceled = assertThrows(VevSqlException::class.java) {
+            timedDb.withTimeout(java.time.Duration.ofMillis(250)).read(7) { inner ->
+                assertEquals("250ms", timeout(inner))
+                inner.connection().createStatement().use { it.execute("SELECT pg_sleep(5)") }
+            }
+        }
+        assertTrue(canceled.isQueryCanceled())
+        // Restored when nested withTimeout succeeds cleanly.
+        timedDb.read(7) { outer ->
+            assertEquals("30s", timeout(outer))
+            timedDb.withTimeout(java.time.Duration.ofSeconds(5)).read(7) { inner ->
+                assertEquals("5s", timeout(inner))
+            }
+            assertEquals("30s", timeout(outer))
+        }
+    }
 }

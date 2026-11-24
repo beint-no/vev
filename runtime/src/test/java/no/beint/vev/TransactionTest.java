@@ -5,6 +5,7 @@ import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -37,6 +38,11 @@ class TransactionTest {
             case "close" -> null;
             default -> throw new UnsupportedOperationException(m.getName());
         });
+        final Savepoint savepoint = (Savepoint) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Savepoint.class}, (p, m, a) -> switch (m.getName()) {
+            case "getSavepointId" -> 1;
+            case "getSavepointName" -> "sp_1";
+            default -> throw new UnsupportedOperationException(m.getName());
+        });
         final Connection connection = (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {Connection.class}, (proxy, method, args) -> {
             calls.add(method.getName());
             return switch (method.getName()) {
@@ -45,6 +51,8 @@ class TransactionTest {
                 case "isReadOnly" -> readOnly;
                 case "createStatement" -> statement;
                 case "prepareStatement" -> prepared;
+                case "setSavepoint" -> savepoint;
+                case "releaseSavepoint" -> null;
                 case "getMetaData" -> Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] {DatabaseMetaData.class}, (p, m, a) -> switch (m.getName()) {
                     case "getDatabaseProductName" -> "PostgreSQL";
                     case "getDatabaseMajorVersion" -> major;
@@ -163,9 +171,142 @@ class TransactionTest {
         Fixture f = new Fixture();
         new Db(f.source).read(7, s -> 1);
         assertFalse(f.calls.contains("setTransactionIsolation"));
+        assertEquals(List.of("SET TRANSACTION READ ONLY"), f.statements);
         Fixture explicit = new Fixture();
         new Db(explicit.source, Connection.TRANSACTION_SERIALIZABLE).read(7, s -> 1);
-        assertEquals(1, explicit.calls.stream().filter("setTransactionIsolation"::equals).count());
+        assertFalse(explicit.calls.contains("setTransactionIsolation"));
+        assertEquals(List.of("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY"), explicit.statements);
+    }
+
+    @Test void readNewOpensIndependentReadOnlyTransactionAndRejectsWrites() {
+        Fixture f = new Fixture();
+        List<String> observed = new ArrayList<>();
+        Db db = Db.builder(f.source)
+                .tenantSupplier(() -> 7)
+                .transactionListener(new Db.TransactionListener() {
+                    @Override public Object onBegin(boolean readOnly, int tenantId) {
+                        observed.add("begin:" + readOnly + ":" + tenantId);
+                        return "tok";
+                    }
+                    @Override public void onEnd(Object token, boolean committed, Throwable failure) {}
+                })
+                .build();
+        db.write(7, outer -> {
+            assertTrue(db.inWriteTransaction());
+            db.requireWriteTransaction();
+            return db.tenantReadNew(inner -> {
+                assertTrue(db.inTransaction());
+                assertFalse(db.inWriteTransaction());
+                assertEquals(7, inner.tenantId());
+                assertThrows(VevSessionException.class, db::requireWriteTransaction);
+                assertThrows(VevSessionException.class, () -> db.tenantWrite(w -> 1));
+                return "ok";
+            });
+        });
+        assertEquals(List.of("begin:false:7", "begin:true:7"), observed);
+        assertEquals(List.of("SET TRANSACTION READ ONLY"), f.statements);
+    }
+
+    @Test void readRepeatableAndWriteSerializableRejectElevationAndDoNotLeakAcrossWriteNew() {
+        Fixture f = new Fixture();
+        Db db = new Db(f.source);
+        // Joining at same or lower isolation succeeds; raising isolation fails.
+        db.readRepeatable(7, outer -> {
+            assertEquals(7, db.readRepeatable(7, TenantReadScope::tenantId).intValue());
+            assertEquals(7, db.read(7, TenantReadScope::tenantId).intValue());
+            // Opening a fresh transaction inside readRepeatable does NOT inherit REPEATABLE READ.
+            db.writeNew(7, fresh -> {
+                assertThrows(VevSessionException.class, () -> db.readRepeatable(7, inner -> 1));
+                return null;
+            });
+            return null;
+        });
+        assertThrows(VevSessionException.class, () -> db.read(7, outer -> db.readRepeatable(7, inner -> 1)));
+        assertThrows(VevSessionException.class, () -> db.write(7, outer -> db.writeSerializable(7, inner -> 1)));
+        assertThrows(VevSessionException.class, () -> db.readRepeatable(7, outer -> db.writeSerializable(7, inner -> 1)));
+        assertEquals(List.of("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY", "SET TRANSACTION READ ONLY", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"), f.statements);
+    }
+
+    @Test void withTimeoutAppliesAndRestoresStatementTimeoutAcrossNesting() {
+        Fixture f = new Fixture();
+        Db db = Db.builder(f.source).queryTimeout(Duration.ofSeconds(30)).build();
+        db.write(7, outer -> {
+            try (var s = outer.prepare("SELECT 1")) { assertNotNull(s); assertEquals(30, f.queryTimeout); }
+            db.withTimeout(Duration.ofSeconds(5)).read(7, inner -> {
+                try (var s = inner.prepare("SELECT 1")) { assertNotNull(s); assertEquals(5, f.queryTimeout); }
+                // Normal nested read without explicit withTimeout inherits the 5s override.
+                db.read(7, inherited -> {
+                    try (var s = inherited.prepare("SELECT 1")) { assertNotNull(s); assertEquals(5, f.queryTimeout); }
+                    return null;
+                });
+                return null;
+            });
+            // Restored back to 30s after nested withTimeout exits.
+            try (var s = outer.prepare("SELECT 1")) { assertNotNull(s); assertEquals(30, f.queryTimeout); }
+            return null;
+        });
+        assertEquals(List.of(
+                "SET LOCAL statement_timeout = 30000",
+                "SET LOCAL statement_timeout = 5000",
+                "SET LOCAL statement_timeout = 30000"), f.statements);
+    }
+
+    @Test void afterCommitIsolatesFailuresAndBeforeCommitPreservesTenant() {
+        Fixture f = new Fixture();
+        List<String> events = new ArrayList<>();
+        Db db = new Db(f.source);
+        RuntimeException failure = assertThrows(IllegalStateException.class, () -> db.write(global -> {
+            db.write(42, tenantTx -> {
+                tenantTx.beforeCommit(() -> events.add("before:" + db.currentTenantId()));
+                db.beforeCommit(() -> events.add("dbBefore:" + db.currentTenantId()));
+                return null;
+            });
+            global.afterCommit(() -> {
+                events.add("after1");
+                throw new IllegalStateException("boom1");
+            });
+            global.afterCommit(() -> {
+                events.add("after2");
+                throw new IllegalArgumentException("boom2");
+            });
+            global.afterCommit(() -> events.add("after3"));
+            return null;
+        }));
+        assertEquals("boom1", failure.getMessage());
+        assertEquals(1, failure.getSuppressed().length);
+        assertEquals("boom2", failure.getSuppressed()[0].getMessage());
+        assertEquals(List.of("before:42", "dbBefore:42", "after1", "after2", "after3"), events);
+    }
+
+    @Test void savepointRollsBackFailuresAndDiscardsNestedCallbacksWithoutPoisoningOuterTx() {
+        Fixture f = new Fixture();
+        List<String> events = new ArrayList<>();
+        Db db = new Db(f.source);
+        assertThrows(VevSessionException.class, () -> db.savepoint(tx -> 1));
+        assertThrows(VevSessionException.class, () -> db.read(tx -> db.savepoint(w -> 1)));
+        f.calls.clear();
+
+        db.write(7, outer -> {
+            outer.afterCommit(() -> events.add("outer-after"));
+            VevSqlException caught = assertThrows(VevSqlException.class, () -> db.tenantSavepoint(sp -> {
+                sp.afterCommit(() -> events.add("rolled-back-after"));
+                sp.beforeCommit(() -> events.add("rolled-back-before"));
+                throw new SQLException("duplicate key", "23505");
+            }));
+            assertTrue(caught.isUniqueViolation());
+            // Outer transaction remains healthy after savepoint rollback.
+            assertEquals(7, outer.tenantId());
+            db.tenantSavepoint(sp -> {
+                sp.afterCommit(() -> events.add("committed-sp-after"));
+                return null;
+            });
+            return null;
+        });
+        assertEquals(List.of("outer-after", "committed-sp-after"), events);
+        assertEquals(2, f.calls.stream().filter("setSavepoint"::equals).count());
+        assertEquals(2, f.calls.stream().filter("releaseSavepoint"::equals).count());
+        assertEquals(1, f.calls.stream().filter("rollback"::equals).count());
+        assertEquals(1, f.calls.stream().filter("commit"::equals).count());
     }
 
     @Test void reentrantCallsJoinSameConnectionAndRejectReadToWriteEscalation() {

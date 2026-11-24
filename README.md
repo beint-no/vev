@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.0.0"
+    id("no.beint.vev") version "5.1.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -150,9 +150,10 @@ of separate binds.
 
 Optional filters stay one static query: `WHERE (:status::text IS NULL OR status = :status)`, with sorting by
 `CASE` or separate queries. pgJDBC server-prepares a statement after a few executions, and PostgreSQL may then
-reuse a generic plan that keeps every optional filter and cannot pick the index the given filters need. Declare
-`-- vev.plan: custom` on such queries. Each execution is then planned with its parameter values, so PostgreSQL
-folds the unused filters away as if the SQL had been built for that combination.
+reuse a generic plan that keeps every optional filter and cannot pick the index the given filters need. Vev
+automatically enables per-execution planning (`setPrepareThreshold(0)`) whenever a `-- vev.nullable` parameter is
+tested with `IS NULL` or `IS NOT NULL` (including `CAST(:param AS type) IS NULL`). Declare `-- vev.plan: custom`
+explicitly for other parameter-skew patterns that do not test `IS NULL`.
 
 Keep one query per file so agents can discover, read and change its complete contract
 without loading neighboring queries. Multiple statements or named queries in a file
@@ -163,24 +164,30 @@ when shared semantics have an owner and execution tests; SQL text includes are a
 
 `Db` manages re-entrant lexical transactions. Outermost `read` / `write` calls commit successful
 callbacks and roll back failed callbacks. Nested calls join the enclosing transaction on the same
-JDBC connection, reject read-to-write escalation and cross-tenant switching, and never poison an
-enclosing transaction when a caller catches a non-SQL domain exception. SQL, decoding, and
-cardinality failures raise typed `VevException` subclasses (`VevSqlException`, `VevDataException`,
-`VevSessionException`) and poison the transaction even when caught. No retry occurs automatically.
+JDBC connection, reject read-to-write escalation, isolation elevation, and cross-tenant switching,
+and never poison an enclosing transaction when a caller catches a non-SQL domain exception. SQL,
+decoding, and cardinality failures raise typed `VevException` subclasses (`VevSqlException`,
+`VevDataException`, `VevSessionException`) and poison the transaction even when caught. No retry
+occurs automatically.
 
-Use `writeNew` for an independent transaction on a separate connection, and `writeIsolated` to
-assert that a write is not nested inside an enclosing transaction. Register hooks via
-`beforeCommit` (write scopes only), `afterCommit` (runs after commit and connection close, outside
-any transaction), and `afterCompletion`.
+Use `readNew` / `writeNew` for an independent transaction on a separate connection, `writeIsolated`
+to assert that a write is not nested inside an enclosing transaction, `readRepeatable` /
+`writeSerializable` for elevated isolation levels, `withTimeout(Duration)` for per-transaction
+statement timeouts (applied to both PostgreSQL `SET LOCAL statement_timeout` and JDBC statements),
+`requireWriteTransaction()` for write-only helpers, and `savepoint` / `tenantSavepoint` for
+recoverable sub-operations inside a write transaction (rolling back SQL/runtime errors and nested
+callbacks without poisoning the enclosing transaction). Register hooks via `beforeCommit` (write
+scopes only, preserving active tenant scope), `afterCommit` (runs all hooks after commit and
+connection close, outside any transaction), and `afterCompletion`.
 
 Transactions stay on their owning thread and within the callback. Virtual threads
 work. Suspending a coroutine or sharing the connection with child threads is unsupported.
 Default isolation comes from the connection pool; `Db.builder(dataSource)` accepts explicit
-JDBC isolation, a per-statement query timeout (`Duration`), a `tenantSupplier`, a
+JDBC isolation, a query timeout (`Duration`), a `tenantSupplier`, a
 `transactionListener`, a `callbackDecorator`, and an `exceptionTranslator`. Both auto-commit-enabled
 and auto-commit-disabled pools (such as HikariCP with `auto-commit: false`) are supported.
-Read-only scopes use transaction-scoped `SET TRANSACTION READ ONLY` rather than mutating
-session state on pooled connections.
+Read-only scopes, isolation overrides, and timeouts use transaction-scoped `SET TRANSACTION` /
+`SET LOCAL` rather than mutating session state on pooled connections.
 
 `Session.borrowRead`, `Session.borrowWrite`, `Session.borrowTenantRead`, and
 `Session.borrowTenantWrite` (or `Db.builder(TransactionBackend)`) participate in a caller-owned

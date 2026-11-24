@@ -25,7 +25,9 @@ public final class Session {
     static final class ActiveTx {
         final Connection connection;
         final boolean readOnly;
-        final int queryTimeoutSeconds;
+        final int isolation;
+        int queryTimeoutSeconds;
+        long queryTimeoutMillis;
         final Thread owner = Thread.currentThread();
         final Db.TransactionBackend backend;
         final UnaryOperator<Runnable> callbackDecorator;
@@ -35,11 +37,13 @@ public final class Session {
         List<Runnable> afterCommit;
         List<Runnable> afterCompletion;
 
-        ActiveTx(Connection connection, boolean readOnly, int queryTimeoutSeconds,
+        ActiveTx(Connection connection, boolean readOnly, int isolation, long queryTimeoutMillis,
                  Db.TransactionBackend backend, UnaryOperator<Runnable> callbackDecorator) {
             this.connection = connection;
             this.readOnly = readOnly;
-            this.queryTimeoutSeconds = queryTimeoutSeconds;
+            this.isolation = isolation;
+            this.queryTimeoutMillis = queryTimeoutMillis;
+            this.queryTimeoutSeconds = millisToSeconds(queryTimeoutMillis);
             this.backend = backend;
             this.callbackDecorator = callbackDecorator;
         }
@@ -89,6 +93,17 @@ public final class Session {
             afterCompletion.add(decorated);
         }
 
+        void truncateCallbacks(int beforeCommitSize, int afterCommitSize, int afterCompletionSize) {
+            truncate(beforeCommit, beforeCommitSize);
+            truncate(afterCommit, afterCommitSize);
+            truncate(afterCompletion, afterCompletionSize);
+        }
+
+        private static void truncate(List<Runnable> list, int size) {
+            if (list == null) return;
+            while (list.size() > size) list.removeLast();
+        }
+
         Runnable decorate(Runnable action) {
             return callbackDecorator != null ? Objects.requireNonNull(callbackDecorator.apply(action)) : action;
         }
@@ -103,20 +118,24 @@ public final class Session {
         }
 
         void runAfterCommit() {
-            if (afterCommit == null) return;
-            for (Runnable action : afterCommit) action.run();
+            runAll(afterCommit);
         }
 
         void runAfterCompletion() {
-            if (afterCompletion == null) return;
-            RuntimeException failure = null;
-            for (Runnable action : afterCompletion) {
+            runAll(afterCompletion);
+        }
+
+        private static void runAll(List<Runnable> actions) {
+            if (actions == null) return;
+            Throwable failure = null;
+            for (Runnable action : actions) {
                 try { action.run(); }
-                catch (RuntimeException exception) {
+                catch (RuntimeException | Error exception) {
                     if (failure == null) failure = exception; else failure.addSuppressed(exception);
                 }
             }
-            if (failure != null) throw failure;
+            if (failure instanceof RuntimeException runtime) throw runtime;
+            if (failure instanceof Error error) throw error;
         }
 
         PreparedStatement prepare(String sql) throws SQLException {
@@ -190,7 +209,11 @@ public final class Session {
         private final int tenantId;
         TenantWrite(ActiveTx tx, int tenantId) { super(tx); this.tenantId = tenantId; }
         @Override public int tenantId() { checkScope(); return tenantId; }
-        @Override public void beforeCommit(Runnable action) { checkScope(); tx.beforeCommit(action); }
+        @Override public void beforeCommit(Runnable action) {
+            Objects.requireNonNull(action, "action");
+            checkScope();
+            tx.beforeCommit(Db.bindTenant(tenantId, action));
+        }
     }
 
     /** Borrow a caller-owned transaction connection for global read queries. */
@@ -270,7 +293,7 @@ public final class Session {
     private static ActiveTx borrowedTx(Connection connection, boolean readOnly, Duration queryTimeout) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         if (connection.getAutoCommit()) throw new VevSessionException("Vev requires an explicit transaction");
-        return new ActiveTx(connection, readOnly, timeoutSeconds(queryTimeout), null, null);
+        return new ActiveTx(connection, readOnly, Db.DEFAULT_ISOLATION, timeoutMillis(queryTimeout), null, null);
     }
 
     static int requireTenant(int tenantId) {
@@ -278,12 +301,22 @@ public final class Session {
         return tenantId;
     }
 
-    /** JDBC timeouts have whole-second precision, so a partial second rounds up rather than disabling the timeout. */
-    static int timeoutSeconds(Duration timeout) {
+    static long timeoutMillis(Duration timeout) {
         if (timeout == null) return 0;
         if (timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException("Query timeout must be positive");
-        long seconds = timeout.getSeconds() + (timeout.getNano() > 0 ? 1 : 0);
+        long millis = timeout.toMillis();
+        return millis == 0 ? 1 : millis;
+    }
+
+    /** JDBC timeouts have whole-second precision, so a partial second rounds up rather than disabling the timeout. */
+    static int millisToSeconds(long millis) {
+        if (millis <= 0) return 0;
+        long seconds = (millis + 999) / 1000;
         return (int) Math.min(seconds, Integer.MAX_VALUE);
+    }
+
+    static int timeoutSeconds(Duration timeout) {
+        return millisToSeconds(timeoutMillis(timeout));
     }
 
     static void requirePostgres(Connection connection) throws SQLException {
