@@ -234,9 +234,85 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
         if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- vev.scope: global for global SQL");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
+        boolean effectiveCustomPlan = customPlan || hasNullableNullCheck(tokens, parameters, nullable);
         return new SqlSource(path, name, cardinality, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), customPlan, forceWrite);
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan, forceWrite);
+    }
+
+    /**
+     * Detects nullable parameters checked with {@code IS [NOT] NULL} (e.g. optional filter predicates
+     * {@code (:status::text IS NULL OR status = :status)} or {@code CAST(:name AS text) IS NULL}).
+     * PostgreSQL generic plans cannot fold these predicates away, so Vev plans them per execution.
+     */
+    static boolean hasNullableNullCheck(List<String> tokens, List<String> parameters, Set<String> nullable) {
+        if (nullable.isEmpty()) return false;
+        int paramIndex = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!tokens.get(i).equals("<parameter>")) continue;
+            String parameter = parameters.get(paramIndex++);
+            if (!nullable.contains(parameter)) continue;
+            int next = i + 1;
+            if (i >= 2 && tokens.get(i - 2).equals("CAST") && tokens.get(i - 1).equals("(")
+                    && next < tokens.size() && tokens.get(next).equals("AS")) {
+                int depth = 1;
+                next++;
+                while (next < tokens.size() && depth > 0) {
+                    String t = tokens.get(next++);
+                    if (t.equals("(")) depth++;
+                    else if (t.equals(")")) depth--;
+                }
+            } else {
+                while (next < tokens.size() && tokens.get(next).equals("::")) {
+                    next++;
+                    next = skipTypeName(tokens, next);
+                }
+            }
+            // Skip closing parentheses that wrap only this parameter expression, e.g. (:p::text) IS NULL.
+            int open = i - 1;
+            if (i >= 2 && tokens.get(i - 2).equals("CAST") && tokens.get(i - 1).equals("(")) open = i - 3;
+            while (open >= 0 && tokens.get(open).equals("(") && next < tokens.size() && tokens.get(next).equals(")")) {
+                open--;
+                next++;
+            }
+            if (next + 1 < tokens.size() && tokens.get(next).equals("IS")) {
+                if (tokens.get(next + 1).equals("NULL")) return true;
+                if (next + 2 < tokens.size() && tokens.get(next + 1).equals("NOT") && tokens.get(next + 2).equals("NULL")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int skipTypeName(List<String> tokens, int start) {
+        int i = start;
+        while (i < tokens.size()) {
+            String t = tokens.get(i);
+            if (t.equals("IS") || t.equals("OR") || t.equals("AND") || t.equals(")") || t.equals(",")
+                    || t.equals("=") || t.equals("<>") || t.equals("!=") || t.equals("<") || t.equals(">")
+                    || t.equals("THEN") || t.equals("ELSE") || t.equals("END") || t.equals("AS")
+                    || t.equals("FROM") || t.equals("WHERE") || t.equals("ORDER") || t.equals("GROUP")
+                    || t.equals("LIMIT") || t.equals("OFFSET") || t.equals("HAVING") || t.equals("::")) {
+                break;
+            }
+            if (t.equals("(")) {
+                int depth = 1;
+                i++;
+                while (i < tokens.size() && depth > 0) {
+                    if (tokens.get(i).equals("(")) depth++;
+                    else if (tokens.get(i).equals(")")) depth--;
+                    i++;
+                }
+                continue;
+            }
+            if (t.equals("[") && i + 1 < tokens.size() && tokens.get(i + 1).equals("]")) {
+                i += 2;
+                continue;
+            }
+            i++;
+        }
+        return i;
     }
 
     /** Detects PostgreSQL mutating/locking calls and FOR UPDATE/SHARE clauses directly in lexed tokens. */

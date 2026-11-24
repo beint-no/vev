@@ -65,4 +65,13 @@ class SqlSourceTest {
         assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(Path.of("x.sql"), "SELECT 1"));
         assertTrue(parse("-- vev.access: write\nSELECT 1").forceWrite());
     }
+
+    @Test void autoEnablesCustomPlanForNullableOptionalFilterPredicates() {
+        assertTrue(parse("-- vev.nullable: status\nSELECT 1 WHERE (:status::text IS NULL OR 'a' = :status)").customPlan());
+        assertTrue(parse("-- vev.nullable: name\nSELECT 1 WHERE (CAST(:name AS text) IS NULL OR 'a' = :name)").customPlan());
+        assertTrue(parse("-- vev.nullable: ids\nSELECT 1 WHERE (:ids::int[] IS NULL OR 1 = ANY(:ids))").customPlan());
+        assertTrue(parse("-- vev.nullable: x\nSELECT 1 WHERE ((:x::text) IS NOT NULL AND 'a' = :x)").customPlan());
+        assertFalse(parse("-- vev.nullable: note\nUPDATE t SET note = :note WHERE id = :id").customPlan());
+        assertFalse(parse("SELECT 1 WHERE :id = 1").customPlan());
+    }
 }
