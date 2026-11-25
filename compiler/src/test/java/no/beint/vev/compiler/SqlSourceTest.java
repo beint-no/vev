@@ -66,12 +66,25 @@ class SqlSourceTest {
         assertTrue(parse("-- vev.access: write\nSELECT 1").forceWrite());
     }
 
-    @Test void autoEnablesCustomPlanForNullableOptionalFilterPredicates() {
+    @Test void autoEnablesCustomPlanForParameterSkewedQueryShapes() {
         assertTrue(parse("-- vev.nullable: status\nSELECT 1 WHERE (:status::text IS NULL OR 'a' = :status)").customPlan());
         assertTrue(parse("-- vev.nullable: name\nSELECT 1 WHERE (CAST(:name AS text) IS NULL OR 'a' = :name)").customPlan());
         assertTrue(parse("-- vev.nullable: ids\nSELECT 1 WHERE (:ids::int[] IS NULL OR 1 = ANY(:ids))").customPlan());
         assertTrue(parse("-- vev.nullable: x\nSELECT 1 WHERE ((:x::text) IS NOT NULL AND 'a' = :x)").customPlan());
+        assertTrue(parse("WITH x AS (SELECT id FROM t WHERE id = :id) SELECT id FROM x").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE id = ANY(:ids::int[])").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE created_at BETWEEN :start AND :end").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE (:code::text = '' OR code = :code::text)").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE (:kind <> 'all' AND kind = :kind)").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE (NOT :restrict::boolean OR id = 1)").customPlan());
+        assertTrue(parse("SELECT t.id FROM t LEFT JOIN u ON :includeU::bool AND u.id = t.id").customPlan());
+        assertTrue(parse("SELECT CASE WHEN :suppliers THEN 1 ELSE 2 END AS v FROM t").customPlan());
+
+        // Simple OLTP lookups and DML remain on fast server-prepared generic plans.
         assertFalse(parse("-- vev.nullable: note\nUPDATE t SET note = :note WHERE id = :id").customPlan());
-        assertFalse(parse("SELECT 1 WHERE :id = 1").customPlan());
+        assertFalse(parse("SELECT id FROM t WHERE id = :id").customPlan());
+        assertFalse(parse("INSERT INTO t (id, name) VALUES (:id, :name) RETURNING id").customPlan());
+        assertFalse(parse("DELETE FROM t WHERE id = :id").customPlan());
+        assertFalse(parse("WITH x AS (SELECT 1 AS id) SELECT id FROM x").customPlan());
     }
 }

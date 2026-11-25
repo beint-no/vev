@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.2.0"
+    id("no.beint.vev") version "5.3.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -150,10 +150,12 @@ of separate binds.
 
 Optional filters stay one static query: `WHERE (:status::text IS NULL OR status = :status)`, with sorting by
 `CASE` or separate queries. pgJDBC server-prepares a statement after a few executions, and PostgreSQL may then
-reuse a generic plan that keeps every optional filter and cannot pick the index the given filters need. Vev
-automatically enables per-execution planning (`setPrepareThreshold(0)`) whenever a `-- vev.nullable` parameter is
-tested with `IS NULL` or `IS NOT NULL` (including `CAST(:param AS type) IS NULL`). Declare `-- vev.plan: custom`
-explicitly for other parameter-skew patterns that do not test `IS NULL`.
+reuse a generic plan that underestimates multi-tenant/range/array selectivity or keeps disabled optional filters
+alive. Vev automatically enables per-execution planning (`setPrepareThreshold(0)`) for queries with
+`-- vev.nullable` `IS [NOT] NULL` checks, parameterized `WITH` CTEs, `ANY(:array)`, parameterized `BETWEEN`
+ranges, sentinel parameter-to-literal comparisons (`:x = ''`, `:x <> 'all'`), or boolean-flag branches
+(`NOT :flag`, `ON :flag AND`, `WHEN :flag THEN`), while keeping simple single-row lookups and DML on fast
+server-prepared generic plans. Declare `-- vev.plan: custom` explicitly for any other parameter-skew pattern.
 
 Keep one query per file so agents can discover, read and change its complete contract
 without loading neighboring queries. Multiple statements or named queries in a file
