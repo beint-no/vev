@@ -234,10 +234,108 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
         if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- vev.scope: global for global SQL");
         if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
-        boolean effectiveCustomPlan = customPlan || hasNullableNullCheck(tokens, parameters, nullable);
+        boolean effectiveCustomPlan = customPlan || needsCustomPlan(tokens, parameters, nullable);
         return new SqlSource(path, name, cardinality, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
                 Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan, forceWrite);
+    }
+
+    /**
+     * Automatically enables per-execution planning ({@code setPrepareThreshold(0)}) for SQL shapes where
+     * PostgreSQL generic plans are prone to severe selectivity underestimation or cannot fold disabled
+     * branches: nullable {@code IS [NOT] NULL} filters, parameterized {@code WITH} CTEs, {@code ANY(:array)},
+     * parameterized {@code BETWEEN} ranges, sentinel parameter-to-literal checks ({@code :x = ''}), and
+     * boolean-flag branches ({@code NOT :flag}, {@code ON :flag AND}, {@code WHEN :flag THEN}).
+     * Simple single-row lookups and DML stay on fast server-prepared generic plans.
+     */
+    static boolean needsCustomPlan(List<String> tokens, List<String> parameters, Set<String> nullable) {
+        if (parameters.isEmpty()) return false;
+        if (tokens.getFirst().equals("WITH")) return true;
+        if (hasNullableNullCheck(tokens, parameters, nullable)) return true;
+        for (int i = 0; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if (t.equals("ANY") && i + 2 < tokens.size() && tokens.get(i + 1).equals("(")
+                    && (tokens.get(i + 2).equals("<parameter>")
+                    || (i + 4 < tokens.size() && tokens.get(i + 2).equals("CAST") && tokens.get(i + 3).equals("(") && tokens.get(i + 4).equals("<parameter>")))) {
+                return true;
+            }
+            if (t.equals("BETWEEN") && betweenUsesParameter(tokens, i)) {
+                return true;
+            }
+            if (t.equals("<parameter>")) {
+                if (i > 0 && tokens.get(i - 1).equals("NOT")) return true;
+                int after = afterParameterExpression(tokens, i);
+                if (i > 0 && tokens.get(i - 1).equals("ON") && after < tokens.size() && tokens.get(after).equals("AND")) return true;
+                if (i > 0 && tokens.get(i - 1).equals("WHEN") && after < tokens.size() && tokens.get(after).equals("THEN")) return true;
+                if (isSentinelLiteralComparison(tokens, after)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean betweenUsesParameter(List<String> tokens, int betweenIndex) {
+        int depth = 0;
+        boolean seenAnd = false;
+        for (int j = betweenIndex + 1; j < tokens.size(); j++) {
+            String t = tokens.get(j);
+            if (t.equals("(")) { depth++; continue; }
+            if (t.equals(")")) {
+                if (depth == 0) return false;
+                depth--;
+                continue;
+            }
+            if (t.equals("<parameter>")) return true;
+            if (depth == 0) {
+                if (t.equals("AND")) {
+                    if (!seenAnd) { seenAnd = true; continue; }
+                    return false;
+                }
+                if (seenAnd && (t.equals("OR") || t.equals(",") || t.equals("ORDER") || t.equals("GROUP")
+                        || t.equals("HAVING") || t.equals("LIMIT") || t.equals("OFFSET") || t.equals("UNION"))) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isSentinelLiteralComparison(List<String> tokens, int afterParam) {
+        if (afterParam + 1 < tokens.size() && tokens.get(afterParam).equals("=")
+                && tokens.get(afterParam + 1).equals("<literal>")) {
+            return true;
+        }
+        if (afterParam + 2 < tokens.size() && tokens.get(afterParam + 2).equals("<literal>")) {
+            String op1 = tokens.get(afterParam);
+            String op2 = tokens.get(afterParam + 1);
+            return (op1.equals("<") && op2.equals(">")) || (op1.equals("!") && op2.equals("="));
+        }
+        return false;
+    }
+
+    private static int afterParameterExpression(List<String> tokens, int paramTokenIndex) {
+        int next = paramTokenIndex + 1;
+        if (paramTokenIndex >= 2 && tokens.get(paramTokenIndex - 2).equals("CAST") && tokens.get(paramTokenIndex - 1).equals("(")
+                && next < tokens.size() && tokens.get(next).equals("AS")) {
+            int depth = 1;
+            next++;
+            while (next < tokens.size() && depth > 0) {
+                String t = tokens.get(next++);
+                if (t.equals("(")) depth++;
+                else if (t.equals(")")) depth--;
+            }
+        } else {
+            while (next < tokens.size() && tokens.get(next).equals("::")) {
+                next++;
+                next = skipTypeName(tokens, next);
+            }
+        }
+        int open = paramTokenIndex - 1;
+        if (paramTokenIndex >= 2 && tokens.get(paramTokenIndex - 2).equals("CAST") && tokens.get(paramTokenIndex - 1).equals("(")) open = paramTokenIndex - 3;
+        while (open >= 0 && tokens.get(open).equals("(") && next < tokens.size() && tokens.get(next).equals(")")) {
+            open--;
+            next++;
+        }
+        return next;
     }
 
     /**
@@ -252,29 +350,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
             if (!tokens.get(i).equals("<parameter>")) continue;
             String parameter = parameters.get(paramIndex++);
             if (!nullable.contains(parameter)) continue;
-            int next = i + 1;
-            if (i >= 2 && tokens.get(i - 2).equals("CAST") && tokens.get(i - 1).equals("(")
-                    && next < tokens.size() && tokens.get(next).equals("AS")) {
-                int depth = 1;
-                next++;
-                while (next < tokens.size() && depth > 0) {
-                    String t = tokens.get(next++);
-                    if (t.equals("(")) depth++;
-                    else if (t.equals(")")) depth--;
-                }
-            } else {
-                while (next < tokens.size() && tokens.get(next).equals("::")) {
-                    next++;
-                    next = skipTypeName(tokens, next);
-                }
-            }
-            // Skip closing parentheses that wrap only this parameter expression, e.g. (:p::text) IS NULL.
-            int open = i - 1;
-            if (i >= 2 && tokens.get(i - 2).equals("CAST") && tokens.get(i - 1).equals("(")) open = i - 3;
-            while (open >= 0 && tokens.get(open).equals("(") && next < tokens.size() && tokens.get(next).equals(")")) {
-                open--;
-                next++;
-            }
+            int next = afterParameterExpression(tokens, i);
             if (next + 1 < tokens.size() && tokens.get(next).equals("IS")) {
                 if (tokens.get(next + 1).equals("NULL")) return true;
                 if (next + 2 < tokens.size() && tokens.get(next + 1).equals("NOT") && tokens.get(next + 2).equals("NULL")) {

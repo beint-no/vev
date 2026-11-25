@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
-import java.util.regex.Pattern;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.GradleException;
 import org.gradle.api.file.ConfigurableFileCollection;
@@ -44,7 +43,7 @@ import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.api.tasks.TaskAction;
 
 /**
- * Verifies cross-service Vev {@code Db} transaction boundaries across compiled bytecode:
+ * Verifies cross-service Vev {@code Db} transaction boundaries across compiled bytecode with no allowlists:
  * <ol>
  *   <li>{@code READ->WRITE}: No read-only transaction ({@code read*}) transitively invokes a write/locking joiner
  *       ({@code write}, {@code tenantWrite}, {@code writeSerializable}, {@code savepoint}, {@code beforeCommit},
@@ -111,27 +110,6 @@ public abstract class VerifyCallGraph extends DefaultTask {
     /** Entry-point annotations ({@code pkg.Annotation}) that run without ambient tenant context. */
     @Input public abstract SetProperty<String> getEntryPointAnnotations();
 
-    /**
-     * Optional allowlist of verified boolean-guarded helpers ({@code pkg.Class.method}, supporting {@code *}
-     * wildcards) whose write branch only executes when explicitly requested by a write caller.
-     */
-    @Input public abstract SetProperty<String> getGuardedWriteHelpers();
-
-    /** Optional method names inside {@code guardedWriteHelpers} that are known write-only branches. */
-    @Input public abstract SetProperty<String> getGuardedWriteTargets();
-
-    /**
-     * Optional allowlist of methods ({@code pkg.Class.method}, supporting {@code *} wildcards) that always
-     * return early when {@code Db.currentTenantIdOrNull() == null} before calling ambient {@code Db.tenant*}.
-     */
-    @Input public abstract SetProperty<String> getTenantNullGuardedMethods();
-
-    /**
-     * Optional write-only methods ({@code pkg.Class.method}, supporting {@code *} wildcards) treated as direct
-     * write calls even when they delegate to a {@code guardedWriteHelpers} entry.
-     */
-    @Input public abstract SetProperty<String> getWriteOnlyMethods();
-
     /** Fail when any scanned class or method carries Spring or Jakarta {@code @Transactional}. */
     @Input public abstract Property<Boolean> getForbidSpringTransactional();
 
@@ -150,10 +128,6 @@ public abstract class VerifyCallGraph extends DefaultTask {
         for (String ann : getEntryPointAnnotations().get()) {
             entryPointAnnotations.add(normalizeDescriptor(ann));
         }
-        List<Pattern> guardedWriteHelpers = compilePatterns(getGuardedWriteHelpers().get());
-        Set<String> guardedWriteTargets = new HashSet<>(getGuardedWriteTargets().get());
-        List<Pattern> tenantNullGuarded = compilePatterns(getTenantNullGuardedMethods().get());
-        List<Pattern> writeOnlyMethods = compilePatterns(getWriteOnlyMethods().get());
         boolean forbidTransactional = getForbidSpringTransactional().get();
 
         Map<MethodKey, Set<MethodKey>> normalEdges = new HashMap<>();
@@ -221,16 +195,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                         var codeOpt = method.code();
                         if (codeOpt.isEmpty()) continue;
                         List<CodeElement> elements = codeOpt.get().elementList();
-                        String qualified = owner + "." + methodName;
                         boolean earlyReturnIfReadOnly = hasEarlyReturnWhenNotInWriteTransaction(elements);
-                        boolean guardedWriteHelper = matchesAny(qualified, guardedWriteHelpers);
-                        boolean tenantNullGuardedMethod = matchesAny(qualified, tenantNullGuarded);
-                        if (matchesAny(qualified, writeOnlyMethods)) {
-                            directDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add("write");
-                            if (!earlyReturnIfReadOnly) {
-                                directReadTraversalDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add("write");
-                            }
-                        }
 
                         MethodKey pendingLambda = null;
                         String pendingLambdaIndyDesc = null;
@@ -262,7 +227,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                 if (targetOwner.equals(DB)) {
                                     boolean isExplicitTenant = EXPLICIT_TENANT_DB.contains(targetName) && targetDesc.startsWith("(I");
                                     boolean isAmbientTenant = AMBIENT_TENANT_DB.contains(targetName);
-                                    if (isAmbientTenant && !tenantNullGuardedMethod) {
+                                    if (isAmbientTenant) {
                                         directAmbientTenant.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
                                     }
                                     if (isExplicitTenant && !NEW_TX_OPENERS.contains(targetName)) {
@@ -274,11 +239,9 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                         pendingLambda = null;
                                         pendingLambdaIndyDesc = null;
                                     } else {
-                                        if (!(guardedWriteHelper && WRITE_JOINERS.contains(targetName))) {
-                                            directDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
-                                            if (!earlyReturnIfReadOnly) {
-                                                directReadTraversalDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
-                                            }
+                                        directDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
+                                        if (!earlyReturnIfReadOnly) {
+                                            directReadTraversalDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
                                         }
                                         if (pendingLambda != null) {
                                             if (READ_OPENERS.contains(targetName)) {
@@ -289,13 +252,12 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                             if (isExplicitTenant || isAmbientTenant) {
                                                 tenantLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
                                             }
-                                            if (!targetName.equals("afterCommit") && !targetName.equals("afterCompletion")
-                                                    && !(guardedWriteHelper && targetName.equals("beforeCommit"))) {
+                                            if (!targetName.equals("afterCommit") && !targetName.equals("afterCompletion")) {
                                                 normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                                 if (!earlyReturnIfReadOnly) {
                                                     readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                                 }
-                                                if (!isExplicitTenant && !tenantNullGuardedMethod) {
+                                                if (!isExplicitTenant) {
                                                     noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                                 }
                                             }
@@ -304,18 +266,13 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                         }
                                     }
                                 } else if (matchesPrefix(targetOwner, prefixes)) {
-                                    if (guardedWriteHelper && guardedWriteTargets.contains(targetName)) {
-                                        pendingLambda = null;
-                                        pendingLambdaIndyDesc = null;
-                                        continue;
-                                    }
                                     boolean bindsTenant = tenantBinders.contains(targetOwner + "." + targetName);
                                     MethodKey targetMk = new MethodKey(targetOwner, targetName, targetDesc);
                                     normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
                                     if (!earlyReturnIfReadOnly) {
                                         readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
                                     }
-                                    if (!bindsTenant && !tenantNullGuardedMethod) {
+                                    if (!bindsTenant) {
                                         noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
                                     }
                                     if (pendingLambda != null && !targetName.equals("execute") && !targetName.equals("submit")
@@ -324,7 +281,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                         if (!earlyReturnIfReadOnly) {
                                             readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                         }
-                                        if (!bindsTenant && !tenantNullGuardedMethod) {
+                                        if (!bindsTenant) {
                                             noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                         }
                                         pendingLambda = null;
@@ -335,9 +292,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     if (!earlyReturnIfReadOnly) {
                                         readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                     }
-                                    if (!tenantNullGuardedMethod) {
-                                        noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                    }
+                                    noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                     pendingLambda = null;
                                     pendingLambdaIndyDesc = null;
                                 }
@@ -471,33 +426,10 @@ public abstract class VerifyCallGraph extends DefaultTask {
         return "L" + trimmed.replace('.', '/') + ";";
     }
 
-    private static List<Pattern> compilePatterns(Set<String> rawPatterns) {
-        List<Pattern> compiled = new ArrayList<>(rawPatterns.size());
-        for (String raw : rawPatterns) {
-            String normalized = normalizeMember(raw);
-            StringBuilder regex = new StringBuilder("^");
-            for (int i = 0; i < normalized.length(); i++) {
-                char c = normalized.charAt(i);
-                if (c == '*') regex.append(".*");
-                else regex.append(Pattern.quote(String.valueOf(c)));
-            }
-            regex.append("$");
-            compiled.add(Pattern.compile(regex.toString()));
-        }
-        return compiled;
-    }
-
     private static boolean matchesPrefix(String internalName, List<String> prefixes) {
         if (prefixes.isEmpty()) return true;
         for (String prefix : prefixes) {
             if (internalName.startsWith(prefix)) return true;
-        }
-        return false;
-    }
-
-    private static boolean matchesAny(String value, List<Pattern> patterns) {
-        for (Pattern pattern : patterns) {
-            if (pattern.matcher(value).matches()) return true;
         }
         return false;
     }

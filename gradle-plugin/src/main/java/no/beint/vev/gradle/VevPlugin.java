@@ -50,10 +50,6 @@ public final class VevPlugin implements Plugin<Project> {
                 check.getPackagePrefixes().convention(java.util.Set.of());
                 check.getTenantBinders().convention(java.util.Set.of());
                 check.getEntryPointAnnotations().convention(java.util.Set.of("org.springframework.scheduling.annotation.Scheduled"));
-                check.getGuardedWriteHelpers().convention(java.util.Set.of());
-                check.getGuardedWriteTargets().convention(java.util.Set.of());
-                check.getTenantNullGuardedMethods().convention(java.util.Set.of());
-                check.getWriteOnlyMethods().convention(java.util.Set.of());
                 check.getForbidSpringTransactional().convention(true);
                 check.getReport().set(project.getLayout().getBuildDirectory().file("reports/vev/call-graph.txt"));
             });
