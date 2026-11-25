@@ -51,6 +51,8 @@ public final class VevPlugin implements Plugin<Project> {
                 check.getTenantBinders().convention(java.util.Set.of());
                 check.getEntryPointAnnotations().convention(java.util.Set.of("org.springframework.scheduling.annotation.Scheduled"));
                 check.getForbidSpringTransactional().convention(true);
+                check.getForbidExternalIoInTransaction().convention(true);
+                check.getForbiddenInTransaction().convention(java.util.Set.of());
                 check.getReport().set(project.getLayout().getBuildDirectory().file("reports/vev/call-graph.txt"));
             });
             project.getTasks().named(LifecycleBasePlugin.CHECK_TASK_NAME).configure(check -> {

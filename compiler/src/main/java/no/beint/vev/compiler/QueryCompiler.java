@@ -35,6 +35,7 @@ public final class QueryCompiler {
         SqlSource.typeName(queries, className);
         List<Query> compiled = new ArrayList<>();
         HashSet<String> names = new HashSet<>();
+        Map<String, String> seenSql = new LinkedHashMap<>();
         Map<String, PgType> domains = new java.util.TreeMap<>();
         List<Exception> failures = new ArrayList<>();
         try (var files = Files.walk(queries)) {
@@ -44,6 +45,11 @@ public final class QueryCompiler {
                 try {
                     SqlSource source = SqlSource.parse(path, Files.readString(path));
                     if (!names.add(source.name())) throw SqlSource.error(path, "Duplicate query name: " + source.name());
+                    String signature = source.cardinality() + "\n" + source.canonicalSql();
+                    String existing = seenSql.putIfAbsent(signature, source.name());
+                    if (existing != null) {
+                        throw SqlSource.error(path, "Duplicate SQL query: matches " + existing + "; reuse the existing query instead");
+                    }
                     Query query = describe(connection, source);
                     Map<String, PgType> queryDomains = new java.util.TreeMap<>();
                     for (Value value : java.util.stream.Stream.concat(query.parameters.stream(), query.columns.stream()).toList()) {
@@ -178,6 +184,10 @@ public final class QueryCompiler {
                 int copySlots = valueSlots + (columns.size() + 31) / 32 + 2;
                 if (copySlots > 255) throw SqlSource.error(source.path(), "Result has " + columns.size()
                         + " columns requiring " + copySlots + " JVM parameter slots; Kotlin data-class copy methods allow at most 255. Select a narrower projection");
+                if (!source.allowBlob() && result != null
+                        && (source.cardinality().equals("many") || columns.size() > MAX_BLOB_QUERY_COLUMNS)) {
+                    checkUnboundedByteaColumns(connection, source, result, columns);
+                }
             }
             boolean writes = TenantScans.analyze(connection, source);
             return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns), writes);
@@ -210,6 +220,85 @@ public final class QueryCompiler {
             throw SqlSource.error(source.path(), "enum " + name + " requires a textual PostgreSQL type, not " + type.postgres());
         }
         return declared;
+    }
+
+    private static final int MAX_BLOB_QUERY_COLUMNS = 8;
+    private static final int MAX_BOUNDED_BYTEA_BYTES = 1024;
+    private static final java.util.regex.Pattern OCTET_LENGTH_BOUND = java.util.regex.Pattern.compile(
+            "octet_length\\s*\\(\\s*\"?([A-Za-z_][A-Za-z0-9_]*)\"?\\s*\\)\\s*(=|<=|<)\\s*(\\d+)",
+            java.util.regex.Pattern.CASE_INSENSITIVE);
+    private static final String BYTEA_COLUMN_CONSTRAINTS = """
+            SELECT pg_get_constraintdef(c.oid)
+            FROM pg_constraint c
+            JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+            WHERE c.conrelid = to_regclass(quote_ident(?) || '.' || quote_ident(?))
+              AND c.contype = 'c'
+              AND array_length(c.conkey, 1) = 1
+              AND a.attname = ?
+              AND NOT a.attisdropped
+            """;
+
+    /**
+     * Rejects unbounded {@code bytea} columns in {@code :many} or wide ({@code > 8} columns) results unless
+     * the query opts in with {@code -- vev.allow: blob}. Small fixed-size binary values (hashes, keys) with a
+     * PostgreSQL {@code CHECK (octet_length(col) <= 1024)} constraint are always allowed.
+     */
+    private static void checkUnboundedByteaColumns(
+            Connection connection, SqlSource source, ResultSetMetaData result, List<Value> columns) throws SQLException {
+        org.postgresql.PGResultSetMetaData pgMeta = result.isWrapperFor(org.postgresql.PGResultSetMetaData.class)
+                ? result.unwrap(org.postgresql.PGResultSetMetaData.class) : null;
+        for (int i = 0; i < columns.size(); i++) {
+            Value column = columns.get(i);
+            if (!column.type.postgres().equals("bytea")) continue;
+            if (pgMeta != null) {
+                String schema = pgMeta.getBaseSchemaName(i + 1);
+                String table = pgMeta.getBaseTableName(i + 1);
+                String baseColumn = pgMeta.getBaseColumnName(i + 1);
+                if (schema != null && !schema.isEmpty() && table != null && !table.isEmpty()
+                        && baseColumn != null && !baseColumn.isEmpty()
+                        && isBoundedByteaColumn(connection, schema, table, baseColumn)) {
+                    continue;
+                }
+            }
+            throw SqlSource.error(source.path(), "Query selects unbounded bytea column '" + column.name + "' in a "
+                    + (source.cardinality().equals("many") ? ":many" : "wide (" + columns.size() + " columns)")
+                    + " result; load blobs in a dedicated query, bound small binary values with CHECK (octet_length("
+                    + column.name + ") <= " + MAX_BOUNDED_BYTEA_BYTES + "), or opt in with -- vev.allow: blob");
+        }
+    }
+
+    private static boolean isBoundedByteaColumn(Connection connection, String schema, String table, String column)
+            throws SQLException {
+        try (var statement = connection.prepareStatement(BYTEA_COLUMN_CONSTRAINTS)) {
+            statement.setString(1, schema);
+            statement.setString(2, table);
+            statement.setString(3, column);
+            try (var rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    if (constraintBoundsOctetLength(rows.getString(1), column)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean constraintBoundsOctetLength(String definition, String column) {
+        if (definition == null) return false;
+        String lower = definition.toLowerCase(java.util.Locale.ROOT);
+        // An OR branch is only safe when the other branch merely allows NULL for the same column.
+        if (lower.contains(" or ") && !lower.contains(column.toLowerCase(java.util.Locale.ROOT) + " is null")
+                && !lower.contains("\"" + column.toLowerCase(java.util.Locale.ROOT) + "\" is null")) {
+            return false;
+        }
+        var matcher = OCTET_LENGTH_BOUND.matcher(definition);
+        while (matcher.find()) {
+            if (!matcher.group(1).equalsIgnoreCase(column)) continue;
+            String op = matcher.group(2);
+            long limit = Long.parseLong(matcher.group(3));
+            long maxBytes = op.equals("<") ? limit - 1 : limit;
+            if (maxBytes > 0 && maxBytes <= MAX_BOUNDED_BYTEA_BYTES) return true;
+        }
+        return false;
     }
 
     private static String digest(String value) {

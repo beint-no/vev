@@ -20,6 +20,11 @@ class CompilerTest {
             statement.execute("CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL, note text)");
             statement.execute("CREATE TABLE record(id integer PRIMARY KEY, status varchar(16) NOT NULL,"
                     + " email citext NOT NULL, document xml, address inet, kind text)");
+            statement.execute("CREATE TABLE document_blob(id integer PRIMARY KEY, name text NOT NULL,"
+                    + " c1 text, c2 text, c3 text, c4 text, c5 text, c6 text, c7 text,"
+                    + " file_data bytea NOT NULL,"
+                    + " token_hash bytea NOT NULL CHECK (octet_length(token_hash) = 32),"
+                    + " opt_digest bytea CHECK (opt_digest IS NULL OR octet_length(opt_digest) <= 64))");
         }
     }
     @AfterAll void stop() throws Exception { if (postgres != null) postgres.close(); }
@@ -325,5 +330,63 @@ class CompilerTest {
             var error=assertThrows(IllegalArgumentException.class,()->QueryCompiler.describe(connection,source));
             assertTrue(error.getMessage().contains("Tenant parameter must be PostgreSQL integer"));
         }
+    }
+
+    @Test void duplicateSqlQueriesWithinAModuleFailCompilation() throws Exception {
+        Path queries = Files.createTempDirectory(directory, "dup-queries");
+        Path output = Files.createTempDirectory(directory, "dup-output");
+        Files.writeString(queries.resolve("first.sql"),
+                "-- vev.name: first :optional\n-- vev.scope: global\nSELECT id, name FROM item WHERE id = :id;");
+        Files.writeString(queries.resolve("second.sql"),
+                "-- vev.name: second :optional\n-- vev.scope: global\nselect  id,  name\nfrom item\nwhere id = :otherId;");
+        try (var connection = postgres.connect()) {
+            var error = assertThrows(IllegalArgumentException.class,
+                    () -> QueryCompiler.compile(connection, queries, output, "example", "Queries"));
+            assertTrue(error.getMessage().contains("Duplicate SQL query"), error.getMessage());
+            assertTrue(error.getMessage().contains("first"), error.getMessage());
+        }
+        // Distinct string literals or distinct cardinalities are not duplicates.
+        Files.writeString(queries.resolve("second.sql"),
+                "-- vev.name: second :optional\n-- vev.scope: global\nSELECT id, name FROM item WHERE name = 'Open';");
+        Files.writeString(queries.resolve("third.sql"),
+                "-- vev.name: third :optional\n-- vev.scope: global\nSELECT id, name FROM item WHERE name = 'open';");
+        Files.writeString(queries.resolve("fourth.sql"),
+                "-- vev.name: fourth :many\n-- vev.scope: global\nSELECT id, name FROM item WHERE id = :id;");
+        try (var connection = postgres.connect()) {
+            QueryCompiler.compile(connection, queries, output, "example", "Queries");
+        }
+    }
+
+    @Test void unboundedByteaGuardAllowsDedicatedDownloadsBoundedHashesAndExplicitOptIn() throws Exception {
+        // Dedicated single-file download (<= 8 columns, :optional) is allowed without opt-in.
+        assertTrue(compile("-- vev.name: download :optional\n-- vev.scope: global\n"
+                + "SELECT id, name, file_data FROM document_blob WHERE id = :id").contains("`fileData`: ByteArray"));
+
+        // Small CHECK-bounded bytea columns (hashes/digests) are allowed even in :many and wide (>8 cols) queries.
+        assertTrue(compile("-- vev.name: hashes :many\n-- vev.scope: global\n"
+                + "SELECT id, name, c1, c2, c3, c4, c5, c6, c7, token_hash, opt_digest FROM document_blob")
+                .contains("`tokenHash`: ByteArray"));
+
+        // Unbounded bytea in :many fails unless opted in.
+        var manyErr = assertThrows(IllegalArgumentException.class, () -> compile(
+                "-- vev.name: allBlobs :many\n-- vev.scope: global\nSELECT id, file_data FROM document_blob"));
+        assertTrue(manyErr.getMessage().contains("unbounded bytea column 'file_data'"), manyErr.getMessage());
+        assertTrue(manyErr.getMessage().contains("-- vev.allow: blob"), manyErr.getMessage());
+
+        // Unbounded bytea in wide (>8 cols) :optional fails unless opted in.
+        var wideErr = assertThrows(IllegalArgumentException.class, () -> compile(
+                "-- vev.name: wideBlob :optional\n-- vev.scope: global\n"
+                + "SELECT id, name, c1, c2, c3, c4, c5, c6, c7, file_data FROM document_blob WHERE id = :id"));
+        assertTrue(wideErr.getMessage().contains("unbounded bytea column 'file_data'"), wideErr.getMessage());
+        assertTrue(wideErr.getMessage().contains("wide (10 columns)"), wideErr.getMessage());
+
+        // Explicit opt-in allows intentional batch/wide blob queries.
+        assertTrue(compile("-- vev.name: exportBlobs :many\n-- vev.scope: global\n-- vev.allow: blob\n"
+                + "SELECT id, file_data FROM document_blob").contains("`fileData`: ByteArray"));
+
+        // Derived scalar like octet_length(file_data) is not bytea and passes.
+        assertTrue(compile("-- vev.name: metaList :many\n-- vev.scope: global\n"
+                + "SELECT id, name, octet_length(file_data)::bigint AS size FROM document_blob")
+                .contains("`size`: Long?"));
     }
 }

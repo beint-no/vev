@@ -51,7 +51,7 @@ class ReaiSchemaTest {
                 assertTrue(error.getMessage().contains("Unsupported"), error.getMessage());
                 return;
             }
-            var actual = describe(sql, "many").columns().getFirst();
+            var actual = describe(sql, "optional").columns().getFirst();
             assertEquals(expected, actual.type());
             assertEquals(column.nullable, actual.nullable(), "Origin-column nullability must match the real catalog");
         }));

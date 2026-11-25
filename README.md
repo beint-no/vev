@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.3.0"
+    id("no.beint.vev") version "5.4.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -137,6 +137,7 @@ fail the build, and so does a directive without the `vev.` prefix.
 | `-- vev.type: id CustomerId` | Generate a scalar Kotlin value class |
 | `-- vev.enum: status example.Status` | Map a textual column/input to an existing Kotlin enum |
 | `-- vev.plan: custom` | Plan every execution with its parameter values (see optional filters) |
+| `-- vev.allow: blob` | Opt in to selecting an unbounded `bytea` column in a `:many` or wide (`> 8` columns) query |
 
 Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`; a parameter after
 `->` or `->>` must be cast (`:index::int` or `:key::text`) because PostgreSQL otherwise picks the text-key operator,
@@ -212,7 +213,7 @@ stable when signatures do.
 when a generated query is never called, and `verifyVevCallGraph`, which checks cross-service `Db` call graphs
 for read-to-write escalation, isolation elevation, nested `writeIsolated`, escaped scopes in deferred/async
 lambdas, `@Scheduled` entry points calling ambient `Db.tenant*` without binding a tenant, nested explicit-tenant
-switches, and `@Transactional` annotations. In multi-module applications, configure `verifyVevCallGraph` on the
+switches, `@Transactional` annotations, and outbound HTTP/mail I/O inside transactions. In multi-module applications, configure `verifyVevCallGraph` on the
 top-level application module with all subprojects' `classesDirs` to verify boundaries across module seams.
 Generation and compilation accept unused queries, so SQL can be written and generated before the code that
 calls it. Delete the SQL file of a query that is no longer called.

@@ -198,6 +198,7 @@ class PluginTest {
             String body = switch (name) {
                 case "rename" -> "-- vev.name: rename :exec\n-- vev.scope: global\nUPDATE item SET name=:name WHERE id=:id;";
                 case "export" -> "-- vev.name: export :stream\n-- vev.scope: global\nSELECT id FROM item;";
+                case "unused" -> "-- vev.name: unused :optional\n-- vev.scope: global\nSELECT id FROM item WHERE id=:id;";
                 default -> "-- vev.name: " + name + " :optional\n-- vev.scope: global\nSELECT name FROM item WHERE id=:id;";
             };
             Files.writeString(sql.resolve(name + ".sql"), body);
@@ -259,6 +260,17 @@ class PluginTest {
                     fun badIsolated() { db.write { db.writeIsolated { } } }
                     fun badEscaped() { db.write { tx -> db.afterCommit { Queries.find(tx, 1) } } }
                     fun badTenantSwitch() { db.write(1) { db.read(2) { } } }
+                    fun badExternalIo() {
+                        db.write { callExternalHttp() }
+                    }
+                    fun badExternalIoInWriteNew() {
+                        db.writeNew { callExternalHttp() }
+                    }
+                    private fun callExternalHttp() {
+                        val client = java.net.http.HttpClient.newHttpClient()
+                        val req = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://example.invalid")).build()
+                        client.send(req, java.net.http.HttpResponse.BodyHandlers.discarding())
+                    }
                     fun safeGuard() {
                         db.read { guardedTrack() }
                     }
@@ -276,6 +288,9 @@ class PluginTest {
         assertTrue(output.contains("NESTED-ISOLATED"), output);
         assertTrue(output.contains("ESCAPED-SCOPE"), output);
         assertTrue(output.contains("NESTED-EXPLICIT-TENANT"), output);
+        assertTrue(output.contains("EXTERNAL-IO-IN-TX"), output);
+        assertTrue(output.contains("badExternalIo"), output);
+        assertTrue(output.contains("badExternalIoInWriteNew"), output);
         assertFalse(output.contains("guardedTrack"), "Sound inWriteTransaction early return must not trigger READ->WRITE: " + output);
 
         Files.writeString(svc, """
@@ -288,6 +303,16 @@ class PluginTest {
                         Queries.find(tx, id)?.name
                     }
                     fun goodIndependent() { db.read { db.writeNew { } } }
+                    fun goodAfterCommitHttp() {
+                        db.write {
+                            db.afterCommit { callExternalHttp() }
+                        }
+                    }
+                    private fun callExternalHttp() {
+                        val client = java.net.http.HttpClient.newHttpClient()
+                        val req = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://example.invalid")).build()
+                        client.send(req, java.net.http.HttpResponse.BodyHandlers.discarding())
+                    }
                     private fun guardedTrack() {
                         if (!db.inWriteTransaction()) return
                         db.beforeCommit { db.write { } }
