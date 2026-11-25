@@ -509,4 +509,24 @@ class TransactionTest {
         assertTrue(deadlock.isTransient());
         assertTrue(VevSqlException.isTransient(deadlock));
     }
+
+    @Test void withLockTimeoutComposesWithWithTimeoutAndRestoresPreviousSetting() {
+        Fixture f = new Fixture();
+        Db db = Db.builder(f.source)
+                .queryTimeout(Duration.ofSeconds(30))
+                .lockTimeout(Duration.ofSeconds(2))
+                .build();
+        assertThrows(IllegalArgumentException.class, () -> db.withLockTimeout(Duration.ZERO));
+        assertThrows(IllegalArgumentException.class, () -> db.withLockTimeout(Duration.ofMillis(-1)));
+        db.withTimeout(Duration.ofSeconds(10)).withLockTimeout(Duration.ofMillis(500)).write(outer -> {
+            assertTrue(f.statements.stream().anyMatch(s -> s.contains("SET LOCAL statement_timeout = 10000")
+                    && s.contains("SET LOCAL lock_timeout = 500")), f.statements::toString);
+            db.withLockTimeout(null).write(inner -> {
+                assertTrue(f.statements.stream().anyMatch(s -> s.equals("SET LOCAL lock_timeout = 0")), f.statements::toString);
+                return null;
+            });
+            assertTrue(f.statements.stream().anyMatch(s -> s.equals("SET LOCAL lock_timeout = 500")), f.statements::toString);
+            return null;
+        });
+    }
 }

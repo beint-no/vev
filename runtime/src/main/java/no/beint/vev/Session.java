@@ -28,6 +28,7 @@ public final class Session {
         final int isolation;
         int queryTimeoutSeconds;
         long queryTimeoutMillis;
+        long lockTimeoutMillis;
         final Thread owner = Thread.currentThread();
         final Db.TransactionBackend backend;
         final UnaryOperator<Runnable> callbackDecorator;
@@ -37,13 +38,14 @@ public final class Session {
         List<Runnable> afterCommit;
         List<Runnable> afterCompletion;
 
-        ActiveTx(Connection connection, boolean readOnly, int isolation, long queryTimeoutMillis,
+        ActiveTx(Connection connection, boolean readOnly, int isolation, long queryTimeoutMillis, long lockTimeoutMillis,
                  Db.TransactionBackend backend, UnaryOperator<Runnable> callbackDecorator) {
             this.connection = connection;
             this.readOnly = readOnly;
             this.isolation = isolation;
             this.queryTimeoutMillis = queryTimeoutMillis;
             this.queryTimeoutSeconds = millisToSeconds(queryTimeoutMillis);
+            this.lockTimeoutMillis = lockTimeoutMillis;
             this.backend = backend;
             this.callbackDecorator = callbackDecorator;
         }
@@ -293,7 +295,7 @@ public final class Session {
     private static ActiveTx borrowedTx(Connection connection, boolean readOnly, Duration queryTimeout) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         if (connection.getAutoCommit()) throw new VevSessionException("Vev requires an explicit transaction");
-        return new ActiveTx(connection, readOnly, Db.DEFAULT_ISOLATION, timeoutMillis(queryTimeout), null, null);
+        return new ActiveTx(connection, readOnly, Db.DEFAULT_ISOLATION, timeoutMillis(queryTimeout), 0L, null, null);
     }
 
     static int requireTenant(int tenantId) {
@@ -302,8 +304,12 @@ public final class Session {
     }
 
     static long timeoutMillis(Duration timeout) {
+        return timeoutMillis(timeout, "Query timeout");
+    }
+
+    static long timeoutMillis(Duration timeout, String name) {
         if (timeout == null) return 0;
-        if (timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException("Query timeout must be positive");
+        if (timeout.isNegative() || timeout.isZero()) throw new IllegalArgumentException(name + " must be positive");
         long millis = timeout.toMillis();
         return millis == 0 ? 1 : millis;
     }

@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.1.0"
+    id("no.beint.vev") version "5.2.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -174,6 +174,7 @@ Use `readNew` / `writeNew` for an independent transaction on a separate connecti
 to assert that a write is not nested inside an enclosing transaction, `readRepeatable` /
 `writeSerializable` for elevated isolation levels, `withTimeout(Duration)` for per-transaction
 statement timeouts (applied to both PostgreSQL `SET LOCAL statement_timeout` and JDBC statements),
+`withLockTimeout(Duration)` for per-transaction PostgreSQL `SET LOCAL lock_timeout` overrides,
 `requireWriteTransaction()` for write-only helpers, and `savepoint` / `tenantSavepoint` for
 recoverable sub-operations inside a write transaction (rolling back SQL/runtime errors and nested
 callbacks without poisoning the enclosing transaction). Register hooks via `beforeCommit` (write
@@ -183,7 +184,7 @@ connection close, outside any transaction), and `afterCompletion`.
 Transactions stay on their owning thread and within the callback. Virtual threads
 work. Suspending a coroutine or sharing the connection with child threads is unsupported.
 Default isolation comes from the connection pool; `Db.builder(dataSource)` accepts explicit
-JDBC isolation, a query timeout (`Duration`), a `tenantSupplier`, a
+JDBC isolation, a query timeout (`Duration`), a lock timeout (`Duration`), a `tenantSupplier`, a
 `transactionListener`, a `callbackDecorator`, and an `exceptionTranslator`. Both auto-commit-enabled
 and auto-commit-disabled pools (such as HikariCP with `auto-commit: false`) are supported.
 Read-only scopes, isolation overrides, and timeouts use transaction-scoped `SET TRANSACTION` /
@@ -206,8 +207,13 @@ revalidate queries. Identical generated files retain their timestamps. The Kotli
 stable when signatures do.
 
 `check` (and so `build`) runs `verifyVevUsage`, which reads the module's compiled main classes and fails
-when a generated query is never called. Generation and compilation accept unused queries, so SQL can be written
-and generated before the code that calls it. Delete the SQL file of a query that is no longer called.
+when a generated query is never called, and `verifyVevCallGraph`, which checks cross-service `Db` call graphs
+for read-to-write escalation, isolation elevation, nested `writeIsolated`, escaped scopes in deferred/async
+lambdas, `@Scheduled` entry points calling ambient `Db.tenant*` without binding a tenant, nested explicit-tenant
+switches, and `@Transactional` annotations. In multi-module applications, configure `verifyVevCallGraph` on the
+top-level application module with all subprojects' `classesDirs` to verify boundaries across module seams.
+Generation and compilation accept unused queries, so SQL can be written and generated before the code that
+calls it. Delete the SQL file of a query that is no longer called.
 
 A failing build reports every rejected query file at once and writes no generated code.
 Application statements are described, not executed. Runtime constraints, permissions,

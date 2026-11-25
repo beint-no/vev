@@ -295,4 +295,52 @@ class WriteTest {
             assertEquals("30s", timeout(outer))
         }
     }
+
+    @Test fun `withLockTimeout enforces PostgreSQL lock_timeout, composes with withTimeout, and restores across nesting and savepoints`() {
+        fun lockTimeout(tx: ReadScope) = tx.prepare("SHOW lock_timeout").use { s -> s.executeQuery().use { it.next(); it.getString(1) } }
+        fun stmtTimeout(tx: ReadScope) = tx.prepare("SHOW statement_timeout").use { s -> s.executeQuery().use { it.next(); it.getString(1) } }
+
+        val id = db.write(7) { Queries.createCustomer(it, "original").id!!.value }
+        db.write(7) { tx ->
+            Queries.renameCustomers(tx, "owner", listOf(id))
+            Executors.newVirtualThreadPerTaskExecutor().use { executor ->
+                val failure = executor.submit<VevSqlException> {
+                    assertThrows(VevSqlException::class.java) {
+                        db.withLockTimeout(java.time.Duration.ofMillis(50)).write(7) { s ->
+                            Queries.renameCustomers(s, "waiter", listOf(id))
+                        }
+                    }
+                }.get(10, TimeUnit.SECONDS)
+                assertTrue(failure.isLockNotAvailable())
+            }
+        }
+
+        val timedDb = Db.builder(source)
+            .queryTimeout(java.time.Duration.ofSeconds(30))
+            .lockTimeout(java.time.Duration.ofSeconds(2))
+            .build()
+        timedDb.write(7) { outer ->
+            assertEquals("30s", stmtTimeout(outer))
+            assertEquals("2s", lockTimeout(outer))
+            timedDb.withTimeout(java.time.Duration.ofSeconds(5)).withLockTimeout(java.time.Duration.ofMillis(500)).write(7) { inner ->
+                assertEquals("5s", stmtTimeout(inner))
+                assertEquals("500ms", lockTimeout(inner))
+            }
+            assertEquals("30s", stmtTimeout(outer))
+            assertEquals("2s", lockTimeout(outer))
+
+            // Savepoint rollback automatically reverts SET LOCAL, and normal savepoint release restores outer lock_timeout.
+            assertThrows(IllegalStateException::class.java) {
+                timedDb.withLockTimeout(java.time.Duration.ofMillis(250)).tenantSavepoint { sp ->
+                    assertEquals("250ms", lockTimeout(sp))
+                    throw IllegalStateException("rollback sp")
+                }
+            }
+            assertEquals("2s", lockTimeout(outer))
+            timedDb.withLockTimeout(null).tenantSavepoint { sp ->
+                assertEquals("0", lockTimeout(sp))
+            }
+            assertEquals("2s", lockTimeout(outer))
+        }
+    }
 }

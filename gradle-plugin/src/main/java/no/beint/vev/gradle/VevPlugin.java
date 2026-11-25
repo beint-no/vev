@@ -43,7 +43,24 @@ public final class VevPlugin implements Plugin<Project> {
                 check.getProjectDirectory().set(project.getLayout().getProjectDirectory());
                 check.getReport().set(project.getLayout().getBuildDirectory().file("reports/vev/query-usage.txt"));
             });
-            project.getTasks().named(LifecycleBasePlugin.CHECK_TASK_NAME).configure(check -> check.dependsOn(verify));
+            var verifyCallGraph = project.getTasks().register("verifyVevCallGraph", VerifyCallGraph.class, check -> {
+                check.setGroup("verification");
+                check.setDescription("Verify cross-service Vev Db transaction boundaries across compiled main classes");
+                check.getClasses().from(main.getOutput().getClassesDirs());
+                check.getPackagePrefixes().convention(java.util.Set.of());
+                check.getTenantBinders().convention(java.util.Set.of());
+                check.getEntryPointAnnotations().convention(java.util.Set.of("org.springframework.scheduling.annotation.Scheduled"));
+                check.getGuardedWriteHelpers().convention(java.util.Set.of());
+                check.getGuardedWriteTargets().convention(java.util.Set.of());
+                check.getTenantNullGuardedMethods().convention(java.util.Set.of());
+                check.getWriteOnlyMethods().convention(java.util.Set.of());
+                check.getForbidSpringTransactional().convention(true);
+                check.getReport().set(project.getLayout().getBuildDirectory().file("reports/vev/call-graph.txt"));
+            });
+            project.getTasks().named(LifecycleBasePlugin.CHECK_TASK_NAME).configure(check -> {
+                check.dependsOn(verify);
+                check.dependsOn(verifyCallGraph);
+            });
         });
         project.getPluginManager().withPlugin("org.jetbrains.kotlin.jvm", ignored -> {
             var kotlin = project.getExtensions().getByType(KotlinJvmProjectExtension.class);

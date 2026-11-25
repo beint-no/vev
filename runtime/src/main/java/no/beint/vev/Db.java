@@ -58,6 +58,8 @@ public final class Db {
     private final long queryTimeoutMillis;
     private final int queryTimeoutSeconds;
     private final boolean hasTimeoutOverride;
+    private final long lockTimeoutMillis;
+    private final boolean hasLockTimeoutOverride;
     private final Supplier<Integer> tenantSupplier;
     private final TransactionListener listener;
     private final UnaryOperator<Runnable> callbackDecorator;
@@ -84,6 +86,8 @@ public final class Db {
         this.queryTimeoutMillis = Session.timeoutMillis(builder.queryTimeout);
         this.queryTimeoutSeconds = Session.millisToSeconds(this.queryTimeoutMillis);
         this.hasTimeoutOverride = false;
+        this.lockTimeoutMillis = Session.timeoutMillis(builder.lockTimeout, "Lock timeout");
+        this.hasLockTimeoutOverride = false;
         this.tenantSupplier = builder.tenantSupplier;
         this.listener = builder.listener;
         this.callbackDecorator = builder.callbackDecorator;
@@ -91,13 +95,16 @@ public final class Db {
         this.verified = new AtomicBoolean();
     }
 
-    private Db(Db parent, Duration queryTimeout) {
+    private Db(Db parent, long queryTimeoutMillis, boolean hasTimeoutOverride,
+               long lockTimeoutMillis, boolean hasLockTimeoutOverride) {
         this.source = parent.source;
         this.backend = parent.backend;
         this.isolation = parent.isolation;
-        this.queryTimeoutMillis = Session.timeoutMillis(queryTimeout);
-        this.queryTimeoutSeconds = Session.millisToSeconds(this.queryTimeoutMillis);
-        this.hasTimeoutOverride = true;
+        this.queryTimeoutMillis = queryTimeoutMillis;
+        this.queryTimeoutSeconds = Session.millisToSeconds(queryTimeoutMillis);
+        this.hasTimeoutOverride = hasTimeoutOverride;
+        this.lockTimeoutMillis = lockTimeoutMillis;
+        this.hasLockTimeoutOverride = hasLockTimeoutOverride;
         this.tenantSupplier = parent.tenantSupplier;
         this.listener = parent.listener;
         this.callbackDecorator = parent.callbackDecorator;
@@ -118,6 +125,7 @@ public final class Db {
         private final TransactionBackend backend;
         private int isolation = DEFAULT_ISOLATION;
         private Duration queryTimeout;
+        private Duration lockTimeout;
         private Supplier<Integer> tenantSupplier;
         private TransactionListener listener;
         private UnaryOperator<Runnable> callbackDecorator;
@@ -141,6 +149,11 @@ public final class Db {
 
         public Builder queryTimeout(Duration queryTimeout) {
             this.queryTimeout = queryTimeout;
+            return this;
+        }
+
+        public Builder lockTimeout(Duration lockTimeout) {
+            this.lockTimeout = lockTimeout;
             return this;
         }
 
@@ -174,7 +187,18 @@ public final class Db {
      * enclosing transaction, the previous timeout is restored when the nested call completes.
      */
     public Db withTimeout(Duration queryTimeout) {
-        return new Db(this, queryTimeout);
+        return new Db(this, Session.timeoutMillis(queryTimeout), true, this.lockTimeoutMillis, this.hasLockTimeoutOverride);
+    }
+
+    /**
+     * Returns a lightweight view of this {@code Db} that applies {@code lockTimeout} via
+     * PostgreSQL {@code SET LOCAL lock_timeout}. Passing {@code null} disables the lock timeout
+     * ({@code 0}) for operations executed through the returned view. When joining an enclosing
+     * transaction, the previous lock timeout is restored when the nested call completes.
+     */
+    public Db withLockTimeout(Duration lockTimeout) {
+        return new Db(this, this.queryTimeoutMillis, this.hasTimeoutOverride,
+                Session.timeoutMillis(lockTimeout, "Lock timeout"), true);
     }
 
     // ---- Global transactions ----
@@ -503,13 +527,20 @@ public final class Db {
         }
         long previousMillis = enclosing.queryTimeoutMillis;
         int previousSeconds = enclosing.queryTimeoutSeconds;
+        long previousLockMillis = enclosing.lockTimeoutMillis;
         boolean timeoutChanged = hasTimeoutOverride && queryTimeoutMillis != previousMillis;
+        boolean lockTimeoutChanged = hasLockTimeoutOverride && lockTimeoutMillis != previousLockMillis;
         Throwable failure = null;
         try {
-            if (timeoutChanged) {
-                setLocalStatementTimeout(enclosing.connection, queryTimeoutMillis);
-                enclosing.queryTimeoutMillis = queryTimeoutMillis;
-                enclosing.queryTimeoutSeconds = queryTimeoutSeconds;
+            if (timeoutChanged || lockTimeoutChanged) {
+                setLocalTimeouts(enclosing.connection, timeoutChanged, queryTimeoutMillis, lockTimeoutChanged, lockTimeoutMillis);
+                if (timeoutChanged) {
+                    enclosing.queryTimeoutMillis = queryTimeoutMillis;
+                    enclosing.queryTimeoutSeconds = queryTimeoutSeconds;
+                }
+                if (lockTimeoutChanged) {
+                    enclosing.lockTimeoutMillis = lockTimeoutMillis;
+                }
             }
             if (tenantId > 0 && enclosingTenant == 0) {
                 return ScopedValue.where(CURRENT_TENANT, tenantId).call(() -> work.run(enclosing));
@@ -523,12 +554,13 @@ public final class Db {
             failure = error;
             throw error;
         } finally {
-            if (timeoutChanged) {
+            if (timeoutChanged || lockTimeoutChanged) {
                 enclosing.queryTimeoutMillis = previousMillis;
                 enclosing.queryTimeoutSeconds = previousSeconds;
+                enclosing.lockTimeoutMillis = previousLockMillis;
                 if (enclosing.active && !enclosing.failed) {
                     try {
-                        setLocalStatementTimeout(enclosing.connection, previousMillis);
+                        setLocalTimeouts(enclosing.connection, timeoutChanged, previousMillis, lockTimeoutChanged, previousLockMillis);
                     } catch (SQLException restoreError) {
                         enclosing.markFailed();
                         if (failure != null) failure.addSuppressed(restoreError);
@@ -563,7 +595,24 @@ public final class Db {
             enclosing.markFailed();
             throw translate(failure);
         }
+        long previousMillis = enclosing.queryTimeoutMillis;
+        int previousSeconds = enclosing.queryTimeoutSeconds;
+        long previousLockMillis = enclosing.lockTimeoutMillis;
+        boolean timeoutChanged = hasTimeoutOverride && queryTimeoutMillis != previousMillis;
+        boolean lockTimeoutChanged = hasLockTimeoutOverride && lockTimeoutMillis != previousLockMillis;
+        boolean rolledBack = false;
+        Throwable failure = null;
         try {
+            if (timeoutChanged || lockTimeoutChanged) {
+                setLocalTimeouts(enclosing.connection, timeoutChanged, queryTimeoutMillis, lockTimeoutChanged, lockTimeoutMillis);
+                if (timeoutChanged) {
+                    enclosing.queryTimeoutMillis = queryTimeoutMillis;
+                    enclosing.queryTimeoutSeconds = queryTimeoutSeconds;
+                }
+                if (lockTimeoutChanged) {
+                    enclosing.lockTimeoutMillis = lockTimeoutMillis;
+                }
+            }
             R result = (tenantId > 0 && enclosingTenant == 0)
                     ? ScopedValue.where(CURRENT_TENANT, tenantId).call(() -> work.run(enclosing))
                     : work.run(enclosing);
@@ -572,7 +621,9 @@ public final class Db {
             }
             enclosing.connection.releaseSavepoint(savepoint);
             return result;
-        } catch (SQLException | RuntimeException | Error failure) {
+        } catch (SQLException | RuntimeException | Error error) {
+            failure = error;
+            rolledBack = true;
             enclosing.truncateCallbacks(beforeCommitSize, afterCommitSize, afterCompletionSize);
             try {
                 enclosing.connection.rollback(savepoint);
@@ -580,11 +631,27 @@ public final class Db {
                 enclosing.failed = false;
             } catch (SQLException rollbackFailure) {
                 enclosing.markFailed();
-                failure.addSuppressed(rollbackFailure);
+                error.addSuppressed(rollbackFailure);
             }
-            if (failure instanceof SQLException sql) throw translate(sql);
-            if (failure instanceof RuntimeException runtime) throw runtime;
-            throw (Error) failure;
+            if (error instanceof SQLException sql) throw translate(sql);
+            if (error instanceof RuntimeException runtime) throw runtime;
+            throw (Error) error;
+        } finally {
+            if (timeoutChanged || lockTimeoutChanged) {
+                enclosing.queryTimeoutMillis = previousMillis;
+                enclosing.queryTimeoutSeconds = previousSeconds;
+                enclosing.lockTimeoutMillis = previousLockMillis;
+                // On rollback, PostgreSQL already reverted SET LOCAL made after the savepoint.
+                if (!rolledBack && enclosing.active && !enclosing.failed) {
+                    try {
+                        setLocalTimeouts(enclosing.connection, timeoutChanged, previousMillis, lockTimeoutChanged, previousLockMillis);
+                    } catch (SQLException restoreError) {
+                        enclosing.markFailed();
+                        if (failure != null) failure.addSuppressed(restoreError);
+                        else throw translate(restoreError);
+                    }
+                }
+            }
         }
     }
 
@@ -600,7 +667,7 @@ public final class Db {
                 long timeoutMs = hasTimeoutOverride
                         ? queryTimeoutMillis
                         : (remainingTimeout != null ? Session.timeoutMillis(remainingTimeout) : queryTimeoutMillis);
-                Session.ActiveTx tx = new Session.ActiveTx(connection, readOnly, effectiveIsolation, timeoutMs, backend, callbackDecorator);
+                Session.ActiveTx tx = new Session.ActiveTx(connection, readOnly, effectiveIsolation, timeoutMs, lockTimeoutMillis, backend, callbackDecorator);
                 try {
                     R result = ScopedValue.where(CURRENT_TX, tx).where(CURRENT_TENANT, tenantId).call(() -> work.run(tx));
                     if (tx.failed) throw new VevSessionException("Vev transaction failed; roll it back");
@@ -633,14 +700,20 @@ public final class Db {
             }
             if (connection.getAutoCommit()) connection.setAutoCommit(false);
             started = true;
-            String setupSql = transactionSetupSql(readOnly && !connection.isReadOnly(), effectiveIsolation, queryTimeoutMillis, hasTimeoutOverride);
+            String setupSql = transactionSetupSql(
+                    readOnly && !connection.isReadOnly(),
+                    effectiveIsolation,
+                    queryTimeoutMillis,
+                    hasTimeoutOverride,
+                    lockTimeoutMillis,
+                    hasLockTimeoutOverride);
             if (setupSql != null) {
                 // Transaction-scoped SET TRANSACTION / SET LOCAL avoid mutating pooled session state.
                 try (Statement statement = connection.createStatement()) {
                     statement.execute(setupSql);
                 }
             }
-            Session.ActiveTx activeTx = new Session.ActiveTx(connection, readOnly, effectiveIsolation, queryTimeoutMillis, null, callbackDecorator);
+            Session.ActiveTx activeTx = new Session.ActiveTx(connection, readOnly, effectiveIsolation, queryTimeoutMillis, lockTimeoutMillis, null, callbackDecorator);
             tx = activeTx;
             result = ScopedValue.where(CURRENT_TX, activeTx).where(CURRENT_TENANT, tenantId).call(() -> {
                 R value = work.run(activeTx);
@@ -695,31 +768,47 @@ public final class Db {
         return result;
     }
 
-    private static String transactionSetupSql(boolean setReadOnly, int isolation, long timeoutMillis, boolean hasTimeoutOverride) {
+    private static String transactionSetupSql(boolean setReadOnly, int isolation,
+                                              long timeoutMillis, boolean hasTimeoutOverride,
+                                              long lockTimeoutMillis, boolean hasLockTimeoutOverride) {
         String isolationClause = switch (isolation) {
             case Connection.TRANSACTION_READ_COMMITTED -> "ISOLATION LEVEL READ COMMITTED";
             case Connection.TRANSACTION_REPEATABLE_READ -> "ISOLATION LEVEL REPEATABLE READ";
             case Connection.TRANSACTION_SERIALIZABLE -> "ISOLATION LEVEL SERIALIZABLE";
             default -> null;
         };
-        String txSql = null;
+        StringBuilder sql = new StringBuilder();
         if (isolationClause != null && setReadOnly) {
-            txSql = "SET TRANSACTION " + isolationClause + ", READ ONLY";
+            sql.append("SET TRANSACTION ").append(isolationClause).append(", READ ONLY");
         } else if (isolationClause != null) {
-            txSql = "SET TRANSACTION " + isolationClause;
+            sql.append("SET TRANSACTION ").append(isolationClause);
         } else if (setReadOnly) {
-            txSql = "SET TRANSACTION READ ONLY";
+            sql.append("SET TRANSACTION READ ONLY");
         }
-        String timeoutSql = (timeoutMillis > 0 || hasTimeoutOverride)
-                ? "SET LOCAL statement_timeout = " + timeoutMillis
-                : null;
-        if (txSql != null && timeoutSql != null) return txSql + "; " + timeoutSql;
-        return txSql != null ? txSql : timeoutSql;
+        if (timeoutMillis > 0 || hasTimeoutOverride) {
+            if (!sql.isEmpty()) sql.append("; ");
+            sql.append("SET LOCAL statement_timeout = ").append(timeoutMillis);
+        }
+        if (lockTimeoutMillis > 0 || hasLockTimeoutOverride) {
+            if (!sql.isEmpty()) sql.append("; ");
+            sql.append("SET LOCAL lock_timeout = ").append(lockTimeoutMillis);
+        }
+        return sql.isEmpty() ? null : sql.toString();
     }
 
-    private static void setLocalStatementTimeout(Connection connection, long timeoutMillis) throws SQLException {
+    private static void setLocalTimeouts(Connection connection, boolean setStatement, long statementMillis,
+                                         boolean setLock, long lockMillis) throws SQLException {
+        StringBuilder sql = new StringBuilder();
+        if (setStatement) {
+            sql.append("SET LOCAL statement_timeout = ").append(statementMillis);
+        }
+        if (setLock) {
+            if (!sql.isEmpty()) sql.append("; ");
+            sql.append("SET LOCAL lock_timeout = ").append(lockMillis);
+        }
+        if (sql.isEmpty()) return;
         try (Statement statement = connection.createStatement()) {
-            statement.execute("SET LOCAL statement_timeout = " + timeoutMillis);
+            statement.execute(sql.toString());
         }
     }
 
