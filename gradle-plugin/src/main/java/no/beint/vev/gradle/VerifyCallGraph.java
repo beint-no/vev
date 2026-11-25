@@ -61,6 +61,11 @@ import org.gradle.api.tasks.TaskAction;
  *       {@code savepoint(int)} (risking cross-tenant switch failure at runtime).</li>
  *   <li>{@code SPRING-TRANSACTIONAL}: When {@code forbidSpringTransactional} is enabled (default), no class or
  *       method carries {@code @Transactional}.</li>
+ *   <li>{@code EXTERNAL-IO-IN-TX}: When {@code forbidExternalIoInTransaction} is enabled (default), no active
+ *       transaction ({@code read*}/{@code write*}/{@code readNew}/{@code writeNew}) transitively invokes outbound
+ *       HTTP or mail I/O (Spring {@code RestClient}/{@code RestTemplate}/{@code WebClient}/{@code @HttpExchange},
+ *       JDK {@code HttpClient}/{@code URL.openConnection}/{@code HttpURLConnection}, OkHttp, Apache HttpClient,
+ *       Jakarta Mail) or any method configured in {@code forbiddenInTransaction}.</li>
  * </ol>
  */
 @CacheableTask
@@ -69,7 +74,8 @@ public abstract class VerifyCallGraph extends DefaultTask {
     private static final Set<String> READ_OPENERS = Set.of(
             "read", "tenantRead", "readNew", "tenantReadNew", "readRepeatable", "tenantReadRepeatable");
     private static final Set<String> WRITE_OPENERS = Set.of(
-            "write", "tenantWrite", "writeSerializable", "tenantWriteSerializable", "writeIsolated", "tenantWriteIsolated");
+            "write", "tenantWrite", "writeNew", "tenantWriteNew", "writeSerializable", "tenantWriteSerializable",
+            "writeIsolated", "tenantWriteIsolated");
     private static final Set<String> WRITE_JOINERS = Set.of(
             "write", "tenantWrite", "writeSerializable", "tenantWriteSerializable",
             "savepoint", "tenantSavepoint", "beforeCommit", "requireWriteTransaction");
@@ -93,6 +99,28 @@ public abstract class VerifyCallGraph extends DefaultTask {
     private static final Set<String> TRANSACTIONAL_ANNOTATIONS = Set.of(
             "Lorg/springframework/transaction/annotation/Transactional;",
             "Ljakarta/transaction/Transactional;");
+    private static final String ASYNC_ANNOTATION = "Lorg/springframework/scheduling/annotation/Async;";
+    private static final String SPRING_HTTP_EXCHANGE_PREFIX = "Lorg/springframework/web/service/annotation/";
+    private static final Map<String, Set<String>> BUILTIN_EXTERNAL_IO_SINKS = Map.ofEntries(
+            Map.entry("org/springframework/web/client/RestClient$ResponseSpec", Set.of("body", "toEntity", "toBodilessEntity")),
+            Map.entry("org/springframework/web/client/RestClient$RequestHeadersSpec", Set.of("exchange")),
+            Map.entry("org/springframework/web/client/RestClient$RequestBodySpec", Set.of("exchange")),
+            Map.entry("org/springframework/web/client/RestClient$RequestHeadersUriSpec", Set.of("exchange")),
+            Map.entry("org/springframework/web/client/RestClient$RequestBodyUriSpec", Set.of("exchange")),
+            Map.entry("org/springframework/web/client/RestTemplate", Set.of(
+                    "exchange", "execute", "getForObject", "getForEntity", "postForObject", "postForEntity",
+                    "postForLocation", "put", "delete", "patchForObject", "headForHeaders", "optionsForAllow")),
+            Map.entry("org/springframework/web/reactive/function/client/WebClient$RequestHeadersSpec",
+                    Set.of("retrieve", "exchange", "exchangeToMono", "exchangeToFlux")),
+            Map.entry("java/net/http/HttpClient", Set.of("send", "sendAsync")),
+            Map.entry("java/net/URL", Set.of("openConnection", "openStream")),
+            Map.entry("java/net/HttpURLConnection", Set.of("connect", "getResponseCode", "getInputStream", "getOutputStream")),
+            Map.entry("javax/net/ssl/HttpsURLConnection", Set.of("connect", "getResponseCode", "getInputStream", "getOutputStream")),
+            Map.entry("okhttp3/Call", Set.of("execute", "enqueue")),
+            Map.entry("org/apache/hc/client5/http/classic/HttpClient", Set.of("execute")),
+            Map.entry("org/apache/http/client/HttpClient", Set.of("execute")),
+            Map.entry("jakarta/mail/Transport", Set.of("send", "sendMessage"))
+    );
 
     private record MethodKey(String owner, String name, String desc) {
         String shortName() { return owner.replace('/', '.') + "." + name; }
@@ -102,45 +130,60 @@ public abstract class VerifyCallGraph extends DefaultTask {
     public abstract ConfigurableFileCollection getClasses();
 
     /** Package prefixes (dot or slash notation) to analyze. Empty analyzes all classes in {@code classes}. */
-    @Input public abstract SetProperty<String> getPackagePrefixes();
+    @org.gradle.api.tasks.Optional @Input public abstract SetProperty<String> getPackagePrefixes();
 
     /** Methods ({@code pkg.Class.method}) that bind ambient tenant context for their lambda/body. */
-    @Input public abstract SetProperty<String> getTenantBinders();
+    @org.gradle.api.tasks.Optional @Input public abstract SetProperty<String> getTenantBinders();
 
     /** Entry-point annotations ({@code pkg.Annotation}) that run without ambient tenant context. */
-    @Input public abstract SetProperty<String> getEntryPointAnnotations();
+    @org.gradle.api.tasks.Optional @Input public abstract SetProperty<String> getEntryPointAnnotations();
 
     /** Fail when any scanned class or method carries Spring or Jakarta {@code @Transactional}. */
-    @Input public abstract Property<Boolean> getForbidSpringTransactional();
+    @org.gradle.api.tasks.Optional @Input public abstract Property<Boolean> getForbidSpringTransactional();
+
+    /** Fail when any Vev transaction transitively invokes outbound HTTP or mail I/O. */
+    @org.gradle.api.tasks.Optional @Input public abstract Property<Boolean> getForbidExternalIoInTransaction();
+
+    /** Additional methods ({@code pkg.Class.method}) forbidden inside any Vev transaction. */
+    @org.gradle.api.tasks.Optional @Input public abstract SetProperty<String> getForbiddenInTransaction();
 
     @OutputFile public abstract RegularFileProperty getReport();
 
     @TaskAction public void verify() throws IOException {
-        List<String> prefixes = getPackagePrefixes().get().stream()
+        List<String> prefixes = getPackagePrefixes().getOrElse(Set.of()).stream()
                 .map(VerifyCallGraph::normalizePrefix)
                 .filter(p -> !p.isEmpty())
                 .toList();
         Set<String> tenantBinders = new HashSet<>();
-        for (String binder : getTenantBinders().get()) {
+        for (String binder : getTenantBinders().getOrElse(Set.of())) {
             tenantBinders.add(normalizeMember(binder));
         }
         Set<String> entryPointAnnotations = new HashSet<>();
-        for (String ann : getEntryPointAnnotations().get()) {
+        for (String ann : getEntryPointAnnotations().getOrElse(Set.of("org.springframework.scheduling.annotation.Scheduled"))) {
             entryPointAnnotations.add(normalizeDescriptor(ann));
         }
-        boolean forbidTransactional = getForbidSpringTransactional().get();
+        boolean forbidTransactional = getForbidSpringTransactional().getOrElse(true);
+        boolean forbidExternalIo = getForbidExternalIoInTransaction().getOrElse(true);
+        Set<String> customForbiddenSinks = new HashSet<>();
+        for (String sink : getForbiddenInTransaction().getOrElse(Set.of())) {
+            customForbiddenSinks.add(normalizeMember(sink));
+        }
 
         Map<MethodKey, Set<MethodKey>> normalEdges = new HashMap<>();
+        Map<MethodKey, Set<MethodKey>> ioEdges = new HashMap<>();
         Map<MethodKey, Set<MethodKey>> readTraversalEdges = new HashMap<>();
         Map<MethodKey, Set<MethodKey>> noTenantBindEdges = new HashMap<>();
         Map<MethodKey, Set<String>> directDbCalls = new HashMap<>();
         Map<MethodKey, Set<String>> directReadTraversalDbCalls = new HashMap<>();
         Map<MethodKey, Set<String>> directAmbientTenant = new HashMap<>();
         Map<MethodKey, Set<String>> directExplicitTenant = new HashMap<>();
+        Map<MethodKey, Set<String>> directExternalIo = new HashMap<>();
         Map<MethodKey, List<String>> readLambdas = new LinkedHashMap<>();
         Map<MethodKey, List<String>> writeLambdas = new LinkedHashMap<>();
+        Map<MethodKey, List<String>> ioTxLambdas = new LinkedHashMap<>();
         Map<MethodKey, List<String>> tenantLambdas = new LinkedHashMap<>();
         Set<MethodKey> entryPointMethods = new LinkedHashSet<>();
+        Set<MethodKey> asyncMethods = new HashSet<>();
         Map<String, Set<String>> subtypes = new HashMap<>();
         Set<MethodKey> allMethods = new HashSet<>();
         Set<String> escapedScopes = new TreeSet<>();
@@ -157,15 +200,18 @@ public abstract class VerifyCallGraph extends DefaultTask {
                     if (!matchesPrefix(owner, prefixes)) continue;
                     classCount++;
 
-                    if (forbidTransactional) {
-                        model.findAttribute(Attributes.runtimeVisibleAnnotations()).ifPresent(anns -> {
-                            for (var ann : anns.annotations()) {
-                                if (TRANSACTIONAL_ANNOTATIONS.contains(ann.className().stringValue())) {
-                                    transactionalUses.add(owner.replace('/', '.'));
-                                }
+                    boolean[] classFlags = new boolean[1]; // [0] = class @Async
+                    model.findAttribute(Attributes.runtimeVisibleAnnotations()).ifPresent(anns -> {
+                        for (var ann : anns.annotations()) {
+                            String cname = ann.className().stringValue();
+                            if (forbidTransactional && TRANSACTIONAL_ANNOTATIONS.contains(cname)) {
+                                transactionalUses.add(owner.replace('/', '.'));
                             }
-                        });
-                    }
+                            if (ASYNC_ANNOTATION.equals(cname)) {
+                                classFlags[0] = true;
+                            }
+                        }
+                    });
 
                     model.superclass().ifPresent(sc -> {
                         String sup = sc.asInternalName();
@@ -180,6 +226,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                         String methodName = method.methodName().stringValue();
                         MethodKey mk = new MethodKey(owner, methodName, method.methodType().stringValue());
                         allMethods.add(mk);
+                        if (classFlags[0]) asyncMethods.add(mk);
 
                         method.findAttribute(Attributes.runtimeVisibleAnnotations()).ifPresent(anns -> {
                             for (var ann : anns.annotations()) {
@@ -188,6 +235,10 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     entryPointMethods.add(mk);
                                 } else if (forbidTransactional && TRANSACTIONAL_ANNOTATIONS.contains(cname)) {
                                     transactionalUses.add(mk.shortName());
+                                } else if (ASYNC_ANNOTATION.equals(cname)) {
+                                    asyncMethods.add(mk);
+                                } else if (forbidExternalIo && cname.startsWith(SPRING_HTTP_EXCHANGE_PREFIX) && cname.endsWith("Exchange;")) {
+                                    directExternalIo.computeIfAbsent(mk, k -> new HashSet<>()).add("@HttpExchange(" + mk.shortName() + ")");
                                 }
                             }
                         });
@@ -214,6 +265,14 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                 String targetName = inv.name().stringValue();
                                 String targetDesc = inv.type().stringValue();
 
+                                if (forbidExternalIo && BUILTIN_EXTERNAL_IO_SINKS.getOrDefault(targetOwner, Set.of()).contains(targetName)) {
+                                    String simpleOwner = targetOwner.substring(targetOwner.lastIndexOf('/') + 1);
+                                    directExternalIo.computeIfAbsent(mk, k -> new HashSet<>()).add(simpleOwner + "." + targetName);
+                                }
+                                if (customForbiddenSinks.contains(targetOwner + "." + targetName)) {
+                                    directExternalIo.computeIfAbsent(mk, k -> new HashSet<>()).add(targetOwner.replace('/', '.') + "." + targetName);
+                                }
+
                                 if (pendingLambda != null && pendingLambdaIndyDesc != null && DEFERRED_OR_ASYNC_SINKS.contains(targetName)) {
                                     for (String scopeDesc : SCOPE_DESCRIPTORS) {
                                         if (pendingLambdaIndyDesc.contains(scopeDesc)) {
@@ -235,7 +294,12 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     }
 
                                     if (NEW_TX_OPENERS.contains(targetName)) {
-                                        // Independent transaction does not inherit enclosing read-only/isolation/tenant state.
+                                        // Independent transaction does not inherit enclosing read-only/isolation/tenant state,
+                                        // but still holds an open DB connection while running.
+                                        if (pendingLambda != null) {
+                                            ioTxLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                            ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                        }
                                         pendingLambda = null;
                                         pendingLambdaIndyDesc = null;
                                     } else {
@@ -246,14 +310,17 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                         if (pendingLambda != null) {
                                             if (READ_OPENERS.contains(targetName)) {
                                                 readLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                                ioTxLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
                                             } else if (WRITE_OPENERS.contains(targetName)) {
                                                 writeLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                                ioTxLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
                                             }
                                             if (isExplicitTenant || isAmbientTenant) {
                                                 tenantLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
                                             }
                                             if (!targetName.equals("afterCommit") && !targetName.equals("afterCompletion")) {
                                                 normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                                ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                                 if (!earlyReturnIfReadOnly) {
                                                     readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                                 }
@@ -269,6 +336,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     boolean bindsTenant = tenantBinders.contains(targetOwner + "." + targetName);
                                     MethodKey targetMk = new MethodKey(targetOwner, targetName, targetDesc);
                                     normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
+                                    ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
                                     if (!earlyReturnIfReadOnly) {
                                         readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
                                     }
@@ -278,6 +346,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     if (pendingLambda != null && !targetName.equals("execute") && !targetName.equals("submit")
                                             && !targetName.equals("afterCommit") && !targetName.equals("afterCompletion")) {
                                         normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                        ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                         if (!earlyReturnIfReadOnly) {
                                             readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                         }
@@ -289,6 +358,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     }
                                 } else if (pendingLambda != null && (targetOwner.equals("java/lang/ScopedValue$Carrier") || targetOwner.startsWith("kotlin/"))) {
                                     normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                    ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                     if (!earlyReturnIfReadOnly) {
                                         readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
                                     }
@@ -303,9 +373,10 @@ public abstract class VerifyCallGraph extends DefaultTask {
             }
         }
 
-        Map<MethodKey, Set<MethodKey>> expandedEdges = expand(normalEdges, subtypes, allMethods);
-        Map<MethodKey, Set<MethodKey>> expandedReadEdges = expand(readTraversalEdges, subtypes, allMethods);
-        Map<MethodKey, Set<MethodKey>> expandedNoTenantEdges = expand(noTenantBindEdges, subtypes, allMethods);
+        Map<MethodKey, Set<MethodKey>> expandedEdges = expand(normalEdges, subtypes, allMethods, asyncMethods);
+        Map<MethodKey, Set<MethodKey>> expandedIoEdges = expand(ioEdges, subtypes, allMethods, asyncMethods);
+        Map<MethodKey, Set<MethodKey>> expandedReadEdges = expand(readTraversalEdges, subtypes, allMethods, asyncMethods);
+        Map<MethodKey, Set<MethodKey>> expandedNoTenantEdges = expand(noTenantBindEdges, subtypes, allMethods, asyncMethods);
 
         List<String> violations = new ArrayList<>();
 
@@ -365,6 +436,17 @@ public abstract class VerifyCallGraph extends DefaultTask {
         // 7. SPRING-TRANSACTIONAL
         transactionalUses.forEach(s -> violations.add("SPRING-TRANSACTIONAL: " + s + " is annotated with @Transactional; use Vev Db instead"));
 
+        // 8. EXTERNAL-IO-IN-TX
+        if (!directExternalIo.isEmpty()) {
+            Map<String, String> externalIoInTx = new TreeMap<>();
+            for (var entry : ioTxLambdas.entrySet()) {
+                for (var hit : allReachableSinks(entry.getKey(), expandedIoEdges, directExternalIo).entrySet()) {
+                    externalIoInTx.putIfAbsent(entry.getValue().getFirst() + " -> " + hit.getKey(), hit.getValue());
+                }
+            }
+            externalIoInTx.forEach((target, trace) -> violations.add("EXTERNAL-IO-IN-TX: " + target + "\n    " + trace));
+        }
+
         Path reportPath = getReport().get().getAsFile().toPath();
         Files.createDirectories(reportPath.getParent());
         Files.writeString(reportPath,
@@ -376,6 +458,7 @@ public abstract class VerifyCallGraph extends DefaultTask {
             var message = new StringBuilder("Vev call-graph transaction violations found (" + violations.size() + "):\n");
             for (String v : violations) message.append("  ").append(v).append("\n");
             message.append("Fix the transaction boundary (use read for pure reads, writeNew/readNew for independent tx, "
+                    + "move external HTTP/mail calls outside transactions or into afterCommit, "
                     + "bind tenant explicitly in @Scheduled jobs, or move readRepeatable/writeSerializable to the outermost boundary).");
             throw new GradleException(message.toString());
         }
@@ -437,25 +520,62 @@ public abstract class VerifyCallGraph extends DefaultTask {
     private static Map<MethodKey, Set<MethodKey>> expand(
             Map<MethodKey, Set<MethodKey>> edges,
             Map<String, Set<String>> subtypes,
-            Set<MethodKey> allMethods
+            Set<MethodKey> allMethods,
+            Set<MethodKey> asyncMethods
     ) {
         Map<MethodKey, Set<MethodKey>> out = new HashMap<>();
         for (var e : edges.entrySet()) {
-            Set<MethodKey> targets = new HashSet<>(e.getValue());
+            String callerOwner = e.getKey().owner;
+            Set<MethodKey> targets = new HashSet<>();
             for (MethodKey t : e.getValue()) {
+                // Cross-class calls to @Async methods dispatch to another thread and do not inherit the active transaction.
+                if (callerOwner.equals(t.owner) || !asyncMethods.contains(t)) {
+                    targets.add(t);
+                }
                 Deque<String> q = new ArrayDeque<>(subtypes.getOrDefault(t.owner, Set.of()));
                 Set<String> seen = new HashSet<>();
                 while (!q.isEmpty()) {
                     String sub = q.poll();
                     if (!seen.add(sub)) continue;
                     MethodKey subMk = new MethodKey(sub, t.name, t.desc);
-                    if (allMethods.contains(subMk)) targets.add(subMk);
+                    if (allMethods.contains(subMk) && (callerOwner.equals(sub) || !asyncMethods.contains(subMk))) {
+                        targets.add(subMk);
+                    }
                     q.addAll(subtypes.getOrDefault(sub, Set.of()));
                 }
             }
             out.put(e.getKey(), targets);
         }
         return out;
+    }
+
+    private static Map<String, String> allReachableSinks(
+            MethodKey start,
+            Map<MethodKey, Set<MethodKey>> edges,
+            Map<MethodKey, Set<String>> directSinks
+    ) {
+        Map<String, String> found = new LinkedHashMap<>();
+        Deque<MethodKey> q = new ArrayDeque<>();
+        Map<MethodKey, MethodKey> parent = new HashMap<>();
+        q.add(start);
+        parent.put(start, null);
+        while (!q.isEmpty()) {
+            MethodKey cur = q.poll();
+            Set<String> sinks = directSinks.getOrDefault(cur, Set.of());
+            if (!sinks.isEmpty()) {
+                List<String> path = new ArrayList<>();
+                for (MethodKey n = cur; n != null; n = parent.get(n)) path.add(n.shortName());
+                Collections.reverse(path);
+                found.putIfAbsent(cur.shortName() + " " + new TreeSet<>(sinks), String.join(" -> ", path));
+            }
+            for (MethodKey next : edges.getOrDefault(cur, Set.of())) {
+                if (!parent.containsKey(next)) {
+                    parent.put(next, cur);
+                    q.add(next);
+                }
+            }
+        }
+        return found;
     }
 
     private static Map<String, String> allReachableDbCalls(

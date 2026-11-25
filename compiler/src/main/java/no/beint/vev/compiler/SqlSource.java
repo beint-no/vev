@@ -14,9 +14,9 @@ import java.util.regex.Pattern;
 public record SqlSource(Path path, String name, String cardinality, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
                         Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
-                        String positionalSql, boolean customPlan, boolean forceWrite) {
+                        String positionalSql, boolean customPlan, boolean forceWrite, boolean allowBlob) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
-    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan|access):.*";
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan|access|allow):.*";
 
     /** Returns the directive without its prefix, or null for an ordinary comment. */
     private static String directive(Path path, String comment) {
@@ -55,6 +55,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         boolean scopeDeclared = false;
         boolean customPlan = false;
         boolean forceWrite = false;
+        boolean allowBlob = false;
         Set<String> nullable = new LinkedHashSet<>();
         Set<String> notNull = new LinkedHashSet<>();
         Map<String, String> domains = new LinkedHashMap<>();
@@ -73,7 +74,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
             sqlStart = end;
             if (text == null) continue;
             String key = text.substring(0, text.indexOf(':'));
-            if (Set.of("name", "scope", "plan", "access").contains(key) && !singletonDirectives.add(key)) {
+            if (Set.of("name", "scope", "plan", "access", "allow").contains(key) && !singletonDirectives.add(key)) {
                 throw error(path, "Duplicate " + key + " directive");
             }
             if (text.startsWith("name:")) {
@@ -105,6 +106,9 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
             } else if (text.startsWith("access:")) {
                 if (!text.substring(7).strip().equals("write")) throw error(path, "Use -- vev.access: write to require a write scope");
                 forceWrite = true;
+            } else if (text.startsWith("allow:")) {
+                if (!text.substring(6).strip().equals("blob")) throw error(path, "Use -- vev.allow: blob to opt in to selecting unbounded bytea columns in :many or wide queries");
+                allowBlob = true;
             } else {
                 if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- vev.plan: custom to plan every execution with its parameter values");
                 customPlan = true;
@@ -237,7 +241,57 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         boolean effectiveCustomPlan = customPlan || needsCustomPlan(tokens, parameters, nullable);
         return new SqlSource(path, name, cardinality, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan, forceWrite);
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan, forceWrite, allowBlob);
+    }
+
+    /**
+     * Canonical SQL form for duplicate-query detection: collapses whitespace and uppercases unquoted
+     * keywords/identifiers while preserving string and quoted-identifier literals verbatim.
+     */
+    String canonicalSql() {
+        var out = new StringBuilder(sql.length());
+        boolean space = false;
+        for (int i = 0; i < sql.length();) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c)) {
+                space = out.length() > 0;
+                i++;
+                continue;
+            }
+            if (space) {
+                out.append(' ');
+                space = false;
+            }
+            if (c == '\'' || c == '"') {
+                int start = i++;
+                boolean escaped = c == '\'' && start > 0 && (sql.charAt(start - 1) == 'E' || sql.charAt(start - 1) == 'e')
+                        && (start < 2 || !Character.isJavaIdentifierPart(sql.charAt(start - 2)));
+                while (i < sql.length()) {
+                    if (escaped && sql.charAt(i) == '\\') { i += 2; continue; }
+                    if (sql.charAt(i++) == c) {
+                        if (i < sql.length() && sql.charAt(i) == c) { i++; continue; }
+                        break;
+                    }
+                }
+                out.append(sql, start, i);
+                continue;
+            }
+            if (c == '$') {
+                var match = Pattern.compile("\\$(?:[A-Za-z_][A-Za-z0-9_]*)?\\$").matcher(sql.substring(i));
+                if (match.lookingAt()) {
+                    String delimiter = match.group();
+                    int end = sql.indexOf(delimiter, i + delimiter.length());
+                    if (end >= 0) {
+                        out.append(sql, i, end + delimiter.length());
+                        i = end + delimiter.length();
+                        continue;
+                    }
+                }
+            }
+            out.append(Character.toUpperCase(c));
+            i++;
+        }
+        return out.toString();
     }
 
     /**
