@@ -226,6 +226,79 @@ class PluginTest {
         assertTrue(runner.withArguments("check", "--console=plain").build().getOutput().contains("Reusing configuration cache"));
     }
 
+    @Test void checkVerifiesCrossServiceCallGraphBoundaries() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/"),
+                project.resolve(".vev-schema-cache").toString().replace("\\", "/")));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql"),
+                "-- vev.name: find :optional\n-- vev.scope: global\nSELECT name FROM item WHERE id=:id;");
+        Path kotlin = Files.createDirectories(project.resolve("src/main/kotlin"));
+        Path svc = kotlin.resolve("Service.kt");
+        Files.writeString(svc, """
+                package sample
+                import no.beint.vev.Db
+                import sample.sql.Queries
+                class Service(private val db: Db) {
+                    fun badRead(id: Int): String? = db.read { tx ->
+                        helperWrite()
+                        Queries.find(tx, id)?.name
+                    }
+                    fun helperWrite() { db.write { } }
+                    fun badIsolation() { db.read { db.readRepeatable { } } }
+                    fun badIsolated() { db.write { db.writeIsolated { } } }
+                    fun badEscaped() { db.write { tx -> db.afterCommit { Queries.find(tx, 1) } } }
+                    fun badTenantSwitch() { db.write(1) { db.read(2) { } } }
+                    fun safeGuard() {
+                        db.read { guardedTrack() }
+                    }
+                    private fun guardedTrack() {
+                        if (!db.inWriteTransaction()) return
+                        db.beforeCommit { db.write { } }
+                    }
+                }
+                """);
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        var failure = runner.withArguments("check", "--console=plain").buildAndFail();
+        String output = failure.getOutput();
+        assertTrue(output.contains("READ->WRITE"), output);
+        assertTrue(output.contains("ISOLATION-ELEVATION"), output);
+        assertTrue(output.contains("NESTED-ISOLATED"), output);
+        assertTrue(output.contains("ESCAPED-SCOPE"), output);
+        assertTrue(output.contains("NESTED-EXPLICIT-TENANT"), output);
+        assertFalse(output.contains("guardedTrack"), "Sound inWriteTransaction early return must not trigger READ->WRITE: " + output);
+
+        Files.writeString(svc, """
+                package sample
+                import no.beint.vev.Db
+                import sample.sql.Queries
+                class Service(private val db: Db) {
+                    fun goodRead(id: Int): String? = db.read { tx ->
+                        guardedTrack()
+                        Queries.find(tx, id)?.name
+                    }
+                    fun goodIndependent() { db.read { db.writeNew { } } }
+                    private fun guardedTrack() {
+                        if (!db.inWriteTransaction()) return
+                        db.beforeCommit { db.write { } }
+                    }
+                }
+                """);
+        var success = runner.withArguments("check", "--console=plain").build();
+        assertTrue(success.getOutput().contains("BUILD SUCCESSFUL"), success.getOutput());
+        assertTrue(runner.withArguments("check", "--console=plain").build().getOutput().contains("Reusing configuration cache"));
+    }
+
     private static int count(String text, String needle) {
         int total = 0;
         for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) total++;
