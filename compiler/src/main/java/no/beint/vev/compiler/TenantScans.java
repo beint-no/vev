@@ -25,14 +25,6 @@ final class TenantScans {
     record Scan(String relation, String alias, List<String> conjuncts) {}
     record Analysis(boolean writes, Set<TableUsage.Relation> relations) {}
 
-    private static final String ALL_RELATIONS = """
-            SELECT DISTINCT n->>'Schema', n->>'Relation Name'
-            FROM jsonb_path_query(?::jsonb, 'strict $.**') n
-            WHERE jsonb_typeof(n) = 'object'
-              AND n->>'Schema' IS NOT NULL
-              AND n->>'Relation Name' IS NOT NULL
-            """;
-
     private static final String SCANS = """
             SELECT quote_ident(n->>'Schema') || '.' || quote_ident(n->>'Relation Name'), quote_ident(n->>'Alias'),
                    n->>'Index Cond', n->>'Recheck Cond', n->>'Filter'
@@ -73,13 +65,6 @@ final class TenantScans {
               AND n->>'Relation Name' IS NOT NULL
             """;
 
-    private static final String HAS_WRITE_OR_LOCK = """
-            SELECT jsonb_path_exists(
-                ?::jsonb,
-                'strict $.** ? (@."Node Type" == "ModifyTable" || @."Node Type" == "LockRows")'
-            )
-            """;
-
     /**
      * Proves tenant scan/mutation restrictions for tenant queries, classifies whether the query
      * writes or acquires row/advisory locks (requiring a {@code WriteScope} / {@code TenantWriteScope}),
@@ -99,21 +84,9 @@ final class TenantScans {
                 plan = result.getString(1);
             }
         }
-        Set<TableUsage.Relation> relations = new java.util.TreeSet<>();
-        try (var statement = connection.prepareStatement(ALL_RELATIONS)) {
-            statement.setString(1, plan);
-            try (var result = statement.executeQuery()) {
-                while (result.next()) relations.add(new TableUsage.Relation(result.getString(1), result.getString(2)));
-            }
-        }
-        if (!writes) {
-            try (var statement = connection.prepareStatement(HAS_WRITE_OR_LOCK)) {
-                statement.setString(1, plan);
-                try (var result = statement.executeQuery()) {
-                    if (result.next() && result.getBoolean(1)) writes = true;
-                }
-            }
-        }
+        PlanScan planScan = scanPlanJson(plan);
+        Set<TableUsage.Relation> relations = planScan.relations;
+        if (!writes && planScan.hasWriteOrLock) writes = true;
         if (source.tenant() == null) return new Analysis(writes, Set.copyOf(relations));
         List<Scan> scans = new ArrayList<>();
         try (var statement = connection.prepareStatement(SCANS)) {
@@ -344,5 +317,135 @@ final class TenantScans {
             }
         }
         return e.length() - 1;
+    }
+
+    private record PlanScan(Set<TableUsage.Relation> relations, boolean hasWriteOrLock) {}
+
+    /**
+     * Scans PostgreSQL's {@code EXPLAIN (FORMAT JSON)} document in-process to collect every
+     * {@code (Schema, Relation Name)} pair and detect {@code ModifyTable}/{@code LockRows} nodes
+     * without extra database roundtrips.
+     */
+    static PlanScan scanPlanJson(String json) {
+        var scanner = new JsonPlanScanner(json);
+        scanner.scanValue();
+        return new PlanScan(scanner.relations, scanner.hasWriteOrLock);
+    }
+
+    private static final class JsonPlanScanner {
+        private final String json;
+        private int pos;
+        final Set<TableUsage.Relation> relations = new java.util.TreeSet<>();
+        boolean hasWriteOrLock;
+
+        JsonPlanScanner(String json) { this.json = json; }
+
+        void skipWhitespace() {
+            while (pos < json.length() && Character.isWhitespace(json.charAt(pos))) pos++;
+        }
+
+        Object scanValue() {
+            skipWhitespace();
+            if (pos >= json.length()) return null;
+            char c = json.charAt(pos);
+            if (c == '{') { scanObject(); return null; }
+            if (c == '[') { scanArray(); return null; }
+            if (c == '"') return readString();
+            // Number, boolean, or null literal.
+            while (pos < json.length()) {
+                char ch = json.charAt(pos);
+                if (ch == ',' || ch == '}' || ch == ']' || Character.isWhitespace(ch)) break;
+                pos++;
+            }
+            return null;
+        }
+
+        private void scanObject() {
+            pos++; // '{'
+            String schema = null;
+            String relationName = null;
+            String nodeType = null;
+            skipWhitespace();
+            if (pos < json.length() && json.charAt(pos) == '}') { pos++; return; }
+            while (pos < json.length()) {
+                skipWhitespace();
+                if (pos >= json.length() || json.charAt(pos) != '"') break;
+                String key = readString();
+                skipWhitespace();
+                if (pos < json.length() && json.charAt(pos) == ':') pos++;
+                Object value = scanValue();
+                if (value instanceof String str) {
+                    switch (key) {
+                        case "Schema" -> schema = str;
+                        case "Relation Name" -> relationName = str;
+                        case "Node Type" -> nodeType = str;
+                        default -> {}
+                    }
+                }
+                skipWhitespace();
+                if (pos < json.length() && json.charAt(pos) == ',') { pos++; continue; }
+                if (pos < json.length() && json.charAt(pos) == '}') { pos++; break; }
+                break;
+            }
+            if (schema != null && relationName != null) {
+                relations.add(new TableUsage.Relation(schema, relationName));
+            }
+            if ("ModifyTable".equals(nodeType) || "LockRows".equals(nodeType)) {
+                hasWriteOrLock = true;
+            }
+        }
+
+        private void scanArray() {
+            pos++; // '['
+            skipWhitespace();
+            if (pos < json.length() && json.charAt(pos) == ']') { pos++; return; }
+            while (pos < json.length()) {
+                scanValue();
+                skipWhitespace();
+                if (pos < json.length() && json.charAt(pos) == ',') { pos++; continue; }
+                if (pos < json.length() && json.charAt(pos) == ']') { pos++; break; }
+                break;
+            }
+        }
+
+        private String readString() {
+            pos++; // opening '"'
+            int start = pos;
+            while (pos < json.length()) {
+                char c = json.charAt(pos++);
+                if (c == '"') return json.substring(start, pos - 1);
+                if (c == '\\') {
+                    // Slow path with escape handling.
+                    var out = new StringBuilder(json.substring(start, pos - 1));
+                    pos--;
+                    while (pos < json.length()) {
+                        char ch = json.charAt(pos++);
+                        if (ch == '"') return out.toString();
+                        if (ch == '\\' && pos < json.length()) {
+                            char esc = json.charAt(pos++);
+                            switch (esc) {
+                                case '"', '\\', '/' -> out.append(esc);
+                                case 'b' -> out.append('\b');
+                                case 'f' -> out.append('\f');
+                                case 'n' -> out.append('\n');
+                                case 'r' -> out.append('\r');
+                                case 't' -> out.append('\t');
+                                case 'u' -> {
+                                    if (pos + 4 <= json.length()) {
+                                        out.append((char) Integer.parseInt(json.substring(pos, pos + 4), 16));
+                                        pos += 4;
+                                    }
+                                }
+                                default -> out.append(esc);
+                            }
+                        } else {
+                            out.append(ch);
+                        }
+                    }
+                    return out.toString();
+                }
+            }
+            return json.substring(start);
+        }
     }
 }

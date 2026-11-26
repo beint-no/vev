@@ -68,14 +68,20 @@ class TableUsageTest {
                 $$;
 
                 CREATE TABLE truncated_stage (id integer PRIMARY KEY);
+                CREATE TABLE using_source (id integer PRIMARY KEY);
                 CREATE TABLE refreshed_matview_base (id integer PRIMARY KEY);
                 CREATE MATERIALIZED VIEW refreshed_matview AS SELECT id FROM refreshed_matview_base;
-                CREATE FUNCTION maintain_staging() RETURNS void LANGUAGE plpgsql AS $$
+                CREATE FUNCTION maintain_staging() RETURNS void LANGUAGE plpgsql AS $fn$
+                DECLARE
+                    unused_table integer;
+                    msg text := $tag$FROM unused_table JOIN unused_with_trigger$tag$;
                 BEGIN
+                    SELECT id INTO unused_table FROM direct_select LIMIT 1;
+                    DELETE FROM truncated_stage s USING using_source u WHERE s.id = u.id;
                     TRUNCATE TABLE truncated_stage;
                     REFRESH MATERIALIZED VIEW refreshed_matview;
                 END;
-                $$;
+                $fn$;
 
                 CREATE TABLE unused_table (id integer PRIMARY KEY);
                 CREATE TABLE unused_with_trigger (id integer PRIMARY KEY);
@@ -89,6 +95,15 @@ class TableUsageTest {
                     FOR EACH ROW EXECUTE FUNCTION touch_unused_owner();
 
                 CREATE TABLE externally_managed (id integer PRIMARY KEY);
+                CREATE TABLE externally_managed_audit (id integer PRIMARY KEY);
+                CREATE FUNCTION audit_external() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO externally_managed_audit (id) VALUES (NEW.id);
+                    RETURN NEW;
+                END;
+                $$;
+                CREATE TRIGGER trg_audit_external AFTER INSERT ON externally_managed
+                    FOR EACH ROW EXECUTE FUNCTION audit_external();
                 CREATE TABLE external_svc.messages (id integer PRIMARY KEY);
                 """);
         postgres = new Postgres("");
@@ -141,6 +156,8 @@ class TableUsageTest {
             assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "via_matview_base")));
             assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "refreshed_matview_base")));
             assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "truncated_stage")));
+            assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "using_source")));
+            assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "externally_managed_audit")));
             assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "partitioned_events")));
             assertTrue(result.usedTables().contains(new TableUsage.Relation("public", "empty_partitioned_events")));
             assertFalse(result.catalogTables().contains(new TableUsage.Relation("public", "partitioned_events_2026")));
@@ -149,10 +166,12 @@ class TableUsageTest {
             assertFalse(result.catalogTables().contains(new TableUsage.Relation("external_svc", "messages")));
             assertEquals(Set.of(new TableUsage.Relation("public", "externally_managed")), result.ignoredTables());
 
-            // Allowing an actively queried table in ignoredTables is permitted (e.g. mixed Vev + external access).
-            var mixed = TableUsage.verify(connection, List.of(manifest), Set.of("public"),
-                    Set.of("externally_managed", "public.direct_select", "unused_table", "unused_with_trigger"));
-            assertTrue(mixed.unusedTables().isEmpty());
+            // An actively queried table in ignoredTables must fail fast so allowlists only shrink.
+            var alreadyUsed = assertThrows(IllegalArgumentException.class, () ->
+                    TableUsage.verify(connection, List.of(manifest), Set.of("public"),
+                            Set.of("externally_managed", "public.direct_select", "unused_table", "unused_with_trigger")));
+            assertTrue(alreadyUsed.getMessage().contains("already referenced by Vev queries"), alreadyUsed.getMessage());
+            assertTrue(alreadyUsed.getMessage().contains("public.direct_select"), alreadyUsed.getMessage());
 
             // Including external_svc in schemas flags external_svc.messages unless ignored.
             var multiSchema = TableUsage.verify(connection, List.of(manifest), Set.of("public", "external_svc"),

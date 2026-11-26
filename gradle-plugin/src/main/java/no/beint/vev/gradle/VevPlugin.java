@@ -34,17 +34,17 @@ public final class VevPlugin implements Plugin<Project> {
         project.getTasks().register("verifyVevTableUsage", VerifyTableUsage.class, check -> {
             check.setGroup("verification");
             check.setDescription("Fail when migrated tables are never referenced by any Vev query");
-            check.getMigrations().set(task.flatMap(GenerateSql::getMigrations));
-            check.getFixtures().set(task.flatMap(GenerateSql::getFixtures));
+            check.getMigrations().convention(task.flatMap(GenerateSql::getMigrations));
+            check.getFixtures().convention(task.flatMap(GenerateSql::getFixtures));
             check.getManifests().from(task.flatMap(GenerateSql::getRelationsManifest));
             check.getSchemas().convention(java.util.Set.of("public"));
             check.getIgnoredTables().convention(java.util.Set.of());
-            check.getPostgresBin().set(task.flatMap(GenerateSql::getPostgresBin));
-            check.getPostgresVersion().set(task.flatMap(GenerateSql::getPostgresVersion));
-            check.getSchemaCacheDir().set(task.flatMap(GenerateSql::getSchemaCacheDir));
+            check.getPostgresBin().convention(task.flatMap(GenerateSql::getPostgresBin));
+            check.getPostgresVersion().convention(task.flatMap(GenerateSql::getPostgresVersion));
+            check.getSchemaCacheDir().convention(task.flatMap(GenerateSql::getSchemaCacheDir));
             check.getCompilerClasspath().from(compiler);
             check.usesService(cluster);
-            check.getReport().set(project.getLayout().getBuildDirectory().file("reports/vev/table-usage.txt"));
+            check.getReport().convention(project.getLayout().getBuildDirectory().file("reports/vev/table-usage.txt"));
         });
         project.getPluginManager().withPlugin("java", ignored -> {
             var main = project.getExtensions().getByType(JavaPluginExtension.class).getSourceSets()

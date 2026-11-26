@@ -14,7 +14,8 @@ import java.util.regex.Pattern;
 public record SqlSource(Path path, String name, String cardinality, String sql,
                         List<String> parameters, Set<String> nullable, Map<String, String> domains,
                         Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
-                        String positionalSql, boolean customPlan, boolean forceWrite, boolean allowBlob) {
+                        String positionalSql, boolean customPlan, boolean forceWrite, boolean allowBlob,
+                        boolean allowUnorderedLimit) {
     private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan|access|allow):.*";
 
@@ -56,6 +57,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         boolean customPlan = false;
         boolean forceWrite = false;
         boolean allowBlob = false;
+        boolean allowUnorderedLimit = false;
         Set<String> nullable = new LinkedHashSet<>();
         Set<String> notNull = new LinkedHashSet<>();
         Map<String, String> domains = new LinkedHashMap<>();
@@ -74,7 +76,7 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
             sqlStart = end;
             if (text == null) continue;
             String key = text.substring(0, text.indexOf(':'));
-            if (Set.of("name", "scope", "plan", "access", "allow").contains(key) && !singletonDirectives.add(key)) {
+            if (Set.of("name", "scope", "plan", "access").contains(key) && !singletonDirectives.add(key)) {
                 throw error(path, "Duplicate " + key + " directive");
             }
             if (text.startsWith("name:")) {
@@ -107,8 +109,16 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
                 if (!text.substring(7).strip().equals("write")) throw error(path, "Use -- vev.access: write to require a write scope");
                 forceWrite = true;
             } else if (text.startsWith("allow:")) {
-                if (!text.substring(6).strip().equals("blob")) throw error(path, "Use -- vev.allow: blob to opt in to selecting unbounded bytea columns in :many or wide queries");
-                allowBlob = true;
+                String raw = text.substring(6).strip();
+                if (raw.isEmpty()) throw error(path, "Use -- vev.allow: blob and/or unordered-limit");
+                for (String value : raw.split("[ ,]+")) {
+                    switch (value) {
+                        case "blob" -> allowBlob = true;
+                        case "unordered-limit" -> allowUnorderedLimit = true;
+                        default -> throw error(path, "Unknown -- vev.allow option: " + value
+                                + "; supported options are blob, unordered-limit");
+                    }
+                }
             } else {
                 if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- vev.plan: custom to plan every execution with its parameter values");
                 customPlan = true;
@@ -201,6 +211,8 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         boolean projection = false;
         boolean returningAliases = false;
         int returningAliasesEnd = -2;
+        boolean hasTopLevelOrderBy = false;
+        boolean hasTopLevelLimit = false;
         for (int i = 0; i < tokens.size(); i++) {
             String token = tokens.get(i);
             if (token.equals(")")) depth--;
@@ -220,8 +232,23 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
                         || i + 1 < tokens.size() && Set.of("FROM", "INTO").contains(tokens.get(i + 1)))) {
                     throw error(path, "List returned columns explicitly; SELECT/RETURNING * is not a stable query contract");
                 }
+                if (token.equals("ORDER") && i + 1 < tokens.size() && tokens.get(i + 1).equals("BY")) {
+                    hasTopLevelOrderBy = true;
+                }
+                boolean precededByAliasOrDot = i > 0 && (tokens.get(i - 1).equals("AS") || tokens.get(i - 1).equals("."));
+                if (!precededByAliasOrDot && token.equals("LIMIT")
+                        && !(i + 1 < tokens.size() && tokens.get(i + 1).equals("ALL"))) {
+                    hasTopLevelLimit = true;
+                }
+                if (!precededByAliasOrDot && token.equals("FETCH") && i + 1 < tokens.size()
+                        && (tokens.get(i + 1).equals("FIRST") || tokens.get(i + 1).equals("NEXT"))) {
+                    hasTopLevelLimit = true;
+                }
             }
             if (token.equals("(")) depth++;
+        }
+        if (hasTopLevelLimit && !hasTopLevelOrderBy && !allowUnorderedLimit && !allConstantProjections(tokens)) {
+            throw error(path, "Query uses LIMIT/FETCH without a top-level ORDER BY; add a deterministic ORDER BY or opt in with -- vev.allow: unordered-limit");
         }
         int parameterIndex = 0;
         for (int i = 0; i < tokens.size(); i++) {
@@ -241,7 +268,8 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
         boolean effectiveCustomPlan = customPlan || needsCustomPlan(tokens, parameters, nullable);
         return new SqlSource(path, name, cardinality, sql.toString().strip(),
                 List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
-                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan, forceWrite, allowBlob);
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan,
+                forceWrite, allowBlob, allowUnorderedLimit);
     }
 
     /**
@@ -508,6 +536,106 @@ public record SqlSource(Path path, String name, String cardinality, String sql,
     private static final Set<String> SELECT_END = Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING",
             "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR");
     private static final Set<String> SET_OPERATIONS = Set.of("UNION", "EXCEPT", "INTERSECT");
+
+    /**
+     * Returns true when the top-level query is a single {@code SELECT} whose every projected column
+     * is a constant literal (e.g. {@code SELECT 1 AS present ... LIMIT 1} or {@code SELECT TRUE AS ok ... LIMIT 1}),
+     * making {@code LIMIT} deterministic regardless of scan order.
+     */
+    static boolean allConstantProjections(List<String> tokens) {
+        int depth = 0;
+        int selectIndex = -1;
+        for (int i = 0; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if (t.equals("(")) { depth++; continue; }
+            if (t.equals(")")) { depth--; continue; }
+            if (depth != 0) continue;
+            if (SET_OPERATIONS.contains(t)) return false;
+            if (selectIndex < 0) {
+                if (t.equals("SELECT")) selectIndex = i;
+                else if (Set.of("INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(t)) return false;
+            }
+        }
+        if (selectIndex < 0) return false;
+        int start = selectIndex + 1;
+        if (start < tokens.size() && (tokens.get(start).equals("ALL") || tokens.get(start).equals("DISTINCT"))) {
+            if (tokens.get(start).equals("DISTINCT") && start + 1 < tokens.size() && tokens.get(start + 1).equals("ON")) {
+                return false;
+            }
+            start++;
+        }
+        int columns = 0;
+        depth = 0;
+        for (int i = start; i <= tokens.size(); i++) {
+            String token = i == tokens.size() ? "FROM" : tokens.get(i);
+            if (depth == 0 && (token.equals(",") || SELECT_END.contains(token))) {
+                if (!isConstantProjection(tokens.subList(start, i))) return false;
+                columns++;
+                if (!token.equals(",")) break;
+                start = i + 1;
+            } else if (token.equals("(") || token.equals("[")) {
+                depth++;
+            } else if (token.equals(")") || token.equals("]")) {
+                depth--;
+            }
+        }
+        return columns > 0;
+    }
+
+    private static boolean isConstantProjection(List<String> expression) {
+        if (expression.isEmpty()) return false;
+        int end = expression.size();
+        if (end >= 2 && expression.get(end - 2).equals("AS")) {
+            end -= 2;
+        } else if (end >= 2 && isSimpleAlias(expression.get(end - 1)) && !expression.get(end - 2).equals("::")) {
+            end -= 1;
+        }
+        if (end <= 0) return false;
+        // Strip trailing ::type casts.
+        int castPos = -1;
+        for (int i = 0; i < end; i++) {
+            if (expression.get(i).equals("::")) { castPos = i; break; }
+        }
+        if (castPos == 0) return false;
+        if (castPos > 0) {
+            if (skipTypeName(expression.subList(0, end), castPos + 1) != end) {
+                // Allow chained ::type casts.
+                int pos = castPos;
+                while (pos < end && expression.get(pos).equals("::")) {
+                    pos = skipTypeName(expression.subList(0, end), pos + 1);
+                }
+                if (pos != end) return false;
+            }
+            end = castPos;
+        }
+        if (end == 1) {
+            String t = expression.getFirst();
+            if (t.equals("<literal>") || t.equals("TRUE") || t.equals("FALSE") || t.equals("NULL")) return true;
+        }
+        // Numeric literal: optional leading +/-, digits, at most one decimal point.
+        int idx = 0;
+        if (idx < end && (expression.get(idx).equals("-") || expression.get(idx).equals("+"))) idx++;
+        boolean sawDigit = false;
+        boolean sawDot = false;
+        for (; idx < end; idx++) {
+            String t = expression.get(idx);
+            if (t.length() == 1 && t.charAt(0) >= '0' && t.charAt(0) <= '9') {
+                sawDigit = true;
+            } else if (t.equals(".") && !sawDot) {
+                sawDot = true;
+            } else {
+                return false;
+            }
+        }
+        return sawDigit;
+    }
+
+    private static boolean isSimpleAlias(String token) {
+        if (token.equals("<identifier>")) return true;
+        if (token.equals("TRUE") || token.equals("FALSE") || token.equals("NULL")
+                || token.equals("<literal>") || token.equals("<parameter>")) return false;
+        return IDENTIFIER.matcher(token).matches();
+    }
 
     /** Indices of projections that guarantee a value. PostgreSQL supplies the actual column types. */
     java.util.BitSet requiredExpressions(int columnCount) {

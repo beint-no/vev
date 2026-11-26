@@ -87,4 +87,50 @@ class SqlSourceTest {
         assertFalse(parse("DELETE FROM t WHERE id = :id").customPlan());
         assertFalse(parse("WITH x AS (SELECT 1 AS id) SELECT id FROM x").customPlan());
     }
+
+    @Test void rejectsUnorderedTopLevelLimitAndFetchUnlessAllowedOrConstantProjection() {
+        var limitErr = assertThrows(IllegalArgumentException.class,
+                () -> parse("SELECT id FROM t LIMIT 10"));
+        assertTrue(limitErr.getMessage().contains("ORDER BY"), limitErr.getMessage());
+        assertTrue(limitErr.getMessage().contains("-- vev.allow: unordered-limit"), limitErr.getMessage());
+
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT id FROM t FETCH FIRST 5 ROWS ONLY"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT id FROM t FETCH NEXT 1 ROW ONLY"));
+        assertThrows(IllegalArgumentException.class, () -> parse("WITH c AS (SELECT id FROM t ORDER BY id) SELECT id FROM c LIMIT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT 1 AS ok, id FROM t LIMIT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT id FROM a UNION SELECT id FROM b LIMIT 1"));
+
+        // Deterministic top-level ORDER BY passes.
+        assertNotNull(parse("SELECT id FROM t ORDER BY id LIMIT 10"));
+        assertNotNull(parse("SELECT id FROM t ORDER BY id FETCH FIRST 5 ROWS ONLY"));
+        assertNotNull(parse("SELECT id FROM t ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"));
+        assertNotNull(parse("SELECT id FROM a UNION SELECT id FROM b ORDER BY id LIMIT 5"));
+
+        // Pure constant-literal projections (existence checks) pass without ORDER BY.
+        assertNotNull(parse("SELECT 1 AS present FROM t WHERE id = :id LIMIT 1"));
+        assertNotNull(parse("SELECT TRUE AS ok FROM t WHERE id = :id LIMIT 1 FOR UPDATE"));
+        assertNotNull(parse("SELECT 1::int AS present FROM t LIMIT 1"));
+
+        // Nested LIMIT inside subqueries or CTEs is allowed; LIMIT ALL and alias `AS limit` are allowed.
+        assertNotNull(parse("SELECT count(*) AS total FROM (SELECT 1 FROM t LIMIT 100) q"));
+        assertNotNull(parse("SELECT id FROM t WHERE id IN (SELECT id FROM u LIMIT 10)"));
+        assertNotNull(parse("SELECT id FROM t LIMIT ALL"));
+        assertNotNull(parse("SELECT id AS limit FROM t"));
+
+        // Explicit opt-in via -- vev.allow supports unordered-limit, comma lists, and multiple lines.
+        var optedIn = parse("-- vev.allow: unordered-limit\nSELECT id FROM t LIMIT 10");
+        assertTrue(optedIn.allowUnorderedLimit());
+        assertFalse(optedIn.allowBlob());
+
+        var combined = parse("-- vev.allow: blob, unordered-limit\nSELECT id FROM t LIMIT 10");
+        assertTrue(combined.allowBlob());
+        assertTrue(combined.allowUnorderedLimit());
+
+        var multiLine = parse("-- vev.allow: blob\n-- vev.allow: unordered-limit\nSELECT id FROM t LIMIT 10");
+        assertTrue(multiLine.allowBlob());
+        assertTrue(multiLine.allowUnorderedLimit());
+
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.allow: unknown\nSELECT id FROM t"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.allow:\nSELECT id FROM t"));
+    }
 }

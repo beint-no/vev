@@ -332,17 +332,13 @@ public final class TableUsage {
             }
         }
 
-        // Fixpoint reachability from queried relations/functions and ignored tables.
+        // Phase 1: Fixpoint reachability from compiled Vev queries/functions only.
         Set<Long> visitedRelations = new HashSet<>();
         Set<Long> visitedFunctions = new HashSet<>();
         Deque<Long> relationQueue = new ArrayDeque<>();
         Deque<Long> functionQueue = new ArrayDeque<>();
 
         for (Relation rel : seedRelations) {
-            Long oid = oidByRelation.get(rel);
-            if (oid != null && visitedRelations.add(oid)) relationQueue.add(oid);
-        }
-        for (Relation rel : ignoredTables) {
             Long oid = oidByRelation.get(rel);
             if (oid != null && visitedRelations.add(oid)) relationQueue.add(oid);
         }
@@ -353,6 +349,67 @@ public final class TableUsage {
         }
 
         Set<Relation> allCatalogRelations = oidByRelation.keySet();
+        expandReachability(relationQueue, functionQueue, visitedRelations, visitedFunctions,
+                relationEdges, relationsByOid, triggerFunctions, functionsByOid,
+                functionRelationDeps, functionFunctionDeps,
+                allCatalogRelations, relationsByName, allUserFunctions, functionsByName,
+                oidByRelation, oidsByFunction);
+
+        // Reject stale ignoredTables entries that are already reachable from Vev queries so allowlists only shrink.
+        List<String> staleIgnored = new ArrayList<>();
+        for (Relation rel : ignoredTables) {
+            Long oid = oidByRelation.get(rel);
+            if (oid != null && visitedRelations.contains(oid)) staleIgnored.add(rel.qualified());
+        }
+        if (!staleIgnored.isEmpty()) {
+            Collections.sort(staleIgnored);
+            throw new IllegalArgumentException("ignoredTables names table(s) already referenced by Vev queries; "
+                    + "remove them from ignoredTables: " + String.join(", ", staleIgnored));
+        }
+
+        // Phase 2: Expand from genuinely ignored tables so their triggers/views/functions mark helper tables as used.
+        for (Relation rel : ignoredTables) {
+            Long oid = oidByRelation.get(rel);
+            if (oid != null && visitedRelations.add(oid)) relationQueue.add(oid);
+        }
+        expandReachability(relationQueue, functionQueue, visitedRelations, visitedFunctions,
+                relationEdges, relationsByOid, triggerFunctions, functionsByOid,
+                functionRelationDeps, functionFunctionDeps,
+                allCatalogRelations, relationsByName, allUserFunctions, functionsByName,
+                oidByRelation, oidsByFunction);
+
+        Set<Relation> usedTables = new TreeSet<>();
+        Set<Relation> unusedTables = new TreeSet<>();
+        for (Relation table : catalogTables) {
+            if (ignoredTables.contains(table)) continue;
+            Long oid = oidByRelation.get(table);
+            if (oid != null && visitedRelations.contains(oid)) usedTables.add(table);
+            else unusedTables.add(table);
+        }
+        return new Result(
+                Collections.unmodifiableSet(catalogTables),
+                Collections.unmodifiableSet(usedTables),
+                Collections.unmodifiableSet(ignoredTables),
+                Collections.unmodifiableSet(unusedTables));
+    }
+
+    private static void expandReachability(
+            Deque<Long> relationQueue,
+            Deque<Long> functionQueue,
+            Set<Long> visitedRelations,
+            Set<Long> visitedFunctions,
+            Map<Long, Set<Long>> relationEdges,
+            Map<Long, CatalogRelation> relationsByOid,
+            Map<Long, Set<Long>> triggerFunctions,
+            Map<Long, CatalogFunction> functionsByOid,
+            Map<Long, Set<Long>> functionRelationDeps,
+            Map<Long, Set<Long>> functionFunctionDeps,
+            Set<Relation> allCatalogRelations,
+            Map<String, List<Relation>> relationsByName,
+            Set<FunctionRef> allUserFunctions,
+            Map<String, List<FunctionRef>> functionsByName,
+            Map<Relation, Long> oidByRelation,
+            Map<FunctionRef, List<Long>> oidsByFunction) {
         while (!relationQueue.isEmpty() || !functionQueue.isEmpty()) {
             while (!relationQueue.isEmpty()) {
                 long relOid = relationQueue.removeFirst();
@@ -394,20 +451,6 @@ public final class TableUsage {
                 }
             }
         }
-
-        Set<Relation> usedTables = new TreeSet<>();
-        Set<Relation> unusedTables = new TreeSet<>();
-        for (Relation table : catalogTables) {
-            if (ignoredTables.contains(table)) continue;
-            Long oid = oidByRelation.get(table);
-            if (oid != null && visitedRelations.contains(oid)) usedTables.add(table);
-            else unusedTables.add(table);
-        }
-        return new Result(
-                Collections.unmodifiableSet(catalogTables),
-                Collections.unmodifiableSet(usedTables),
-                Collections.unmodifiableSet(ignoredTables),
-                Collections.unmodifiableSet(unusedTables));
     }
 
     public static String formatReport(Result result) {
@@ -474,8 +517,10 @@ public final class TableUsage {
         Set<Relation> matched = new LinkedHashSet<>();
         for (int i = 0; i < tokens.size(); i++) {
             String keyword = tokens.get(i).keyword();
-            boolean commaList = keyword.equals("FROM") || keyword.equals("TRUNCATE");
-            boolean singleTarget = keyword.equals("JOIN") || keyword.equals("INTO")
+            boolean commaList = keyword.equals("FROM") || keyword.equals("TRUNCATE") || keyword.equals("USING");
+            boolean isDmlInto = keyword.equals("INTO") && i > 0
+                    && (tokens.get(i - 1).keyword().equals("INSERT") || tokens.get(i - 1).keyword().equals("MERGE"));
+            boolean singleTarget = keyword.equals("JOIN") || isDmlInto
                     || keyword.equals("UPDATE") || keyword.equals("TABLE");
             if (keyword.equals("REFRESH") && i + 2 < tokens.size()
                     && tokens.get(i + 1).keyword().equals("MATERIALIZED")
@@ -488,9 +533,9 @@ public final class TableUsage {
             if (!commaList && !singleTarget) continue;
             // Skip `DELETE FROM` double trigger and `INSERT INTO ...` handled cleanly; avoid `UPDATE OF col` in triggers.
             if (keyword.equals("UPDATE") && i + 1 < tokens.size() && tokens.get(i + 1).keyword().equals("OF")) continue;
-            // Function calls like `FROM unnest(...)` or `JOIN generate_series(...)` appear after FROM/JOIN,
-            // whereas `INSERT INTO table(col1, col2)` uses `(` for the target column list.
-            boolean allowFunctionCall = keyword.equals("FROM") || keyword.equals("JOIN");
+            // Function calls like `FROM unnest(...)`, `JOIN generate_series(...)`, or `USING unnest(...)` appear after
+            // FROM/JOIN/USING, whereas `INSERT INTO table(col1, col2)` uses `(` for the target column list.
+            boolean allowFunctionCall = keyword.equals("FROM") || keyword.equals("JOIN") || keyword.equals("USING");
             int j = i + 1;
             if (keyword.equals("TRUNCATE") && j < tokens.size() && tokens.get(j).keyword().equals("TABLE")) j++;
             while (j < tokens.size()) {
@@ -627,7 +672,7 @@ public final class TableUsage {
         if (i < sql.length() && sql.charAt(i) == '$') return "$$";
         if (i >= sql.length() || !isIdentStart(sql.charAt(i))) return null;
         i++;
-        while (i < sql.length() && isIdentPart(sql.charAt(i))) i++;
+        while (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) i++;
         if (i < sql.length() && sql.charAt(i) == '$') return sql.substring(start, i + 1);
         return null;
     }
