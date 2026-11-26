@@ -324,6 +324,112 @@ class PluginTest {
         assertTrue(runner.withArguments("check", "--console=plain").build().getOutput().contains("Reusing configuration cache"));
     }
 
+    @Test void verifyTableUsageDetectsUnusedTablesAcrossModules() throws Exception {
+        String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("settings.gradle.kts"),
+                "rootProject.name = \"consumer\"\ninclude(\"first\", \"second\", \"app\")\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
+                subprojects {
+                    apply(plugin = "org.jetbrains.kotlin.jvm")
+                    apply(plugin = "no.beint.vev")
+                    repositories { maven { url = uri("%s") }; mavenCentral() }
+                    extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> {
+                        jvmToolchain(27)
+                        compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }
+                    }
+                    tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                        packageName.set("sample." + project.name)
+                        migrations.set(rootProject.layout.projectDirectory.dir("migration"))
+                        schemaCacheDir.set("%s")
+                    }
+                }
+                """.formatted(repository, cacheDir));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("migration")).resolve("V1__schema.sql"), """
+                CREATE SCHEMA external_svc;
+                CREATE TABLE alpha(id int PRIMARY KEY, name text NOT NULL);
+                CREATE TABLE beta(id int PRIMARY KEY, label text NOT NULL);
+                CREATE TABLE trigger_audit(id int PRIMARY KEY);
+                CREATE FUNCTION record_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO trigger_audit(id) VALUES (NEW.id) ON CONFLICT DO NOTHING;
+                    RETURN NEW;
+                END;
+                $$;
+                CREATE TRIGGER alpha_audit AFTER INSERT ON alpha FOR EACH ROW EXECUTE FUNCTION record_audit();
+                CREATE TABLE obsolete_table(id int PRIMARY KEY);
+                CREATE TABLE external_svc.ignored_schema_table(id int PRIMARY KEY);
+                """);
+        Files.writeString(Files.createDirectories(project.resolve("first/src/main/sql")).resolve("findAlpha.sql"),
+                "-- vev.name: findAlpha :optional\n-- vev.scope: global\nSELECT name FROM alpha WHERE id=:id;");
+        Files.writeString(Files.createDirectories(project.resolve("first/src/main/kotlin")).resolve("First.kt"),
+                "package sample\nimport no.beint.vev.ReadScope\nfun alpha(tx: ReadScope, id: Int): String? = sample.first.Queries.findAlpha(tx, id)?.name\n");
+        Files.writeString(Files.createDirectories(project.resolve("second/src/main/sql")).resolve("findBeta.sql"),
+                "-- vev.name: findBeta :optional\n-- vev.scope: global\nSELECT label FROM beta WHERE id=:id;");
+        Files.writeString(Files.createDirectories(project.resolve("second/src/main/kotlin")).resolve("Second.kt"),
+                "package sample\nimport no.beint.vev.ReadScope\nfun beta(tx: ReadScope, id: Int): String? = sample.second.Queries.findBeta(tx, id)?.label\n");
+        Files.writeString(Files.createDirectories(project.resolve("app/src/main/sql")).resolve("ping.sql"),
+                "-- vev.name: ping :one\n-- vev.scope: global\nSELECT 1 AS ok;");
+        Files.writeString(Files.createDirectories(project.resolve("app/src/main/kotlin")).resolve("App.kt"),
+                "package sample\nimport no.beint.vev.ReadScope\nfun ping(tx: ReadScope): Int? = sample.app.Queries.ping(tx).ok\n");
+        Path appBuild = project.resolve("app/build.gradle.kts");
+        String baseAppBuild = """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    manifests.from(provider {
+                        rootProject.subprojects
+                            .filter { it.plugins.hasPlugin("no.beint.vev") }
+                            .map { it.tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev").flatMap { t -> t.relationsManifest } }
+                    })
+                }
+                tasks.named("check") {
+                    dependsOn(tasks.named("verifyVevTableUsage"))
+                }
+                """;
+        Files.writeString(appBuild, baseAppBuild);
+
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        // Individual module checks must still pass without disabling verifyVevTableUsage.
+        assertTrue(runner.withArguments(":first:check", "--console=plain").build().getOutput().contains("BUILD SUCCESSFUL"));
+
+        // Top-level app check flags obsolete_table while recognizing alpha, beta, trigger_audit, and skipping external_svc.
+        var failure = runner.withArguments(":app:check", "--console=plain").buildAndFail();
+        String failOut = failure.getOutput();
+        assertTrue(failOut.contains("public.obsolete_table"), failOut);
+        assertFalse(failOut.contains("public.alpha"), failOut);
+        assertFalse(failOut.contains("public.beta"), failOut);
+        assertFalse(failOut.contains("public.trigger_audit"), failOut);
+        assertFalse(failOut.contains("ignored_schema_table"), failOut);
+
+        // Ignoring obsolete_table lets :app:check pass, and a repeat run is UP-TO-DATE with configuration cache reuse.
+        Files.writeString(appBuild, baseAppBuild + """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    ignoredTables.add("obsolete_table")
+                }
+                """);
+        var pass = runner.withArguments(":app:check", "--console=plain").build();
+        assertTrue(pass.getOutput().contains("BUILD SUCCESSFUL"), pass.getOutput());
+        String report = Files.readString(project.resolve("app/build/reports/vev/table-usage.txt"));
+        assertTrue(report.contains("tables=4"), report);
+        assertTrue(report.contains("used=3"), report);
+        assertTrue(report.contains("ignored=1"), report);
+        assertTrue(report.contains("unused=\n"), report);
+
+        var cached = runner.withArguments(":app:check", "--console=plain").build();
+        assertTrue(cached.getOutput().contains("Reusing configuration cache"), cached.getOutput());
+        assertTrue(cached.getOutput().contains(":app:verifyVevTableUsage UP-TO-DATE"), cached.getOutput());
+
+        // Stale ignoredTables entry fails fast.
+        Files.writeString(appBuild, baseAppBuild + """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    ignoredTables.addAll(listOf("obsolete_table", "nonexistent_table"))
+                }
+                """);
+        var stale = runner.withArguments(":app:verifyVevTableUsage", "--console=plain").buildAndFail();
+        assertTrue(stale.getOutput().contains("public.nonexistent_table"), stale.getOutput());
+    }
+
     private static int count(String text, String needle) {
         int total = 0;
         for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) total++;

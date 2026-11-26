@@ -15,6 +15,7 @@ import javax.inject.Inject;
 import org.gradle.api.DefaultTask;
 import org.gradle.api.file.ConfigurableFileCollection;
 import org.gradle.api.file.DirectoryProperty;
+import org.gradle.api.file.RegularFileProperty;
 import org.gradle.api.provider.Property;
 import org.gradle.api.services.ServiceReference;
 import org.gradle.api.tasks.Classpath;
@@ -22,6 +23,7 @@ import org.gradle.api.tasks.Input;
 import org.gradle.api.tasks.InputDirectory;
 import org.gradle.api.tasks.Internal;
 import org.gradle.api.tasks.OutputDirectory;
+import org.gradle.api.tasks.OutputFile;
 import org.gradle.api.tasks.PathSensitive;
 import org.gradle.api.tasks.PathSensitivity;
 import org.gradle.api.tasks.TaskAction;
@@ -35,6 +37,7 @@ public abstract class GenerateSql extends DefaultTask {
     @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getMigrations();
     @org.gradle.api.tasks.Optional @InputDirectory @PathSensitive(PathSensitivity.RELATIVE) public abstract DirectoryProperty getFixtures();
     @OutputDirectory public abstract DirectoryProperty getOutput();
+    @OutputFile public abstract RegularFileProperty getRelationsManifest();
     @Input public abstract Property<String> getPackageName();
     @Input public abstract Property<String> getClassName();
     @Input public abstract Property<String> getPostgresBin();
@@ -46,7 +49,10 @@ public abstract class GenerateSql extends DefaultTask {
 
     @TaskAction public void generate() {
         VevCluster cluster = getCluster().get();
-        String database = "vev_" + schemaDigest();
+        String database = "vev_" + schemaDigest(
+                getPostgresVersion().get(),
+                getMigrations().get().getAsFile().toPath(),
+                getFixtures().isPresent() ? getFixtures().get().getAsFile().toPath() : null);
         cluster.withSchema(database, getPostgresBin().get(), getSchemaCacheDir().getOrElse(""), (details, name) -> compiler(List.of(
                 "--mode", "migrate",
                 "--migrations", getMigrations().get().getAsFile().toString(),
@@ -57,6 +63,7 @@ public abstract class GenerateSql extends DefaultTask {
                 "--mode", "compile",
                 "--queries", getQueries().get().getAsFile().toString(),
                 "--output", getOutput().get().getAsFile().toString(),
+                "--relations-manifest", getRelationsManifest().get().getAsFile().toString(),
                 "--package", getPackageName().get(), "--class", getClassName().get(),
                 "--url", details.url(), "--user", details.user(), "--password", details.password(),
                 "--database", database));
@@ -74,12 +81,12 @@ public abstract class GenerateSql extends DefaultTask {
      * Names the build database after the migration content, so unrelated schemas never share one
      * and an edited migration is replayed instead of silently reused.
      */
-    private String schemaDigest() {
+    static String schemaDigest(String postgresVersion, Path migrations, Path fixtures) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            hashField(digest, getPostgresVersion().get().getBytes(StandardCharsets.UTF_8));
-            hashTree(digest, getMigrations().get().getAsFile().toPath());
-            if (getFixtures().isPresent()) hashTree(digest, getFixtures().get().getAsFile().toPath());
+            hashField(digest, postgresVersion.getBytes(StandardCharsets.UTF_8));
+            hashTree(digest, migrations);
+            if (fixtures != null) hashTree(digest, fixtures);
             return HexFormat.of().formatHex(digest.digest()).substring(0, 24);
         } catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
         catch (IOException failure) { throw new UncheckedIOException("Vev could not read its migrations", failure); }

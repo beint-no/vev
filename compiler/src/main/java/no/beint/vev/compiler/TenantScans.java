@@ -23,6 +23,15 @@ final class TenantScans {
     private TenantScans() {}
 
     record Scan(String relation, String alias, List<String> conjuncts) {}
+    record Analysis(boolean writes, Set<TableUsage.Relation> relations) {}
+
+    private static final String ALL_RELATIONS = """
+            SELECT DISTINCT n->>'Schema', n->>'Relation Name'
+            FROM jsonb_path_query(?::jsonb, 'strict $.**') n
+            WHERE jsonb_typeof(n) = 'object'
+              AND n->>'Schema' IS NOT NULL
+              AND n->>'Relation Name' IS NOT NULL
+            """;
 
     private static final String SCANS = """
             SELECT quote_ident(n->>'Schema') || '.' || quote_ident(n->>'Relation Name'), quote_ident(n->>'Alias'),
@@ -72,14 +81,14 @@ final class TenantScans {
             """;
 
     /**
-     * Proves tenant scan/mutation restrictions for tenant queries and classifies whether the query
-     * writes or acquires row/advisory locks (requiring a {@code WriteScope} / {@code TenantWriteScope}).
+     * Proves tenant scan/mutation restrictions for tenant queries, classifies whether the query
+     * writes or acquires row/advisory locks (requiring a {@code WriteScope} / {@code TenantWriteScope}),
+     * and collects every relation referenced in PostgreSQL's plan.
      */
-    static boolean analyze(Connection connection, SqlSource source) throws SQLException {
+    static Analysis analyze(Connection connection, SqlSource source) throws SQLException {
         boolean writes = Set.of("exec", "void").contains(source.cardinality())
                 || source.forceWrite()
                 || source.hasMutatingOrLockingSyntax();
-        if (source.tenant() == null && writes) return true;
         String plan;
         // The simple protocol leaves $n to EXPLAIN; the extended protocol would expect bound values.
         try (var statement = connection.createStatement().unwrap(org.postgresql.core.BaseStatement.class)) {
@@ -90,6 +99,13 @@ final class TenantScans {
                 plan = result.getString(1);
             }
         }
+        Set<TableUsage.Relation> relations = new java.util.TreeSet<>();
+        try (var statement = connection.prepareStatement(ALL_RELATIONS)) {
+            statement.setString(1, plan);
+            try (var result = statement.executeQuery()) {
+                while (result.next()) relations.add(new TableUsage.Relation(result.getString(1), result.getString(2)));
+            }
+        }
         if (!writes) {
             try (var statement = connection.prepareStatement(HAS_WRITE_OR_LOCK)) {
                 statement.setString(1, plan);
@@ -98,7 +114,7 @@ final class TenantScans {
                 }
             }
         }
-        if (source.tenant() == null) return writes;
+        if (source.tenant() == null) return new Analysis(writes, Set.copyOf(relations));
         List<Scan> scans = new ArrayList<>();
         try (var statement = connection.prepareStatement(SCANS)) {
             statement.setString(1, plan);
@@ -164,7 +180,7 @@ final class TenantScans {
                 }
             }
         }
-        return writes;
+        return new Analysis(writes, Set.copyOf(relations));
     }
 
     /**

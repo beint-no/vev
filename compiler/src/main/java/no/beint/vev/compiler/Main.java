@@ -1,22 +1,28 @@
 package no.beint.vev.compiler;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /**
  * Command-line entry point used by Gradle and isolated consumers.
  *
- * <p>{@code standalone} owns a cluster for one module. {@code migrate} and {@code compile} split
- * that work so one build can migrate once and describe every module against the same schema.
+ * <p>{@code standalone} owns a cluster for one module. {@code migrate}, {@code compile}, and {@code verify-tables}
+ * split that work so one build can migrate once and describe or verify every module against the same schema.
  */
 public final class Main {
     private Main() {}
 
     private static final Set<String> OPTIONS = Set.of("--queries", "--migrations", "--output", "--package", "--class",
-            "--postgres-bin", "--fixtures", "--mode", "--url", "--user", "--password", "--database");
+            "--postgres-bin", "--fixtures", "--mode", "--url", "--user", "--password", "--database",
+            "--relations-manifest", "--manifests-file", "--schemas", "--ignore-tables", "--report");
 
     public static void main(String[] args) throws Exception {
         if (Runtime.version().feature() < 27) throw new IllegalStateException("Vev compiler requires JDK 27 or newer");
@@ -31,7 +37,8 @@ public final class Main {
                 case "standalone" -> standalone(options);
                 case "migrate" -> migrate(options);
                 case "compile" -> compile(options);
-                default -> throw new IllegalArgumentException("Use --mode standalone, migrate or compile");
+                case "verify-tables" -> verifyTables(options);
+                default -> throw new IllegalArgumentException("Use --mode standalone, migrate, compile or verify-tables");
             }
         } finally {
             // DriverManager otherwise pins Gradle's isolated compiler classloader after the build.
@@ -80,12 +87,46 @@ public final class Main {
         }
     }
 
+    /** Verify that migrated tables in the configured schemas are referenced by the compiled manifests. */
+    private static void verifyTables(Map<String, String> options) throws Exception {
+        require(options, "--manifests-file", "--schemas", "--url", "--user", "--password", "--database");
+        List<Path> manifests = Files.readAllLines(Path.of(options.get("--manifests-file")), StandardCharsets.UTF_8)
+                .stream().filter(line -> !line.isBlank()).map(Path::of).toList();
+        Set<String> schemas = csvSet(options.get("--schemas"));
+        Set<String> ignored = csvSet(options.getOrDefault("--ignore-tables", ""));
+        String url = databaseUrl(options.get("--url"), options.get("--database"));
+        TableUsage.Result result;
+        try (Connection connection = Postgres.connect(url, options.get("--user"), options.get("--password"))) {
+            connection.setReadOnly(true);
+            connection.setAutoCommit(false);
+            result = TableUsage.verify(connection, manifests, schemas, ignored);
+            connection.rollback();
+        }
+        if (options.containsKey("--report")) {
+            Path report = Path.of(options.get("--report"));
+            if (report.getParent() != null) Files.createDirectories(report.getParent());
+            Files.writeString(report, TableUsage.formatReport(result), StandardCharsets.UTF_8);
+        }
+        if (!result.unusedTables().isEmpty()) {
+            throw new IllegalArgumentException(TableUsage.formatFailure(result));
+        }
+    }
+
     private static void describe(Connection connection, Map<String, String> options) throws Exception {
         connection.setReadOnly(true);
         connection.setAutoCommit(false);
+        Path relationsManifest = options.containsKey("--relations-manifest") ? Path.of(options.get("--relations-manifest")) : null;
         QueryCompiler.compile(connection, Path.of(options.get("--queries")), Path.of(options.get("--output")),
-                options.get("--package"), options.get("--class"));
+                options.get("--package"), options.get("--class"), relationsManifest);
         connection.rollback();
+    }
+
+    private static Set<String> csvSet(String value) {
+        if (value == null || value.isBlank()) return Set.of();
+        return Arrays.stream(value.split(","))
+                .map(String::strip)
+                .filter(s -> !s.isEmpty())
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
     }
 
     private static Path fixtures(Map<String, String> options) {

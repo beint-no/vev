@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.4.0"
+    id("no.beint.vev") version "5.5.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -217,6 +217,13 @@ switches, `@Transactional` annotations, and outbound HTTP/mail I/O inside transa
 top-level application module with all subprojects' `classesDirs` to verify boundaries across module seams.
 Generation and compilation accept unused queries, so SQL can be written and generated before the code that
 calls it. Delete the SQL file of a query that is no longer called.
+
+`verifyVevTableUsage` checks that every migrated table in the configured `schemas` (default `public`, excluding
+extension-owned tables, child partitions, and migration history tables) is reachable from compiled Vev queries
+(directly, via views/materialized views, triggers, or user-defined functions). It is opt-in so multi-module
+builds sharing one migration directory can aggregate every module's `generateVev.relationsManifest` on the
+top-level application module and wire it into `check`, with `ignoredTables` for intentional exceptions (external
+callers or staged drops).
 
 A failing build reports every rejected query file at once and writes no generated code.
 Application statements are described, not executed. Runtime constraints, permissions,
