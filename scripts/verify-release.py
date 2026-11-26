@@ -61,4 +61,4 @@ fun main() {
     java.mkdir(parents=True)
     (java / "JavaConsumer.java").write_text("package sample; import no.beint.vev.TenantReadScope; public class JavaConsumer { public static String name(TenantReadScope tx) { return Queries.find(tx, 1).getName(); } }")
     for invocation in range(2):
-        subprocess.run([str(root / "gradlew"), "check", "run", "--console=plain", "--configuration-cache"], cwd=consumer, check=True)
+        subprocess.run([str(root / "gradlew"), "check", "verifyVevTableUsage", "run", "--console=plain", "--configuration-cache"], cwd=consumer, check=True)

@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.4.0"
+    id("no.beint.vev") version "5.5.0"
 }
 kotlin {
     jvmToolchain(27)
@@ -133,11 +133,11 @@ fail the build, and so does a directive without the `vev.` prefix.
 | `-- vev.scope: global` | No implicit tenant bind |
 | `-- vev.access: write` | Require a write scope even for a `SELECT` calling a custom mutating function |
 | `-- vev.nullable: name, note` | Nullable inputs |
-| `-- vev.notnull: id, total` | Assert and check non-null output values |
+| `-- vev.notnull: id, total` | Assert and check non-null output values (redundant assertions fail the build) |
 | `-- vev.type: id CustomerId` | Generate a scalar Kotlin value class |
 | `-- vev.enum: status example.Status` | Map a textual column/input to an existing Kotlin enum |
 | `-- vev.plan: custom` | Plan every execution with its parameter values (see optional filters) |
-| `-- vev.allow: blob` | Opt in to selecting an unbounded `bytea` column in a `:many` or wide (`> 8` columns) query |
+| `-- vev.allow: blob, unordered-limit` | Opt in to unbounded `bytea` columns in `:many`/wide queries (`blob`) or top-level `LIMIT`/`FETCH` without `ORDER BY` (`unordered-limit`) |
 
 Parameters are bound values. Cast ambiguous inputs, such as `:name::text IS NULL`; a parameter after
 `->` or `->>` must be cast (`:index::int` or `:key::text`) because PostgreSQL otherwise picks the text-key operator,
@@ -217,6 +217,13 @@ switches, `@Transactional` annotations, and outbound HTTP/mail I/O inside transa
 top-level application module with all subprojects' `classesDirs` to verify boundaries across module seams.
 Generation and compilation accept unused queries, so SQL can be written and generated before the code that
 calls it. Delete the SQL file of a query that is no longer called.
+
+`verifyVevTableUsage` checks that every migrated table in the configured `schemas` (default `public`, excluding
+extension-owned tables, child partitions, and migration history tables) is reachable from compiled Vev queries
+(directly, via views/materialized views, triggers, or user-defined functions). It is opt-in so multi-module
+builds sharing one migration directory can aggregate every module's `generateVev.relationsManifest` on the
+top-level application module and wire it into `check`, with `ignoredTables` for intentional exceptions (external
+callers or staged drops — entries that no longer exist or are already referenced by Vev queries fail the build).
 
 A failing build reports every rejected query file at once and writes no generated code.
 Application statements are described, not executed. Runtime constraints, permissions,

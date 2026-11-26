@@ -23,10 +23,15 @@ public final class QueryCompiler {
             return declared + (nullable ? "?" : "");
         }
     }
-    record Query(SqlSource source, List<Value> parameters, List<Value> columns, boolean writes) {}
+    record Query(SqlSource source, List<Value> parameters, List<Value> columns, boolean writes, Set<TableUsage.Relation> relations) {}
 
     public static void compile(Connection connection, Path queries, Path output, String packageName, String className)
             throws SQLException, IOException {
+        compile(connection, queries, output, packageName, className, null);
+    }
+
+    public static void compile(Connection connection, Path queries, Path output, String packageName, String className,
+            Path relationsManifest) throws SQLException, IOException {
         if (connection.getMetaData().getDatabaseMajorVersion() != 19
                 || !connection.getMetaData().getDatabaseProductName().equals("PostgreSQL")) {
             throw new IllegalArgumentException("Vev compiler requires PostgreSQL 19");
@@ -115,6 +120,20 @@ public final class QueryCompiler {
                 + " " + q.source.name() + " " + q.source.cardinality() + " " + (q.writes ? "write" : "read") + " " + digest(q.source.sql()))
                 .collect(java.util.stream.Collectors.joining("\n"));
         Files.writeString(output.resolve("queries.sha256"), manifest + "\n", StandardCharsets.UTF_8);
+        if (relationsManifest != null) {
+            Set<TableUsage.Relation> usedRelations = new java.util.TreeSet<>();
+            Set<TableUsage.FunctionRef> usedFunctions = new java.util.TreeSet<>();
+            Set<TableUsage.FunctionRef> catalogFunctions = TableUsage.userFunctions(connection);
+            Set<TableUsage.Relation> emptyPartitioned = TableUsage.emptyPartitionedTables(connection);
+            for (Query query : compiled) {
+                usedRelations.addAll(query.relations);
+                usedFunctions.addAll(TableUsage.referencedFunctions(query.source.sql(), catalogFunctions));
+                if (!emptyPartitioned.isEmpty()) {
+                    usedRelations.addAll(TableUsage.referencedRelationsInSql(query.source.sql(), emptyPartitioned));
+                }
+            }
+            TableUsage.writeManifest(relationsManifest, usedRelations, usedFunctions);
+        }
     }
 
     static Query describe(Connection connection, SqlSource source) throws SQLException {
@@ -145,6 +164,7 @@ public final class QueryCompiler {
             }
             List<Value> columns = new ArrayList<>();
             HashSet<String> labels = new HashSet<>();
+            List<String> redundantNotNull = new ArrayList<>();
             if (result != null) {
                 int columnCount = result.getColumnCount();
                 var required = source.requiredExpressions(columnCount);
@@ -157,9 +177,12 @@ public final class QueryCompiler {
                     String name = SqlSource.identifier(source.path(), label);
                     if (!labels.add(KotlinWriter.camel(name))) throw SqlSource.error(source.path(), "Duplicate result property: " + name + "; give columns distinct aliases");
                     PgType type = PgType.of(source.path(), result.getColumnTypeName(i));
-                    boolean nullable = !source.notNull().contains(name)
-                            && !required.get(i - 1)
-                            && (!direct || result.isNullable(i) != ResultSetMetaData.columnNoNulls);
+                    boolean guaranteedNonNull = required.get(i - 1)
+                            || (direct && result.isNullable(i) == ResultSetMetaData.columnNoNulls);
+                    if (source.notNull().contains(name) && guaranteedNonNull) {
+                        redundantNotNull.add(name);
+                    }
+                    boolean nullable = !source.notNull().contains(name) && !guaranteedNonNull;
                     columns.add(new Value(name, type, nullable, source.domains().get(name), enumType(source, name, type)));
                 }
             }
@@ -171,6 +194,10 @@ public final class QueryCompiler {
             }
             for (String name : source.notNull()) {
                 if (columns.stream().noneMatch(c -> c.name.equals(name))) throw SqlSource.error(source.path(), "notnull names an unknown result column: " + name);
+            }
+            if (!redundantNotNull.isEmpty()) {
+                throw SqlSource.error(source.path(), "Redundant -- vev.notnull for column(s) already guaranteed non-null: "
+                        + String.join(", ", redundantNotNull) + "; remove them from -- vev.notnull");
             }
             boolean valueless = !columns.isEmpty() && columns.stream().allMatch(c -> c.type.valueless());
             if (source.cardinality().equals("void")) {
@@ -189,8 +216,8 @@ public final class QueryCompiler {
                     checkUnboundedByteaColumns(connection, source, result, columns);
                 }
             }
-            boolean writes = TenantScans.analyze(connection, source);
-            return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns), writes);
+            TenantScans.Analysis analysis = TenantScans.analyze(connection, source);
+            return new Query(source, List.copyOf(parameters.values()), List.copyOf(columns), analysis.writes(), analysis.relations());
         } catch (SQLException exception) {
             throw new SQLException(source.path() + ": PostgreSQL rejected query " + source.name() + " [SQLSTATE " + exception.getSQLState() + "]: " + exception.getMessage(), exception.getSQLState(), exception);
         }

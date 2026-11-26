@@ -2,15 +2,27 @@ package no.beint.vev.gradle;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.classfile.AnnotationElement;
+import java.lang.classfile.AnnotationValue;
 import java.lang.classfile.Attributes;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.CodeElement;
 import java.lang.classfile.Opcode;
 import java.lang.classfile.instruction.BranchInstruction;
+import java.lang.classfile.instruction.ConstantInstruction;
+import java.lang.classfile.instruction.FieldInstruction;
 import java.lang.classfile.instruction.InvokeDynamicInstruction;
 import java.lang.classfile.instruction.InvokeInstruction;
+import java.lang.classfile.instruction.LabelTarget;
+import java.lang.classfile.instruction.LoadInstruction;
+import java.lang.classfile.instruction.LocalVariable;
+import java.lang.classfile.instruction.NewObjectInstruction;
 import java.lang.classfile.instruction.ReturnInstruction;
+import java.lang.classfile.instruction.StoreInstruction;
+import java.lang.classfile.instruction.TypeCheckInstruction;
+import java.lang.constant.ClassDesc;
 import java.lang.constant.DirectMethodHandleDesc;
+import java.lang.reflect.AccessFlag;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,9 +75,10 @@ import org.gradle.api.tasks.TaskAction;
  *       method carries {@code @Transactional}.</li>
  *   <li>{@code EXTERNAL-IO-IN-TX}: When {@code forbidExternalIoInTransaction} is enabled (default), no active
  *       transaction ({@code read*}/{@code write*}/{@code readNew}/{@code writeNew}) transitively invokes outbound
- *       HTTP or mail I/O (Spring {@code RestClient}/{@code RestTemplate}/{@code WebClient}/{@code @HttpExchange},
- *       JDK {@code HttpClient}/{@code URL.openConnection}/{@code HttpURLConnection}, OkHttp, Apache HttpClient,
- *       Jakarta Mail) or any method configured in {@code forbiddenInTransaction}.</li>
+ *       HTTP, GraphQL, socket/TLS, DNS, or mail I/O (Spring {@code RestClient}/{@code RestTemplate}/{@code WebClient}/
+ *       {@code @HttpExchange}, JDK {@code HttpClient}/{@code URL.openConnection}/{@code HttpURLConnection}/
+ *       {@code Socket}/{@code SSLSocket}/{@code SSLSocketFactory}, OkHttp, Apache HttpClient, Apollo GraphQL,
+ *       dnsjava {@code Lookup}, Jakarta Mail) or any method configured in {@code forbiddenInTransaction}.</li>
  * </ol>
  */
 @CacheableTask
@@ -100,6 +113,17 @@ public abstract class VerifyCallGraph extends DefaultTask {
             "Lorg/springframework/transaction/annotation/Transactional;",
             "Ljakarta/transaction/Transactional;");
     private static final String ASYNC_ANNOTATION = "Lorg/springframework/scheduling/annotation/Async;";
+    private static final String EVENT_LISTENER_ANNOTATION = "Lorg/springframework/context/event/EventListener;";
+    private static final String TRANSACTIONAL_EVENT_LISTENER_ANNOTATION =
+            "Lorg/springframework/transaction/event/TransactionalEventListener;";
+    private static final Set<String> APPLICATION_EVENT_PUBLISHERS = Set.of(
+            "org/springframework/context/ApplicationEventPublisher",
+            "org/springframework/context/ApplicationContext",
+            "org/springframework/context/ConfigurableApplicationContext",
+            "org/springframework/web/context/WebApplicationContext");
+    private static final Set<String> SYNC_JAVA_UTIL_LAMBDA_METHODS = Set.of(
+            "forEach", "removeIf", "compute", "computeIfAbsent", "computeIfPresent", "merge",
+            "ifPresent", "ifPresentOrElse");
     private static final String SPRING_HTTP_EXCHANGE_PREFIX = "Lorg/springframework/web/service/annotation/";
     private static final Map<String, Set<String>> BUILTIN_EXTERNAL_IO_SINKS = Map.ofEntries(
             Map.entry("org/springframework/web/client/RestClient$ResponseSpec", Set.of("body", "toEntity", "toBodilessEntity")),
@@ -119,12 +143,21 @@ public abstract class VerifyCallGraph extends DefaultTask {
             Map.entry("okhttp3/Call", Set.of("execute", "enqueue")),
             Map.entry("org/apache/hc/client5/http/classic/HttpClient", Set.of("execute")),
             Map.entry("org/apache/http/client/HttpClient", Set.of("execute")),
-            Map.entry("jakarta/mail/Transport", Set.of("send", "sendMessage"))
+            Map.entry("jakarta/mail/Transport", Set.of("send", "sendMessage")),
+            Map.entry("com/apollographql/apollo/ApolloCall", Set.of("execute", "executeV3")),
+            Map.entry("java/net/Socket", Set.of("connect")),
+            Map.entry("javax/net/ssl/SSLSocket", Set.of("startHandshake")),
+            Map.entry("javax/net/ssl/SSLSocketFactory", Set.of("createSocket")),
+            Map.entry("org/xbill/DNS/Lookup", Set.of("run"))
     );
 
     private record MethodKey(String owner, String name, String desc) {
         String shortName() { return owner.replace('/', '.') + "." + name; }
     }
+
+    private record PendingLambda(MethodKey target, String indyDesc) {}
+    private record PublishedEvent(MethodKey caller, String eventType, boolean earlyReturnIfReadOnly) {}
+    private record RunBlockingCall(MethodKey caller, String suspendLambdaOwner, boolean earlyReturnIfReadOnly) {}
 
     @InputFiles @IgnoreEmptyDirectories @PathSensitive(PathSensitivity.RELATIVE)
     public abstract ConfigurableFileCollection getClasses();
@@ -184,7 +217,12 @@ public abstract class VerifyCallGraph extends DefaultTask {
         Map<MethodKey, List<String>> tenantLambdas = new LinkedHashMap<>();
         Set<MethodKey> entryPointMethods = new LinkedHashSet<>();
         Set<MethodKey> asyncMethods = new HashSet<>();
+        Set<MethodKey> transactionalEventListeners = new HashSet<>();
+        Map<String, Set<MethodKey>> eventListeners = new HashMap<>();
+        List<PublishedEvent> publishedEvents = new ArrayList<>();
+        List<RunBlockingCall> runBlockingCalls = new ArrayList<>();
         Map<String, Set<String>> subtypes = new HashMap<>();
+        Map<String, Set<String>> supertypes = new HashMap<>();
         Set<MethodKey> allMethods = new HashSet<>();
         Set<String> escapedScopes = new TreeSet<>();
         Set<String> transactionalUses = new TreeSet<>();
@@ -215,10 +253,14 @@ public abstract class VerifyCallGraph extends DefaultTask {
 
                     model.superclass().ifPresent(sc -> {
                         String sup = sc.asInternalName();
+                        if (!sup.equals("java/lang/Object")) {
+                            supertypes.computeIfAbsent(owner, k -> new HashSet<>()).add(sup);
+                        }
                         if (matchesPrefix(sup, prefixes)) subtypes.computeIfAbsent(sup, k -> new HashSet<>()).add(owner);
                     });
                     for (var iface : model.interfaces()) {
                         String iname = iface.asInternalName();
+                        supertypes.computeIfAbsent(owner, k -> new HashSet<>()).add(iname);
                         if (matchesPrefix(iname, prefixes)) subtypes.computeIfAbsent(iname, k -> new HashSet<>()).add(owner);
                     }
 
@@ -237,6 +279,12 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     transactionalUses.add(mk.shortName());
                                 } else if (ASYNC_ANNOTATION.equals(cname)) {
                                     asyncMethods.add(mk);
+                                } else if (TRANSACTIONAL_EVENT_LISTENER_ANNOTATION.equals(cname)) {
+                                    transactionalEventListeners.add(mk);
+                                } else if (EVENT_LISTENER_ANNOTATION.equals(cname)) {
+                                    for (String eventType : extractEventListenerTypes(method.methodTypeSymbol(), ann.elements())) {
+                                        eventListeners.computeIfAbsent(eventType, k -> new HashSet<>()).add(mk);
+                                    }
                                 } else if (forbidExternalIo && cname.startsWith(SPRING_HTTP_EXCHANGE_PREFIX) && cname.endsWith("Exchange;")) {
                                     directExternalIo.computeIfAbsent(mk, k -> new HashSet<>()).add("@HttpExchange(" + mk.shortName() + ")");
                                 }
@@ -248,22 +296,88 @@ public abstract class VerifyCallGraph extends DefaultTask {
                         List<CodeElement> elements = codeOpt.get().elementList();
                         boolean earlyReturnIfReadOnly = hasEarlyReturnWhenNotInWriteTransaction(elements);
 
-                        MethodKey pendingLambda = null;
-                        String pendingLambdaIndyDesc = null;
-                        for (var el : elements) {
+                        Map<Integer, String> localTypes = initialLocalTypes(owner, method.flags().has(AccessFlag.STATIC), method.methodTypeSymbol());
+                        String lastRefType = null;
+                        List<PendingLambda> pendingLambdas = new ArrayList<>();
+                        String pendingSuspendLambdaOwner = null;
+                        for (int idx = 0; idx < elements.size(); idx++) {
+                            var el = elements.get(idx);
+                            if (el instanceof LocalVariable lv) {
+                                String lvType = descriptorToInternalName(lv.type().stringValue());
+                                if (lvType != null) localTypes.putIfAbsent(lv.slot(), lvType);
+                                continue;
+                            }
+                            if (el instanceof LabelTarget) {
+                                lastRefType = null;
+                                continue;
+                            }
+                            if (el instanceof NewObjectInstruction newObj) {
+                                lastRefType = newObj.className().asInternalName();
+                                continue;
+                            }
+                            if (el instanceof TypeCheckInstruction tc) {
+                                lastRefType = tc.opcode() == Opcode.CHECKCAST ? tc.type().asInternalName() : null;
+                                continue;
+                            }
+                            if (el instanceof FieldInstruction fi) {
+                                Opcode op = fi.opcode();
+                                if (op == Opcode.GETFIELD || op == Opcode.GETSTATIC) {
+                                    lastRefType = descriptorToInternalName(fi.type().stringValue());
+                                }
+                                continue;
+                            }
+                            if (el instanceof LoadInstruction li) {
+                                if (li.opcode() == Opcode.ALOAD || li.opcode() == Opcode.ALOAD_0 || li.opcode() == Opcode.ALOAD_1
+                                        || li.opcode() == Opcode.ALOAD_2 || li.opcode() == Opcode.ALOAD_3 || li.opcode() == Opcode.ALOAD_W) {
+                                    lastRefType = localTypes.get(li.slot());
+                                }
+                                continue;
+                            }
+                            if (el instanceof StoreInstruction si) {
+                                if (si.opcode() == Opcode.ASTORE || si.opcode() == Opcode.ASTORE_0 || si.opcode() == Opcode.ASTORE_1
+                                        || si.opcode() == Opcode.ASTORE_2 || si.opcode() == Opcode.ASTORE_3 || si.opcode() == Opcode.ASTORE_W) {
+                                    if (lastRefType != null) localTypes.put(si.slot(), lastRefType);
+                                    else localTypes.remove(si.slot());
+                                }
+                                continue;
+                            }
+                            if (el instanceof ConstantInstruction ci) {
+                                if (ci.opcode() == Opcode.ACONST_NULL) {
+                                    lastRefType = null;
+                                } else if (!isNextKotlinNullCheck(elements, idx)) {
+                                    lastRefType = null;
+                                }
+                                continue;
+                            }
                             if (el instanceof InvokeDynamicInstruction indy) {
-                                pendingLambdaIndyDesc = indy.typeSymbol().descriptorString();
+                                String indyDesc = indy.typeSymbol().descriptorString();
                                 for (var arg : indy.bootstrapArgs()) {
                                     if (arg instanceof DirectMethodHandleDesc dmh) {
                                         String own = dmh.owner().descriptorString();
                                         if (own.startsWith("L") && own.endsWith(";")) own = own.substring(1, own.length() - 1);
-                                        pendingLambda = new MethodKey(own, dmh.methodName(), dmh.lookupDescriptor());
+                                        pendingLambdas.add(new PendingLambda(new MethodKey(own, dmh.methodName(), dmh.lookupDescriptor()), indyDesc));
                                     }
                                 }
+                                lastRefType = returnInternalName(indyDesc);
                             } else if (el instanceof InvokeInstruction inv) {
                                 String targetOwner = inv.owner().asInternalName();
                                 String targetName = inv.name().stringValue();
                                 String targetDesc = inv.type().stringValue();
+
+                                if (APPLICATION_EVENT_PUBLISHERS.contains(targetOwner) && targetName.equals("publishEvent")) {
+                                    if (lastRefType != null && !lastRefType.equals("java/lang/Object")) {
+                                        publishedEvents.add(new PublishedEvent(mk, lastRefType, earlyReturnIfReadOnly));
+                                    }
+                                }
+                                if (targetOwner.equals("kotlin/jvm/internal/Intrinsics")
+                                        && targetName.startsWith("checkNotNull")
+                                        && targetDesc.endsWith(")V")) {
+                                    // Preserves the checked reference on top of the operand stack.
+                                } else if (targetName.equals("<init>")) {
+                                    lastRefType = targetOwner;
+                                } else {
+                                    lastRefType = returnInternalName(targetDesc);
+                                }
 
                                 if (forbidExternalIo && BUILTIN_EXTERNAL_IO_SINKS.getOrDefault(targetOwner, Set.of()).contains(targetName)) {
                                     String simpleOwner = targetOwner.substring(targetOwner.lastIndexOf('/') + 1);
@@ -273,12 +387,14 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     directExternalIo.computeIfAbsent(mk, k -> new HashSet<>()).add(targetOwner.replace('/', '.') + "." + targetName);
                                 }
 
-                                if (pendingLambda != null && pendingLambdaIndyDesc != null && DEFERRED_OR_ASYNC_SINKS.contains(targetName)) {
-                                    for (String scopeDesc : SCOPE_DESCRIPTORS) {
-                                        if (pendingLambdaIndyDesc.contains(scopeDesc)) {
-                                            escapedScopes.add(mk.shortName() + " passes captured Vev Scope to "
-                                                    + targetOwner.replace('/', '.') + "." + targetName);
-                                            break;
+                                if (!pendingLambdas.isEmpty() && DEFERRED_OR_ASYNC_SINKS.contains(targetName)) {
+                                    for (PendingLambda pl : pendingLambdas) {
+                                        for (String scopeDesc : SCOPE_DESCRIPTORS) {
+                                            if (pl.indyDesc.contains(scopeDesc)) {
+                                                escapedScopes.add(mk.shortName() + " passes captured Vev Scope to "
+                                                        + targetOwner.replace('/', '.') + "." + targetName);
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -296,40 +412,40 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     if (NEW_TX_OPENERS.contains(targetName)) {
                                         // Independent transaction does not inherit enclosing read-only/isolation/tenant state,
                                         // but still holds an open DB connection while running.
-                                        if (pendingLambda != null) {
-                                            ioTxLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
-                                            ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                        for (PendingLambda pl : pendingLambdas) {
+                                            ioTxLambdas.computeIfAbsent(pl.target, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                            ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
                                         }
-                                        pendingLambda = null;
-                                        pendingLambdaIndyDesc = null;
+                                        pendingLambdas.clear();
                                     } else {
                                         directDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
                                         if (!earlyReturnIfReadOnly) {
                                             directReadTraversalDbCalls.computeIfAbsent(mk, k -> new HashSet<>()).add(targetName);
                                         }
-                                        if (pendingLambda != null) {
-                                            if (READ_OPENERS.contains(targetName)) {
-                                                readLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
-                                                ioTxLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
-                                            } else if (WRITE_OPENERS.contains(targetName)) {
-                                                writeLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
-                                                ioTxLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
-                                            }
-                                            if (isExplicitTenant || isAmbientTenant) {
-                                                tenantLambdas.computeIfAbsent(pendingLambda, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
-                                            }
-                                            if (!targetName.equals("afterCommit") && !targetName.equals("afterCompletion")) {
-                                                normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                                ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                                if (!earlyReturnIfReadOnly) {
-                                                    readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                        if (!pendingLambdas.isEmpty()) {
+                                            for (PendingLambda pl : pendingLambdas) {
+                                                if (READ_OPENERS.contains(targetName)) {
+                                                    readLambdas.computeIfAbsent(pl.target, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                                    ioTxLambdas.computeIfAbsent(pl.target, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                                } else if (WRITE_OPENERS.contains(targetName)) {
+                                                    writeLambdas.computeIfAbsent(pl.target, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                                    ioTxLambdas.computeIfAbsent(pl.target, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
                                                 }
-                                                if (!isExplicitTenant) {
-                                                    noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                                if (isExplicitTenant || isAmbientTenant) {
+                                                    tenantLambdas.computeIfAbsent(pl.target, k -> new ArrayList<>()).add(mk.shortName() + " [" + targetName + "]");
+                                                }
+                                                if (!targetName.equals("afterCommit") && !targetName.equals("afterCompletion")) {
+                                                    normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                                    ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                                    if (!earlyReturnIfReadOnly) {
+                                                        readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                                    }
+                                                    if (!isExplicitTenant) {
+                                                        noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                                    }
                                                 }
                                             }
-                                            pendingLambda = null;
-                                            pendingLambdaIndyDesc = null;
+                                            pendingLambdas.clear();
                                         }
                                     }
                                 } else if (matchesPrefix(targetOwner, prefixes)) {
@@ -343,33 +459,71 @@ public abstract class VerifyCallGraph extends DefaultTask {
                                     if (!bindsTenant) {
                                         noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(targetMk);
                                     }
-                                    if (pendingLambda != null && !targetName.equals("execute") && !targetName.equals("submit")
+                                    if (targetName.equals("<init>")) {
+                                        pendingSuspendLambdaOwner = targetOwner;
+                                    }
+                                    if (!pendingLambdas.isEmpty() && !targetName.equals("execute") && !targetName.equals("submit")
                                             && !targetName.equals("afterCommit") && !targetName.equals("afterCompletion")) {
-                                        normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                        ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                        for (PendingLambda pl : pendingLambdas) {
+                                            normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                            ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                            if (!earlyReturnIfReadOnly) {
+                                                readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                            }
+                                            if (!bindsTenant) {
+                                                noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                            }
+                                        }
+                                        pendingLambdas.clear();
+                                    }
+                                } else if (isSynchronousLambdaInvoker(targetOwner, targetName)) {
+                                    for (PendingLambda pl : pendingLambdas) {
+                                        normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
+                                        ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
                                         if (!earlyReturnIfReadOnly) {
-                                            readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                            readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
                                         }
-                                        if (!bindsTenant) {
-                                            noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                        }
-                                        pendingLambda = null;
-                                        pendingLambdaIndyDesc = null;
+                                        noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pl.target);
                                     }
-                                } else if (pendingLambda != null && (targetOwner.equals("java/lang/ScopedValue$Carrier") || targetOwner.startsWith("kotlin/"))) {
-                                    normalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                    ioEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                    if (!earlyReturnIfReadOnly) {
-                                        readTraversalEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
+                                    pendingLambdas.clear();
+                                    if (targetOwner.equals("kotlinx/coroutines/BuildersKt") && pendingSuspendLambdaOwner != null) {
+                                        runBlockingCalls.add(new RunBlockingCall(mk, pendingSuspendLambdaOwner, earlyReturnIfReadOnly));
+                                        pendingSuspendLambdaOwner = null;
                                     }
-                                    noTenantBindEdges.computeIfAbsent(mk, k -> new HashSet<>()).add(pendingLambda);
-                                    pendingLambda = null;
-                                    pendingLambdaIndyDesc = null;
+                                } else if (targetOwner.startsWith("kotlinx/coroutines/")) {
+                                    pendingSuspendLambdaOwner = null;
+                                    pendingLambdas.clear();
+                                } else if (targetOwner.startsWith("java/util/concurrent/") && DEFERRED_OR_ASYNC_SINKS.contains(targetName)) {
+                                    pendingLambdas.clear();
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        for (RunBlockingCall call : runBlockingCalls) {
+            MethodKey invokeSuspend = new MethodKey(call.suspendLambdaOwner, "invokeSuspend", "(Ljava/lang/Object;)Ljava/lang/Object;");
+            if (allMethods.contains(invokeSuspend)) {
+                normalEdges.computeIfAbsent(call.caller, k -> new HashSet<>()).add(invokeSuspend);
+                ioEdges.computeIfAbsent(call.caller, k -> new HashSet<>()).add(invokeSuspend);
+                if (!call.earlyReturnIfReadOnly) {
+                    readTraversalEdges.computeIfAbsent(call.caller, k -> new HashSet<>()).add(invokeSuspend);
+                }
+                noTenantBindEdges.computeIfAbsent(call.caller, k -> new HashSet<>()).add(invokeSuspend);
+            }
+        }
+
+        for (PublishedEvent published : publishedEvents) {
+            for (MethodKey listener : matchingEventListeners(
+                    published.eventType, eventListeners, supertypes, subtypes, prefixes, asyncMethods, transactionalEventListeners)) {
+                normalEdges.computeIfAbsent(published.caller, k -> new HashSet<>()).add(listener);
+                ioEdges.computeIfAbsent(published.caller, k -> new HashSet<>()).add(listener);
+                if (!published.earlyReturnIfReadOnly) {
+                    readTraversalEdges.computeIfAbsent(published.caller, k -> new HashSet<>()).add(listener);
+                }
+                noTenantBindEdges.computeIfAbsent(published.caller, k -> new HashSet<>()).add(listener);
             }
         }
 
@@ -488,6 +642,114 @@ public abstract class VerifyCallGraph extends DefaultTask {
             }
         }
         return false;
+    }
+
+    private static boolean isSynchronousLambdaInvoker(String targetOwner, String targetName) {
+        if (targetOwner.equals("java/lang/ScopedValue$Carrier") || targetOwner.startsWith("kotlin/")) return true;
+        if (targetOwner.equals("kotlinx/coroutines/BuildersKt")
+                && (targetName.equals("runBlocking") || targetName.equals("runBlocking$default"))) return true;
+        if (targetOwner.equals("java/lang/Iterable") && targetName.equals("forEach")) return true;
+        return targetOwner.startsWith("java/util/")
+                && !targetOwner.startsWith("java/util/concurrent/")
+                && SYNC_JAVA_UTIL_LAMBDA_METHODS.contains(targetName);
+    }
+
+    private static Map<Integer, String> initialLocalTypes(String owner, boolean isStatic, java.lang.constant.MethodTypeDesc type) {
+        Map<Integer, String> locals = new HashMap<>();
+        int slot = 0;
+        if (!isStatic) {
+            locals.put(0, owner);
+            slot = 1;
+        }
+        for (ClassDesc param : type.parameterList()) {
+            String desc = param.descriptorString();
+            String internal = descriptorToInternalName(desc);
+            if (internal != null) locals.put(slot, internal);
+            slot += (desc.equals("J") || desc.equals("D")) ? 2 : 1;
+        }
+        return locals;
+    }
+
+    private static String descriptorToInternalName(String desc) {
+        if (desc != null && desc.startsWith("L") && desc.endsWith(";")) {
+            return desc.substring(1, desc.length() - 1);
+        }
+        return null;
+    }
+
+    private static String returnInternalName(String methodDesc) {
+        int close = methodDesc.lastIndexOf(')');
+        if (close < 0 || close + 1 >= methodDesc.length()) return null;
+        return descriptorToInternalName(methodDesc.substring(close + 1));
+    }
+
+    private static boolean isNextKotlinNullCheck(List<CodeElement> elements, int idx) {
+        for (int j = idx + 1; j < Math.min(elements.size(), idx + 3); j++) {
+            if (elements.get(j) instanceof InvokeInstruction inv) {
+                return inv.owner().asInternalName().equals("kotlin/jvm/internal/Intrinsics")
+                        && inv.name().stringValue().startsWith("checkNotNull");
+            }
+        }
+        return false;
+    }
+
+    private static Set<String> extractEventListenerTypes(
+            java.lang.constant.MethodTypeDesc methodType,
+            List<AnnotationElement> elements) {
+        Set<String> types = new HashSet<>();
+        for (AnnotationElement elem : elements) {
+            String name = elem.name().stringValue();
+            if ((name.equals("value") || name.equals("classes")) && elem.value() instanceof AnnotationValue.OfArray arr) {
+                for (AnnotationValue v : arr.values()) {
+                    if (v instanceof AnnotationValue.OfClass cls) {
+                        String internal = descriptorToInternalName(cls.className().stringValue());
+                        if (internal != null && !internal.equals("java/lang/Object")) types.add(internal);
+                    }
+                }
+            }
+        }
+        if (types.isEmpty() && methodType.parameterCount() == 1) {
+            String param = descriptorToInternalName(methodType.parameterType(0).descriptorString());
+            if (param != null && !param.equals("java/lang/Object")) types.add(param);
+        }
+        return types;
+    }
+
+    private static Set<MethodKey> matchingEventListeners(
+            String eventType,
+            Map<String, Set<MethodKey>> eventListeners,
+            Map<String, Set<String>> supertypes,
+            Map<String, Set<String>> subtypes,
+            List<String> prefixes,
+            Set<MethodKey> asyncMethods,
+            Set<MethodKey> transactionalEventListeners) {
+        Set<String> matchedTypes = new HashSet<>();
+        Deque<String> up = new ArrayDeque<>();
+        up.add(eventType);
+        while (!up.isEmpty()) {
+            String cur = up.poll();
+            if (!matchedTypes.add(cur)) continue;
+            for (String sup : supertypes.getOrDefault(cur, Set.of())) {
+                if (!sup.equals("java/lang/Object")) up.add(sup);
+            }
+        }
+        if (matchesPrefix(eventType, prefixes)) {
+            Deque<String> down = new ArrayDeque<>(subtypes.getOrDefault(eventType, Set.of()));
+            while (!down.isEmpty()) {
+                String sub = down.poll();
+                if (!matchedTypes.add(sub)) continue;
+                down.addAll(subtypes.getOrDefault(sub, Set.of()));
+            }
+        }
+        Set<MethodKey> listeners = new HashSet<>();
+        for (String type : matchedTypes) {
+            for (MethodKey listener : eventListeners.getOrDefault(type, Set.of())) {
+                if (!asyncMethods.contains(listener) && !transactionalEventListeners.contains(listener)) {
+                    listeners.add(listener);
+                }
+            }
+        }
+        return listeners;
     }
 
     private static String normalizePrefix(String prefix) {

@@ -248,6 +248,25 @@ class CompilerTest {
         assertThrows(Exception.class, () -> compile("-- vev.name: query :exec\n-- vev.scope: global\n-- vev.notnull: id\nDELETE FROM item"));
     }
 
+    @Test void redundantNotnullDirectivesFailCompilation() throws Exception {
+        var directErr = assertThrows(IllegalArgumentException.class, () -> compile(
+                "-- vev.name: query :many\n-- vev.scope: global\n-- vev.notnull: id, name\nSELECT id, name, note FROM item"));
+        assertTrue(directErr.getMessage().contains("Redundant -- vev.notnull"), directErr.getMessage());
+        assertTrue(directErr.getMessage().contains("id, name"), directErr.getMessage());
+
+        var exprErr = assertThrows(IllegalArgumentException.class, () -> compile(
+                "-- vev.name: query :one\n-- vev.scope: global\n-- vev.notnull: total, present\n"
+                + "SELECT count(*) AS total, EXISTS(SELECT 1 FROM item) AS present FROM item"));
+        assertTrue(exprErr.getMessage().contains("Redundant -- vev.notnull"), exprErr.getMessage());
+        assertTrue(exprErr.getMessage().contains("total, present"), exprErr.getMessage());
+
+        // Nullable columns on a direct SELECT still accept -- vev.notnull (e.g. filtered with WHERE note IS NOT NULL).
+        String allowed = compile("-- vev.name: query :many\n-- vev.scope: global\n-- vev.notnull: note\n"
+                + "SELECT id, note FROM item WHERE note IS NOT NULL");
+        assertTrue(allowed.contains("val `id`: Int,"), allowed);
+        assertTrue(allowed.contains("val `note`: String,"), allowed);
+    }
+
     @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
         String result = compile("-- vev.name: lock :void\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
         assertTrue(result.contains("fun `lock`(tx: no.beint.vev.WriteScope, `key`: String): Unit ="), result);

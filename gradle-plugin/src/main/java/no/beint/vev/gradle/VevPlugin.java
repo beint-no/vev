@@ -22,6 +22,7 @@ public final class VevPlugin implements Plugin<Project> {
             generate.getQueries().convention(project.getLayout().getProjectDirectory().dir("src/main/sql"));
             generate.getMigrations().convention(project.getLayout().getProjectDirectory().dir("src/main/resources/db/migration"));
             generate.getOutput().convention(project.getLayout().getBuildDirectory().dir("generated/vev"));
+            generate.getRelationsManifest().convention(project.getLayout().getBuildDirectory().file("vev/relations.txt"));
             generate.getClassName().convention("Queries");
             generate.getPostgresBin().convention(project.getProviders().of(PostgresBin.class, specification -> {}));
             generate.getSchemaCacheDir().convention(project.getGradle().getGradleUserHomeDir().toPath().resolve("vev/schemas").toString());
@@ -29,6 +30,21 @@ public final class VevPlugin implements Plugin<Project> {
             generate.getPostgresVersion().convention(project.getProviders().of(PostgresVersion.class,
                     specification -> specification.getParameters().getBin().set(generate.getPostgresBin())));
             generate.getCompilerClasspath().from(compiler);
+        });
+        project.getTasks().register("verifyVevTableUsage", VerifyTableUsage.class, check -> {
+            check.setGroup("verification");
+            check.setDescription("Fail when migrated tables are never referenced by any Vev query");
+            check.getMigrations().convention(task.flatMap(GenerateSql::getMigrations));
+            check.getFixtures().convention(task.flatMap(GenerateSql::getFixtures));
+            check.getManifests().from(task.flatMap(GenerateSql::getRelationsManifest));
+            check.getSchemas().convention(java.util.Set.of("public"));
+            check.getIgnoredTables().convention(java.util.Set.of());
+            check.getPostgresBin().convention(task.flatMap(GenerateSql::getPostgresBin));
+            check.getPostgresVersion().convention(task.flatMap(GenerateSql::getPostgresVersion));
+            check.getSchemaCacheDir().convention(task.flatMap(GenerateSql::getSchemaCacheDir));
+            check.getCompilerClasspath().from(compiler);
+            check.usesService(cluster);
+            check.getReport().convention(project.getLayout().getBuildDirectory().file("reports/vev/table-usage.txt"));
         });
         project.getPluginManager().withPlugin("java", ignored -> {
             var main = project.getExtensions().getByType(JavaPluginExtension.class).getSourceSets()
