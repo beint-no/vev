@@ -25,9 +25,16 @@ final class KotlinWriter {
         out.append("internal object ").append(id(className)).append(" {\n");
         String row = id(rowName(source.name()));
         String result = resultType(query);
+        if (source.cardinality().equals("exec")) {
+            out.append("    @IgnorableReturnValue\n");
+        }
         out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
         appendParameters(out, query, true);
-        out.append("): ").append(result).append(" {\n");
+        if (result.equals("Unit")) {
+            out.append(") {\n");
+        } else {
+            out.append("): ").append(result).append(" {\n");
+        }
         if (source.tenant() != null) {
             out.append("        val _vevTenantId = tx.tenantId()\n");
         }
@@ -199,11 +206,20 @@ final class KotlinWriter {
         for (var query : queries) {
             var source = query.source();
             String result = resultType(query);
+            if (source.cardinality().equals("exec")) {
+                out.append("    @IgnorableReturnValue\n");
+            }
             out.append("    @JvmStatic\n    @JvmName(").append(quote(source.name())).append(")\n    fun ").append(id(source.name())).append("(");
             appendParameters(out, query, true);
-            out.append("): ").append(result).append(" = ").append(id(implementationName(className, query))).append(".").append(id(source.name())).append("(");
-            appendParameters(out, query, false);
-            out.append(")\n\n");
+            if (result.equals("Unit")) {
+                out.append(") {\n        ").append(id(implementationName(className, query))).append(".").append(id(source.name())).append("(");
+                appendParameters(out, query, false);
+                out.append(")\n    }\n\n");
+            } else {
+                out.append("): ").append(result).append(" = ").append(id(implementationName(className, query))).append(".").append(id(source.name())).append("(");
+                appendParameters(out, query, false);
+                out.append(")\n\n");
+            }
         }
         return out.append("}\n").toString();
     }

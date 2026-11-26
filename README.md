@@ -36,7 +36,7 @@ In the application module:
 ```kotlin
 plugins {
     kotlin("jvm") version "2.5.0-Beta2"
-    id("no.beint.vev") version "5.5.0"
+    id("no.beint.vev") version "5.5.1"
 }
 kotlin {
     jvmToolchain(27)

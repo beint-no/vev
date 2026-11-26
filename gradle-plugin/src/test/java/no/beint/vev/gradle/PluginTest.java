@@ -597,6 +597,96 @@ class PluginTest {
         assertFalse(output.contains("safeAfterCommitEvent"), "afterCommit event publish must be excluded: " + output);
     }
 
+    @Test void generatedCodeCompilesCleanlyUnderStrictWarningsAndReturnValueChecker() throws Exception {
+        String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"strict-consumer\"\n");
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL, note text);");
+        Path sql = Files.createDirectories(project.resolve("src/main/sql"));
+        Files.writeString(sql.resolve("rename.sql"),
+                "-- vev.name: rename :exec\n-- vev.scope: global\n-- vev.nullable: note\nUPDATE item SET name = :name, note = :note WHERE id = :id;");
+        Files.writeString(sql.resolve("lock.sql"),
+                "-- vev.name: lock :void\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0));");
+        Files.writeString(sql.resolve("export.sql"),
+                "-- vev.name: export :stream\n-- vev.scope: global\nSELECT id, name FROM item ORDER BY id;");
+        Files.writeString(sql.resolve("count.sql"),
+                "-- vev.name: count :one\n-- vev.scope: global\nSELECT count(*) AS total FROM item;");
+        Files.writeString(sql.resolve("find.sql"),
+                "-- vev.name: find :optional\n-- vev.scope: global\n-- vev.type: id ItemId\nSELECT id, name FROM item WHERE id = :id;");
+        Files.writeString(sql.resolve("list.sql"),
+                "-- vev.name: list :many\n-- vev.scope: global\nSELECT id, name FROM item ORDER BY id LIMIT :limit::int;");
+
+        Path consumer = Files.createDirectories(project.resolve("src/main/kotlin")).resolve("Consumer.kt");
+        String validConsumer = """
+                package sample
+                import no.beint.vev.ReadScope
+                import no.beint.vev.WriteScope
+                import sample.sql.ItemId
+                import sample.sql.Queries
+
+                fun exercise(tx: WriteScope, id: Int, limit: Int): Long {
+                    Queries.rename(tx, "updated", null, id)
+                    Queries.lock(tx, "k")
+                    val seen = mutableListOf<String>()
+                    Queries.export(tx) { row -> seen.add(row.name) }
+                    val found = Queries.find(tx, ItemId(id))
+                    val listed = Queries.list(tx, limit)
+                    return Queries.count(tx).total + seen.size + (if (found != null) 1 else 0) + listed.size
+                }
+
+                fun countOnly(tx: ReadScope): Long = Queries.count(tx).total
+                """;
+        Files.writeString(consumer, validConsumer);
+
+        String buildTemplate = """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin {
+                    jvmToolchain(27)
+                    compilerOptions {
+                        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27)
+                        %s
+                    }
+                }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """;
+
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+
+        // 1. Strict consumer: extraWarnings + allWarningsAsErrors + -Xreturn-value-checker=full
+        Files.writeString(project.resolve("build.gradle.kts"), buildTemplate.formatted(repository, """
+                extraWarnings.set(true)
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Xreturn-value-checker=full")
+                """, cacheDir));
+        var strictBuild = runner.withArguments("clean", "check", "--console=plain").build();
+        assertTrue(strictBuild.getOutput().contains("BUILD SUCCESSFUL"), strictBuild.getOutput());
+
+        // Verify -Xreturn-value-checker=full is genuinely enforced: ignoring :one return value must fail.
+        Files.writeString(consumer, validConsumer + "\nfun ignoredOne(tx: ReadScope) { Queries.count(tx) }\n");
+        var ignoredFailure = runner.withArguments("compileKotlin", "--console=plain").buildAndFail();
+        assertTrue(ignoredFailure.getOutput().contains("Unused return value of 'count'"), ignoredFailure.getOutput());
+        Files.writeString(consumer, validConsumer);
+
+        // 2. Strict warnings WITHOUT -Xreturn-value-checker (verifies @IgnorableReturnValue produces no warning when checker is off).
+        Files.writeString(project.resolve("build.gradle.kts"), buildTemplate.formatted(repository, """
+                extraWarnings.set(true)
+                allWarningsAsErrors.set(true)
+                """, cacheDir));
+        var noCheckerStrict = runner.withArguments("clean", "check", "--console=plain").build();
+        assertTrue(noCheckerStrict.getOutput().contains("BUILD SUCCESSFUL"), noCheckerStrict.getOutput());
+
+        // 3. Default Kotlin 2.5 flags (no extraWarnings, no -Xreturn-value-checker).
+        Files.writeString(project.resolve("build.gradle.kts"), buildTemplate.formatted(repository, "", cacheDir));
+        var defaultBuild = runner.withArguments("clean", "check", "--console=plain").build();
+        assertTrue(defaultBuild.getOutput().contains("BUILD SUCCESSFUL"), defaultBuild.getOutput());
+    }
+
     private static int count(String text, String needle) {
         int total = 0;
         for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) total++;

@@ -269,17 +269,28 @@ class CompilerTest {
 
     @Test void voidFunctionsAreCalledForTheirEffect() throws Exception {
         String result = compile("-- vev.name: lock :void\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0))");
-        assertTrue(result.contains("fun `lock`(tx: no.beint.vev.WriteScope, `key`: String): Unit ="), result);
+        assertTrue(result.contains("fun `lock`(tx: no.beint.vev.WriteScope, `key`: String) {"), result);
+        assertFalse(result.contains(": Unit"), result);
+        assertFalse(result.contains("@IgnorableReturnValue"), result);
         assertTrue(result.contains("_vevStmt.execute()"), result);
         assertFalse(result.contains("LockRow"), result);
     }
 
     @Test void streamQueriesGenerateConsumerCallbacks() throws Exception {
         String result = compile("-- vev.name: exportItems :stream\n-- vev.scope: global\nSELECT id, name FROM item");
-        assertTrue(result.contains("fun `exportItems`(tx: no.beint.vev.ReadScope, onRow: java.util.function.Consumer<`ExportItemsRow`>): Unit"), result);
+        assertTrue(result.contains("fun `exportItems`(tx: no.beint.vev.ReadScope, onRow: java.util.function.Consumer<`ExportItemsRow`>) {"), result);
+        assertFalse(result.contains(": Unit"), result);
+        assertFalse(result.contains("@IgnorableReturnValue"), result);
         assertTrue(result.contains("_vevStmt.setFetchSize(no.beint.vev.Session.DEFAULT_STREAM_FETCH_SIZE)"), result);
         assertTrue(result.contains("onRow.accept(readRow(_vevResult))"), result);
         assertThrows(IllegalArgumentException.class, () -> compile("-- vev.name: bad :stream\n-- vev.scope: global\nSELECT id FROM item WHERE name = :onRow"));
+    }
+
+    @Test void execQueriesEmitIgnorableReturnValue() throws Exception {
+        String exec = compile("-- vev.name: rename :exec\n-- vev.scope: global\nUPDATE item SET name = :name WHERE id = :id");
+        assertTrue(exec.contains("@IgnorableReturnValue\n    @JvmStatic\n    @JvmName(\"rename\")"), exec);
+        String one = compile("-- vev.name: countItems :one\n-- vev.scope: global\nSELECT count(*) AS total FROM item");
+        assertFalse(one.contains("@IgnorableReturnValue"), one);
     }
 
     @Test void capabilityScopesDistinguishReadWriteLockingAndTenantQueries() throws Exception {
