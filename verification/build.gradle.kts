@@ -3,7 +3,7 @@ dependencies {
     implementation(project(":runtime"))
     testImplementation(project(":compiler"))
     testImplementation("org.postgresql:postgresql:42.7.14")
-    testImplementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.5.0-Beta2")
+    testImplementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.5.0-RC2")
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

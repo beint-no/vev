@@ -21,8 +21,8 @@ jmh {
 dependencies {
     implementation(project(":compiler"))
     implementation(project(":runtime"))
-    implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.5.0-Beta2")
-    implementation("org.jetbrains.kotlin:kotlin-stdlib:2.5.0-Beta2")
+    implementation("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.5.0-RC2")
+    implementation("org.jetbrains.kotlin:kotlin-stdlib:2.5.0-RC2")
     jmh(project(":reai-verification"))
 }
 sourceSets.named("jmh") { resources.srcDir(rootProject.file("test-fixtures/reai")) }

@@ -1,6 +1,6 @@
 plugins {
     base
-    kotlin("jvm") version "2.5.0-Beta2" apply false
+    kotlin("jvm") version "2.5.0-RC2" apply false
     id("com.vanniktech.maven.publish") version "0.37.0" apply false
     id("me.champeau.jmh") version "0.7.3" apply false
 }

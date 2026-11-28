@@ -2,7 +2,7 @@ plugins { `java-gradle-plugin` }
 dependencies {
     implementation(project(":cluster"))
     compileOnly(project(":compiler"))
-    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin:2.5.0-Beta2")
+    implementation("org.jetbrains.kotlin:kotlin-gradle-plugin:2.5.0-RC2")
     testImplementation(gradleTestKit())
     testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
