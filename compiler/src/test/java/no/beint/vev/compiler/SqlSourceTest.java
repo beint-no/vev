@@ -1,0 +1,136 @@
+package no.beint.vev.compiler;
+
+import java.nio.file.Path;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import static org.junit.jupiter.api.Assertions.*;
+
+class SqlSourceTest {
+    private SqlSource parse(String sql) { return SqlSource.parse(Path.of("test.sql"), "-- vev.name: find :many\n-- vev.scope: global\n" + sql); }
+
+    @Test void preservesQuotedTokensAndCasts() {
+        var source = parse("SELECT ':hidden', $$:hidden;$$, $tag$:hidden$tag$, \"column:quoted\", :id::int, :id -- :hidden\n /* :hidden /* nested */ */");
+        assertEquals(List.of("id", "id"), source.parameters());
+        assertTrue(source.sql().contains("?::int"));
+    }
+    @Test void escapedStringsAndQuestionOperators() {
+        var source = parse("SELECT E'foo\\\':hidden', :json::jsonb ? :key, :json::jsonb ?| array['x']");
+        assertEquals(List.of("json", "key", "json"), source.parameters());
+        assertTrue(source.sql().contains("??"));
+        assertTrue(source.sql().contains("??|"));
+    }
+    @ParameterizedTest @ValueSource(strings = {
+        "SELECT 1; DELETE FROM customer", "SELECT 'unterminated", "SELECT $$unterminated",
+        "SELECT 1 /* unterminated", "CREATE TABLE x(id int)", "SELECT $1", "SELECT :session", "SELECT :tx"
+    }) void rejectsInvalidSources(String sql) { assertThrows(IllegalArgumentException.class, () -> parse(sql)); }
+    @ParameterizedTest @ValueSource(strings = {
+        "SELECT t.id FROM t LEFT JOIN u ON true", "SELECT t.id FROM t RIGHT JOIN u ON true",
+        "SELECT t.id FROM t FULL JOIN u ON true", "SELECT id FROM t UNION SELECT NULL",
+        "SELECT id FROM t GROUP BY ROLLUP(id)", "WITH x AS (SELECT id FROM t) SELECT id FROM x",
+        "SELECT (SELECT id FROM t LIMIT 1)", "UPDATE t SET id = 1 RETURNING id"
+    }) void complexResultsRemainNullable(String sql) { assertFalse(parse(sql).directNullability()); }
+    @Test void innerJoinsPreserveOriginNullability() { assertTrue(parse("SELECT t.id FROM t JOIN u ON u.id=t.id").directNullability()); }
+    @ParameterizedTest @ValueSource(strings = {
+        "SELECT * FROM t", "SELECT ALL * FROM t", "SELECT DISTINCT ON (id) * FROM t",
+        "SELECT t.* FROM t", "SELECT (t).* FROM t", "DELETE FROM t RETURNING *",
+        "DELETE FROM t RETURNING WITH (OLD AS previous) *",
+        "INSERT INTO t SELECT id FROM u RETURNING WITH (OLD AS previous, NEW AS current) *"
+    }) void rejectsUnstableWildcardResults(String sql) { assertThrows(IllegalArgumentException.class, () -> parse(sql)); }
+    @ParameterizedTest @ValueSource(strings = {
+        "WITH selected AS (SELECT t.* FROM t) SELECT id FROM selected",
+        "SELECT q.id FROM (SELECT t.* FROM t) q",
+        "SELECT EXISTS (SELECT * FROM t) AS present",
+        "INSERT INTO t SELECT * FROM u RETURNING id",
+        "WITH selected AS (SELECT * FROM t) UPDATE u SET id=1 RETURNING id"
+    }) void internalWildcardsDoNotDefineTheReturnedContract(String sql) {
+        assertNotNull(parse(sql));
+    }
+    @ParameterizedTest @ValueSource(strings = {
+        "WITH selected AS (SELECT * FROM t) SELECT * FROM selected",
+        "SELECT id FROM t UNION SELECT * FROM u",
+        "WITH selected AS (SELECT * FROM t) DELETE FROM u RETURNING u.*",
+        "INSERT INTO t SELECT id FROM u RETURNING t.*"
+    }) void outerWildcardsRemainRejected(String sql) {
+        assertThrows(IllegalArgumentException.class, () -> parse(sql));
+    }
+
+    @Test void directiveErrorsAreExplicit() {
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.nullable: absent\nSELECT :id"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.rows: 10\nSELECT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.access: read\nSELECT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.access: write\n-- vev.access: write\nSELECT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT 1\n-- vev.plan: custom"));
+        assertThrows(IllegalArgumentException.class, () -> SqlSource.parse(Path.of("x.sql"), "SELECT 1"));
+        assertTrue(parse("-- vev.access: write\nSELECT 1").forceWrite());
+    }
+
+    @Test void autoEnablesCustomPlanForParameterSkewedQueryShapes() {
+        assertTrue(parse("-- vev.nullable: status\nSELECT 1 WHERE (:status::text IS NULL OR 'a' = :status)").customPlan());
+        assertTrue(parse("-- vev.nullable: name\nSELECT 1 WHERE (CAST(:name AS text) IS NULL OR 'a' = :name)").customPlan());
+        assertTrue(parse("-- vev.nullable: ids\nSELECT 1 WHERE (:ids::int[] IS NULL OR 1 = ANY(:ids))").customPlan());
+        assertTrue(parse("-- vev.nullable: x\nSELECT 1 WHERE ((:x::text) IS NOT NULL AND 'a' = :x)").customPlan());
+        assertTrue(parse("WITH x AS (SELECT id FROM t WHERE id = :id) SELECT id FROM x").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE id = ANY(:ids::int[])").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE created_at BETWEEN :start AND :end").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE (:code::text = '' OR code = :code::text)").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE (:kind <> 'all' AND kind = :kind)").customPlan());
+        assertTrue(parse("SELECT id FROM t WHERE (NOT :restrict::boolean OR id = 1)").customPlan());
+        assertTrue(parse("SELECT t.id FROM t LEFT JOIN u ON :includeU::bool AND u.id = t.id").customPlan());
+        assertTrue(parse("SELECT CASE WHEN :suppliers THEN 1 ELSE 2 END AS v FROM t").customPlan());
+
+        // Simple OLTP lookups and DML remain on fast server-prepared generic plans.
+        assertFalse(parse("-- vev.nullable: note\nUPDATE t SET note = :note WHERE id = :id").customPlan());
+        assertFalse(parse("SELECT id FROM t WHERE id = :id").customPlan());
+        assertFalse(parse("INSERT INTO t (id, name) VALUES (:id, :name) RETURNING id").customPlan());
+        assertFalse(parse("DELETE FROM t WHERE id = :id").customPlan());
+        assertFalse(parse("WITH x AS (SELECT 1 AS id) SELECT id FROM x").customPlan());
+    }
+
+    @Test void rejectsUnorderedTopLevelLimitAndFetchUnlessAllowedOrConstantProjection() {
+        var limitErr = assertThrows(IllegalArgumentException.class,
+                () -> parse("SELECT id FROM t LIMIT 10"));
+        assertTrue(limitErr.getMessage().contains("ORDER BY"), limitErr.getMessage());
+        assertTrue(limitErr.getMessage().contains("-- vev.allow: unordered-limit"), limitErr.getMessage());
+
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT id FROM t FETCH FIRST 5 ROWS ONLY"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT id FROM t FETCH NEXT 1 ROW ONLY"));
+        assertThrows(IllegalArgumentException.class, () -> parse("WITH c AS (SELECT id FROM t ORDER BY id) SELECT id FROM c LIMIT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT 1 AS ok, id FROM t LIMIT 1"));
+        assertThrows(IllegalArgumentException.class, () -> parse("SELECT id FROM a UNION SELECT id FROM b LIMIT 1"));
+
+        // Deterministic top-level ORDER BY passes.
+        assertNotNull(parse("SELECT id FROM t ORDER BY id LIMIT 10"));
+        assertNotNull(parse("SELECT id FROM t ORDER BY id FETCH FIRST 5 ROWS ONLY"));
+        assertNotNull(parse("SELECT id FROM t ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"));
+        assertNotNull(parse("SELECT id FROM a UNION SELECT id FROM b ORDER BY id LIMIT 5"));
+
+        // Pure constant-literal projections (existence checks) pass without ORDER BY.
+        assertNotNull(parse("SELECT 1 AS present FROM t WHERE id = :id LIMIT 1"));
+        assertNotNull(parse("SELECT TRUE AS ok FROM t WHERE id = :id LIMIT 1 FOR UPDATE"));
+        assertNotNull(parse("SELECT 1::int AS present FROM t LIMIT 1"));
+
+        // Nested LIMIT inside subqueries or CTEs is allowed; LIMIT ALL and alias `AS limit` are allowed.
+        assertNotNull(parse("SELECT count(*) AS total FROM (SELECT 1 FROM t LIMIT 100) q"));
+        assertNotNull(parse("SELECT id FROM t WHERE id IN (SELECT id FROM u LIMIT 10)"));
+        assertNotNull(parse("SELECT id FROM t LIMIT ALL"));
+        assertNotNull(parse("SELECT id AS limit FROM t"));
+
+        // Explicit opt-in via -- vev.allow supports unordered-limit, comma lists, and multiple lines.
+        var optedIn = parse("-- vev.allow: unordered-limit\nSELECT id FROM t LIMIT 10");
+        assertTrue(optedIn.allowUnorderedLimit());
+        assertFalse(optedIn.allowBlob());
+
+        var combined = parse("-- vev.allow: blob, unordered-limit\nSELECT id FROM t LIMIT 10");
+        assertTrue(combined.allowBlob());
+        assertTrue(combined.allowUnorderedLimit());
+
+        var multiLine = parse("-- vev.allow: blob\n-- vev.allow: unordered-limit\nSELECT id FROM t LIMIT 10");
+        assertTrue(multiLine.allowBlob());
+        assertTrue(multiLine.allowUnorderedLimit());
+
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.allow: unknown\nSELECT id FROM t"));
+        assertThrows(IllegalArgumentException.class, () -> parse("-- vev.allow:\nSELECT id FROM t"));
+    }
+}

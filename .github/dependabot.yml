@@ -1,0 +1,8 @@
+version: 2
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: monthly
+    # Disable routine version-update PRs; security updates remain available.
+    open-pull-requests-limit: 0

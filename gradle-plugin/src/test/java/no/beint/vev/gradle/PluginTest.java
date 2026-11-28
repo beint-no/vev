@@ -1,0 +1,700 @@
+package no.beint.vev.gradle;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.List;
+import org.gradle.testkit.runner.GradleRunner;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.*;
+
+class PluginTest {
+    @TempDir Path project;
+
+    @Test void schemaDigestPreservesPathAndContentBoundaries() throws Exception {
+        Path left = Files.createDirectory(project.resolve("left"));
+        Path right = Files.createDirectory(project.resolve("right"));
+        Files.writeString(left.resolve("V1__a.sql"), "x V2__b.sql");
+        Files.writeString(left.resolve("V3__c.sql"), "z");
+        Files.writeString(right.resolve("V1__a.sql"), "x ");
+        Files.writeString(right.resolve("V2__b.sql"), "V3__c.sqlz");
+
+        var leftHash = MessageDigest.getInstance("SHA-256");
+        var rightHash = MessageDigest.getInstance("SHA-256");
+        GenerateSql.hashTree(leftHash, left);
+        GenerateSql.hashTree(rightHash, right);
+        assertFalse(MessageDigest.isEqual(leftHash.digest(), rightHash.digest()));
+    }
+
+    @Test void generatedSourcesConfigurationCacheAndMigrationInvalidation() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
+        String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(repository, cacheDir));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Path sql = Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql");
+        Path migration = Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql");
+        Files.writeString(sql, "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id;");
+        Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
+        Path consumer = Files.createDirectories(project.resolve("src/main/kotlin")).resolve("Consumer.kt");
+        Files.writeString(consumer, "package sample\nimport no.beint.vev.ReadScope\nfun name(tx: ReadScope): String? = Queries.find(tx, 1)?.name\n");
+        var first = runner().build();
+        assertTrue(first.getOutput().contains("BUILD SUCCESSFUL"));
+        assertTrue(first.getOutput().contains("Vev migrating build database"));
+        var second = runner().build();
+        assertTrue(second.getOutput().contains("Reusing configuration cache"));
+        assertTrue(second.getOutput().contains(":generateVev UP-TO-DATE"));
+        Path facade = project.resolve("build/generated/vev/Queries.kt");
+        var facadeTime = Files.getLastModifiedTime(facade);
+        Files.writeString(sql, "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id AND name <> 'changed';");
+        var sqlEdit = runner().build();
+        assertTrue(sqlEdit.getOutput().contains("BUILD SUCCESSFUL"));
+        assertTrue(sqlEdit.getOutput().contains("Vev reused cached PostgreSQL 19 schema"), sqlEdit.getOutput());
+        assertEquals(0, count(sqlEdit.getOutput(), "Vev migrating build database"), sqlEdit.getOutput());
+        assertEquals(facadeTime, Files.getLastModifiedTime(facade), "SQL-only edits must not rewrite the Kotlin facade");
+        assertTrue(Files.readString(project.resolve("build/generated/vev/Queries_find_Sql.kt")).contains("changed"));
+        Files.writeString(migration.resolveSibling("V2__index.sql"), "CREATE INDEX ON item(id);");
+        var schemaOnly = runner().build();
+        assertTrue(schemaOnly.getOutput().contains(":compileKotlin UP-TO-DATE"), schemaOnly.getOutput());
+        assertFalse(schemaOnly.getOutput().contains(":generateVev UP-TO-DATE"), schemaOnly.getOutput());
+        assertTrue(schemaOnly.getOutput().contains("Vev migrating build database"), schemaOnly.getOutput());
+        Files.writeString(migration, "CREATE TABLE item(id integer PRIMARY KEY, renamed text NOT NULL);");
+        var failure = runner().buildAndFail();
+        assertTrue(failure.getOutput().contains("find.sql"));
+        assertTrue(failure.getOutput().contains("PostgreSQL rejected query"));
+        Path bin = Files.createDirectory(project.resolve("custom-postgres"));
+        Path version = bin.resolve("postgres"), init = bin.resolve("initdb");
+        Files.writeString(version, "#!/bin/sh\nprintf 'postgres (PostgreSQL) 19.99\\n'\n");
+        Files.writeString(init, "#!/bin/sh\nprintf 'vev-custom-initdb-sentinel\\n'\nexit 42\n");
+        assertTrue(version.toFile().setExecutable(true));
+        assertTrue(init.toFile().setExecutable(true));
+        Files.writeString(project.resolve("build.gradle.kts"),
+                "\ntasks.named<no.beint.vev.gradle.GenerateSql>(\"generateVev\") { postgresBin.set(\""
+                        + bin.toString().replace("\\", "/") + "\") }\n", java.nio.file.StandardOpenOption.APPEND);
+        assertTrue(runner().buildAndFail().getOutput().contains("vev-custom-initdb-sentinel"),
+                "The shared cluster must use the task's configured binaries, not PATH");
+    }
+
+    /** A repository with many modules must pay for one cluster and one migration replay, not one per module. */
+    @Test void modulesSharingASchemaStartOneClusterAndMigrateOnce() throws Exception {
+        String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("settings.gradle.kts"),
+                "rootProject.name = \"consumer\"\ninclude(\"first\", \"second\")\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
+                subprojects {
+                    apply(plugin = "org.jetbrains.kotlin.jvm")
+                    apply(plugin = "no.beint.vev")
+                    repositories { maven { url = uri("%s") }; mavenCentral() }
+                    extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> {
+                        jvmToolchain(27)
+                        compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }
+                    }
+                    tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                        packageName.set("sample." + project.name)
+                        migrations.set(rootProject.layout.projectDirectory.dir("migration"))
+                        schemaCacheDir.set("%s")
+                    }
+                }
+                """.formatted(repository, cacheDir));
+        Files.writeString(project.resolve("gradle.properties"),
+                "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id integer PRIMARY KEY, name text NOT NULL);");
+        for (String module : List.of("first", "second")) {
+            Files.writeString(Files.createDirectories(project.resolve(module + "/src/main/sql")).resolve("find.sql"),
+                    "-- vev.name: find :optional\n-- vev.scope: global\nSELECT id,name FROM item WHERE id=:id;");
+        }
+        var build = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath()
+                .withArguments("compileKotlin", "--console=plain", "--stacktrace").build();
+        String output = build.getOutput();
+        assertTrue(output.contains("BUILD SUCCESSFUL"), output);
+        assertEquals(1, count(output, "Vev started PostgreSQL 19"), output);
+        assertEquals(1, count(output, "Vev migrating build database"), output);
+        assertTrue(Files.exists(project.resolve("first/build/generated/vev/Queries.kt")));
+        assertTrue(Files.exists(project.resolve("second/build/generated/vev/Queries.kt")));
+    }
+
+    @Test void generatedTypesAreInternalToTheirKotlinModule() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), """
+                rootProject.name = "consumer"
+                include("storage", "app")
+                """);
+        Path storage = Files.createDirectories(project.resolve("storage"));
+        Path app = Files.createDirectories(project.resolve("app"));
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
+                subprojects {
+                    apply(plugin = "org.jetbrains.kotlin.jvm")
+                    repositories { maven { url = uri("%s") }; mavenCentral() }
+                    extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> { jvmToolchain(27) }
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/")));
+        Files.writeString(storage.resolve("build.gradle.kts"), """
+                plugins { id("no.beint.vev") }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("storage.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(cacheDir));
+        Files.writeString(app.resolve("build.gradle.kts"), "dependencies { \"implementation\"(project(\":storage\")) }");
+        Files.writeString(Files.createDirectories(storage.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Files.writeString(Files.createDirectories(storage.resolve("src/main/sql")).resolve("find.sql"), """
+                -- vev.name: find :optional
+                -- vev.scope: global
+                -- vev.type: id ItemId
+                SELECT id, name FROM item WHERE id=:key;
+                """);
+        Files.writeString(Files.createDirectories(storage.resolve("src/main/kotlin")).resolve("Store.kt"),
+                "package storage\nfun name(key: Int): String? { val tx: no.beint.vev.ReadScope = error(\"stub\"); return storage.sql.Queries.find(tx, key)?.name }");
+        Files.writeString(Files.createDirectories(storage.resolve("src/test/kotlin")).resolve("Friend.kt"),
+                "internal fun friend(tx: no.beint.vev.ReadScope, key: Int): storage.sql.FindRow? = storage.sql.Queries.find(tx, key)");
+        Path client = Files.createDirectories(app.resolve("src/main/kotlin")).resolve("Client.kt");
+        Files.writeString(client, """
+                package storage.sql
+                internal fun row(key: Int): FindRow? = Queries.find(error("stub"), key)
+                internal fun id(value: Int): ItemId = ItemId(value)
+                """);
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        var failure = runner.withArguments(":app:compileKotlin", "--configuration-cache").buildAndFail();
+        for (String declaration : List.of("Queries", "FindRow", "ItemId")) {
+            assertTrue(failure.getOutput().lines().anyMatch(line -> line.contains("Cannot access")
+                    && line.contains(declaration) && line.contains("internal")), failure.getOutput());
+        }
+        Files.writeString(client, "fun name(key: Int): String? = storage.name(key)");
+        runner.withArguments(":app:compileKotlin", ":storage:compileTestKotlin", "--configuration-cache").build();
+    }
+
+    /** Unused queries fail `check` but never generation or compilation, so SQL can be written before its caller. */
+    @Test void checkRejectsQueriesThatMainCodeNeverCalls() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/"),
+                project.resolve(".vev-schema-cache").toString().replace("\\", "/")));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Path sql = Files.createDirectories(project.resolve("src/main/sql/item"));
+        for (String name : List.of("find", "rename", "export", "unused")) {
+            String body = switch (name) {
+                case "rename" -> "-- vev.name: rename :exec\n-- vev.scope: global\nUPDATE item SET name=:name WHERE id=:id;";
+                case "export" -> "-- vev.name: export :stream\n-- vev.scope: global\nSELECT id FROM item;";
+                case "unused" -> "-- vev.name: unused :optional\n-- vev.scope: global\nSELECT id FROM item WHERE id=:id;";
+                default -> "-- vev.name: " + name + " :optional\n-- vev.scope: global\nSELECT name FROM item WHERE id=:id;";
+            };
+            Files.writeString(sql.resolve(name + ".sql"), body);
+        }
+        Path kotlin = Files.createDirectories(project.resolve("src/main/kotlin"));
+        // A direct call, a call inside a lambda, and a function reference all count as calls.
+        Files.writeString(kotlin.resolve("Store.kt"), """
+                package sample
+                import no.beint.vev.ReadScope
+                import no.beint.vev.WriteScope
+                import sample.sql.Queries
+                fun name(tx: ReadScope, id: Int): String? = Queries.find(tx, id)?.name
+                fun renameAll(tx: WriteScope, ids: List<Int>) = ids.forEach { Queries.rename(tx, "x", it) }
+                internal val export: (ReadScope, java.util.function.Consumer<sample.sql.ExportRow>) -> Unit = Queries::export
+                """);
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        runner.withArguments("compileKotlin", "--console=plain").build();
+        var failure = runner.withArguments("check", "--console=plain").buildAndFail();
+        assertTrue(failure.getOutput().contains("src/main/sql/item/unused.sql (Queries.unused)"), failure.getOutput());
+        for (String used : List.of("find.sql", "rename.sql", "export.sql")) {
+            assertFalse(failure.getOutput().contains(used), failure.getOutput());
+        }
+        Files.delete(sql.resolve("unused.sql"));
+        var success = runner.withArguments("check", "--console=plain").build();
+        assertTrue(success.getOutput().contains("BUILD SUCCESSFUL"), success.getOutput());
+        assertTrue(runner.withArguments("check", "--console=plain").build().getOutput().contains("Reusing configuration cache"));
+    }
+
+    @Test void checkVerifiesCrossServiceCallGraphBoundaries() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/"),
+                project.resolve(".vev-schema-cache").toString().replace("\\", "/")));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql"),
+                "-- vev.name: find :optional\n-- vev.scope: global\nSELECT name FROM item WHERE id=:id;");
+        Path kotlin = Files.createDirectories(project.resolve("src/main/kotlin"));
+        Path svc = kotlin.resolve("Service.kt");
+        Files.writeString(svc, """
+                package sample
+                import no.beint.vev.Db
+                import sample.sql.Queries
+                class Service(private val db: Db) {
+                    fun badRead(id: Int): String? = db.read { tx ->
+                        helperWrite()
+                        Queries.find(tx, id)?.name
+                    }
+                    fun helperWrite() { db.write { } }
+                    fun badIsolation() { db.read { db.readRepeatable { } } }
+                    fun badIsolated() { db.write { db.writeIsolated { } } }
+                    fun badEscaped() { db.write { tx -> db.afterCommit { Queries.find(tx, 1) } } }
+                    fun badTenantSwitch() { db.write(1) { db.read(2) { } } }
+                    fun badExternalIo() {
+                        db.write { callExternalHttp() }
+                    }
+                    fun badExternalIoInWriteNew() {
+                        db.writeNew { callExternalHttp() }
+                    }
+                    private fun callExternalHttp() {
+                        val client = java.net.http.HttpClient.newHttpClient()
+                        val req = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://example.invalid")).build()
+                        client.send(req, java.net.http.HttpResponse.BodyHandlers.discarding())
+                    }
+                    fun safeGuard() {
+                        db.read { guardedTrack() }
+                    }
+                    private fun guardedTrack() {
+                        if (!db.inWriteTransaction()) return
+                        db.beforeCommit { db.write { } }
+                    }
+                }
+                """);
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        var failure = runner.withArguments("check", "--console=plain").buildAndFail();
+        String output = failure.getOutput();
+        assertTrue(output.contains("READ->WRITE"), output);
+        assertTrue(output.contains("ISOLATION-ELEVATION"), output);
+        assertTrue(output.contains("NESTED-ISOLATED"), output);
+        assertTrue(output.contains("ESCAPED-SCOPE"), output);
+        assertTrue(output.contains("NESTED-EXPLICIT-TENANT"), output);
+        assertTrue(output.contains("EXTERNAL-IO-IN-TX"), output);
+        assertTrue(output.contains("badExternalIo"), output);
+        assertTrue(output.contains("badExternalIoInWriteNew"), output);
+        assertFalse(output.contains("guardedTrack"), "Sound inWriteTransaction early return must not trigger READ->WRITE: " + output);
+
+        Files.writeString(svc, """
+                package sample
+                import no.beint.vev.Db
+                import sample.sql.Queries
+                class Service(private val db: Db) {
+                    fun goodRead(id: Int): String? = db.read { tx ->
+                        guardedTrack()
+                        Queries.find(tx, id)?.name
+                    }
+                    fun goodIndependent() { db.read { db.writeNew { } } }
+                    fun goodAfterCommitHttp() {
+                        db.write {
+                            db.afterCommit { callExternalHttp() }
+                        }
+                    }
+                    private fun callExternalHttp() {
+                        val client = java.net.http.HttpClient.newHttpClient()
+                        val req = java.net.http.HttpRequest.newBuilder(java.net.URI.create("https://example.invalid")).build()
+                        client.send(req, java.net.http.HttpResponse.BodyHandlers.discarding())
+                    }
+                    private fun guardedTrack() {
+                        if (!db.inWriteTransaction()) return
+                        db.beforeCommit { db.write { } }
+                    }
+                }
+                """);
+        var success = runner.withArguments("check", "--console=plain").build();
+        assertTrue(success.getOutput().contains("BUILD SUCCESSFUL"), success.getOutput());
+        assertTrue(runner.withArguments("check", "--console=plain").build().getOutput().contains("Reusing configuration cache"));
+    }
+
+    @Test void verifyTableUsageDetectsUnusedTablesAcrossModules() throws Exception {
+        String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("settings.gradle.kts"),
+                "rootProject.name = \"consumer\"\ninclude(\"first\", \"second\", \"app\")\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2" apply false; id("no.beint.vev") apply false }
+                subprojects {
+                    apply(plugin = "org.jetbrains.kotlin.jvm")
+                    apply(plugin = "no.beint.vev")
+                    repositories { maven { url = uri("%s") }; mavenCentral() }
+                    extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> {
+                        jvmToolchain(27)
+                        compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) }
+                    }
+                    tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                        packageName.set("sample." + project.name)
+                        migrations.set(rootProject.layout.projectDirectory.dir("migration"))
+                        schemaCacheDir.set("%s")
+                    }
+                }
+                """.formatted(repository, cacheDir));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("migration")).resolve("V1__schema.sql"), """
+                CREATE SCHEMA external_svc;
+                CREATE TABLE alpha(id int PRIMARY KEY, name text NOT NULL);
+                CREATE TABLE beta(id int PRIMARY KEY, label text NOT NULL);
+                CREATE TABLE trigger_audit(id int PRIMARY KEY);
+                CREATE FUNCTION record_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO trigger_audit(id) VALUES (NEW.id) ON CONFLICT DO NOTHING;
+                    RETURN NEW;
+                END;
+                $$;
+                CREATE TRIGGER alpha_audit AFTER INSERT ON alpha FOR EACH ROW EXECUTE FUNCTION record_audit();
+                CREATE TABLE obsolete_table(id int PRIMARY KEY);
+                CREATE TABLE external_svc.ignored_schema_table(id int PRIMARY KEY);
+                """);
+        Files.writeString(Files.createDirectories(project.resolve("first/src/main/sql")).resolve("findAlpha.sql"),
+                "-- vev.name: findAlpha :optional\n-- vev.scope: global\nSELECT name FROM alpha WHERE id=:id;");
+        Files.writeString(Files.createDirectories(project.resolve("first/src/main/kotlin")).resolve("First.kt"),
+                "package sample\nimport no.beint.vev.ReadScope\nfun alpha(tx: ReadScope, id: Int): String? = sample.first.Queries.findAlpha(tx, id)?.name\n");
+        Files.writeString(Files.createDirectories(project.resolve("second/src/main/sql")).resolve("findBeta.sql"),
+                "-- vev.name: findBeta :optional\n-- vev.scope: global\nSELECT label FROM beta WHERE id=:id;");
+        Files.writeString(Files.createDirectories(project.resolve("second/src/main/kotlin")).resolve("Second.kt"),
+                "package sample\nimport no.beint.vev.ReadScope\nfun beta(tx: ReadScope, id: Int): String? = sample.second.Queries.findBeta(tx, id)?.label\n");
+        Files.writeString(Files.createDirectories(project.resolve("app/src/main/sql")).resolve("ping.sql"),
+                "-- vev.name: ping :one\n-- vev.scope: global\nSELECT 1 AS ok;");
+        Files.writeString(Files.createDirectories(project.resolve("app/src/main/kotlin")).resolve("App.kt"),
+                "package sample\nimport no.beint.vev.ReadScope\nfun ping(tx: ReadScope): Int? = sample.app.Queries.ping(tx).ok\n");
+        Path appBuild = project.resolve("app/build.gradle.kts");
+        String baseAppBuild = """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    manifests.from(provider {
+                        rootProject.subprojects
+                            .filter { it.plugins.hasPlugin("no.beint.vev") }
+                            .map { it.tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev").flatMap { t -> t.relationsManifest } }
+                    })
+                }
+                tasks.named("check") {
+                    dependsOn(tasks.named("verifyVevTableUsage"))
+                }
+                """;
+        Files.writeString(appBuild, baseAppBuild);
+
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        // Individual module checks must still pass without disabling verifyVevTableUsage.
+        assertTrue(runner.withArguments(":first:check", "--console=plain").build().getOutput().contains("BUILD SUCCESSFUL"));
+
+        // Top-level app check flags obsolete_table while recognizing alpha, beta, trigger_audit, and skipping external_svc.
+        var failure = runner.withArguments(":app:check", "--console=plain").buildAndFail();
+        String failOut = failure.getOutput();
+        assertTrue(failOut.contains("public.obsolete_table"), failOut);
+        assertFalse(failOut.contains("public.alpha"), failOut);
+        assertFalse(failOut.contains("public.beta"), failOut);
+        assertFalse(failOut.contains("public.trigger_audit"), failOut);
+        assertFalse(failOut.contains("ignored_schema_table"), failOut);
+
+        // Ignoring obsolete_table lets :app:check pass, and a repeat run is UP-TO-DATE with configuration cache reuse.
+        Files.writeString(appBuild, baseAppBuild + """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    ignoredTables.add("obsolete_table")
+                }
+                """);
+        var pass = runner.withArguments(":app:check", "--console=plain").build();
+        assertTrue(pass.getOutput().contains("BUILD SUCCESSFUL"), pass.getOutput());
+        String report = Files.readString(project.resolve("app/build/reports/vev/table-usage.txt"));
+        assertTrue(report.contains("tables=4"), report);
+        assertTrue(report.contains("used=3"), report);
+        assertTrue(report.contains("ignored=1"), report);
+        assertTrue(report.contains("unused=\n"), report);
+
+        var cached = runner.withArguments(":app:check", "--console=plain").build();
+        assertTrue(cached.getOutput().contains("Reusing configuration cache"), cached.getOutput());
+        assertTrue(cached.getOutput().contains(":app:verifyVevTableUsage UP-TO-DATE"), cached.getOutput());
+
+        // Stale ignoredTables entry fails fast.
+        Files.writeString(appBuild, baseAppBuild + """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    ignoredTables.addAll(listOf("obsolete_table", "nonexistent_table"))
+                }
+                """);
+        var stale = runner.withArguments(":app:verifyVevTableUsage", "--console=plain").buildAndFail();
+        assertTrue(stale.getOutput().contains("public.nonexistent_table"), stale.getOutput());
+
+        // Already-referenced table in ignoredTables fails fast so allowlists never go stale.
+        Files.writeString(appBuild, baseAppBuild + """
+                tasks.named<no.beint.vev.gradle.VerifyTableUsage>("verifyVevTableUsage") {
+                    ignoredTables.addAll(listOf("obsolete_table", "alpha"))
+                }
+                """);
+        var staleUsed = runner.withArguments(":app:verifyVevTableUsage", "--console=plain").buildAndFail();
+        assertTrue(staleUsed.getOutput().contains("public.alpha"), staleUsed.getOutput());
+        assertTrue(staleUsed.getOutput().contains("already referenced"), staleUsed.getOutput());
+    }
+
+    @Test void callGraphDetectsNewIoSinksSyncLambdasRunBlockingAndSpringEventListeners() throws Exception {
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"consumer\"\n");
+        Files.writeString(project.resolve("build.gradle.kts"), """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin { jvmToolchain(27); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27) } }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                tasks.named<no.beint.vev.gradle.VerifyCallGraph>("verifyVevCallGraph") {
+                    packagePrefixes.set(setOf("sample"))
+                }
+                """.formatted(System.getProperty("vev.repository").replace("\\", "/"),
+                project.resolve(".vev-schema-cache").toString().replace("\\", "/")));
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL);");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/sql")).resolve("find.sql"),
+                "-- vev.name: find :optional\n-- vev.scope: global\nSELECT name FROM item WHERE id=:id;");
+
+        // Minimal compile-time stubs for external libraries/annotations in their real packages (excluded from packagePrefixes=sample).
+        Path javaSrc = Files.createDirectories(project.resolve("src/main/java"));
+        Files.writeString(Files.createDirectories(javaSrc.resolve("com/apollographql/apollo")).resolve("ApolloCall.java"),
+                "package com.apollographql.apollo; public class ApolloCall { public Object execute() { return null; } }");
+        Files.writeString(Files.createDirectories(javaSrc.resolve("org/xbill/DNS")).resolve("Lookup.java"),
+                "package org.xbill.DNS; public class Lookup { public Object[] run() { return null; } }");
+        Files.writeString(Files.createDirectories(javaSrc.resolve("kotlinx/coroutines")).resolve("BuildersKt.java"),
+                "package kotlinx.coroutines; public class BuildersKt { public static void runBlocking(Runnable block) { block.run(); } }");
+        Files.writeString(Files.createDirectories(javaSrc.resolve("org/springframework/context")).resolve("ApplicationEventPublisher.java"),
+                "package org.springframework.context; public interface ApplicationEventPublisher { void publishEvent(Object event); }");
+        Files.writeString(Files.createDirectories(javaSrc.resolve("org/springframework/context/event")).resolve("EventListener.java"),
+                "package org.springframework.context.event; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface EventListener { Class<?>[] classes() default {}; }");
+        Files.writeString(Files.createDirectories(javaSrc.resolve("org/springframework/scheduling/annotation")).resolve("Async.java"),
+                "package org.springframework.scheduling.annotation; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface Async {}");
+        Files.writeString(Files.createDirectories(javaSrc.resolve("org/springframework/transaction/event")).resolve("TransactionalEventListener.java"),
+                "package org.springframework.transaction.event; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface TransactionalEventListener {}");
+
+        Path sampleJava = Files.createDirectories(javaSrc.resolve("sample"));
+        Path violationsFile = sampleJava.resolve("EdgeCases.java");
+        Files.writeString(violationsFile, """
+                package sample;
+                import com.apollographql.apollo.ApolloCall;
+                import java.net.InetSocketAddress;
+                import java.net.Socket;
+                import java.util.*;
+                import java.util.concurrent.ExecutorService;
+                import javax.net.ssl.SSLSocketFactory;
+                import kotlinx.coroutines.BuildersKt;
+                import no.beint.vev.Db;
+                import org.springframework.context.ApplicationEventPublisher;
+                import org.springframework.context.event.EventListener;
+                import org.springframework.scheduling.annotation.Async;
+                import org.springframework.transaction.event.TransactionalEventListener;
+                import org.xbill.DNS.Lookup;
+                import sample.sql.Queries;
+
+                public class EdgeCases {
+                    public interface DomainEvent {}
+                    public static class OrderEvent implements DomainEvent {}
+                    public static class BaseAlertEvent {}
+                    public static class SubAlertEvent extends BaseAlertEvent {}
+                    public static class MarkerEvent {}
+                    public static class SafeAsyncEvent {}
+                    public static class SafeTxEvent {}
+
+                    private final Db db;
+                    private final ApplicationEventPublisher publisher;
+                    private final ExecutorService executor;
+
+                    public EdgeCases(Db db, ApplicationEventPublisher publisher, ExecutorService executor) {
+                        this.db = db;
+                        this.publisher = publisher;
+                        this.executor = executor;
+                    }
+
+                    public String useQuery(int id) {
+                        return db.read(tx -> {
+                            var row = Queries.find(tx, id);
+                            return row == null ? null : row.getName();
+                        });
+                    }
+
+                    // New external I/O sinks
+                    public void badApollo(ApolloCall call) { db.write(tx -> { call.execute(); return null; }); }
+                    public void badSocket() {
+                        db.write(tx -> {
+                            try { new Socket().connect(new InetSocketAddress("example.invalid", 80)); } catch (Exception ignored) {}
+                            return null;
+                        });
+                    }
+                    public void badSslFactory(SSLSocketFactory factory) {
+                        db.write(tx -> {
+                            try { factory.createSocket("example.invalid", 443); } catch (Exception ignored) {}
+                            return null;
+                        });
+                    }
+                    public void badDns(Lookup lookup) { db.write(tx -> { lookup.run(); return null; }); }
+
+                    // Synchronous java.util and runBlocking lambdas
+                    public void badForEach(List<String> items) { db.read(tx -> { items.forEach(x -> writeForEach()); return null; }); }
+                    public void badComputeIfAbsent(Map<String, String> map) { db.read(tx -> map.computeIfAbsent("k", k -> { writeCompute(); return k; })); }
+                    public void badOptionalOrElse(Optional<String> opt) { db.read(tx -> { opt.ifPresentOrElse(x -> {}, this::writeOptional); return null; }); }
+                    public void badRunBlocking(Lookup lookup) { db.write(tx -> { BuildersKt.runBlocking(() -> lookup.run()); return null; }); }
+
+                    // Async executor MUST NOT be followed as synchronous
+                    public void safeExecutorSubmit(Lookup lookup) { db.write(tx -> { executor.submit(() -> { writeAsync(); lookup.run(); }); return null; }); }
+
+                    // Spring synchronous EventListener tracing
+                    public void badSyncEventInRead() { db.read(tx -> { publisher.publishEvent(new OrderEvent()); return null; }); }
+                    public void badSupertypeEventInWrite(SubAlertEvent e) { db.write(tx -> { publisher.publishEvent(e); return null; }); }
+                    public void badMarkerEventInRead() { db.read(tx -> { publisher.publishEvent(new MarkerEvent()); return null; }); }
+
+                    // Must NOT false-positive: @Async, @TransactionalEventListener, untyped Object, afterCommit
+                    public void safeAsyncEventInWrite() { db.write(tx -> { publisher.publishEvent(new SafeAsyncEvent()); return null; }); }
+                    public void safeTxEventInWrite() { db.write(tx -> { publisher.publishEvent(new SafeTxEvent()); return null; }); }
+                    public void safeUntypedObjectInWrite(Object unknown) { db.write(tx -> { publisher.publishEvent(unknown); return null; }); }
+                    public void safeAfterCommitEvent() { db.write(tx -> { db.afterCommit(() -> publisher.publishEvent(new OrderEvent())); return null; }); }
+
+                    @EventListener public void onOrder(OrderEvent e) { writeOrder(); }
+                    @EventListener public void onBaseAlert(BaseAlertEvent e) { new Lookup().run(); }
+                    @EventListener(classes = { MarkerEvent.class }) public void onMarker() { writeMarker(); }
+                    @Async @EventListener public void onAsync(SafeAsyncEvent e) { new Lookup().run(); }
+                    @TransactionalEventListener public void onTxEvent(SafeTxEvent e) { new Lookup().run(); }
+
+                    private void writeForEach() { db.write(tx -> null); }
+                    private void writeCompute() { db.write(tx -> null); }
+                    private void writeOptional() { db.write(tx -> null); }
+                    private void writeOrder() { db.write(tx -> null); }
+                    private void writeMarker() { db.write(tx -> null); }
+                    private void writeAsync() { db.write(tx -> null); }
+                }
+                """);
+
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+        var failure = runner.withArguments("check", "--console=plain").buildAndFail();
+        String output = failure.getOutput();
+
+        assertTrue(output.contains("badApollo") && output.contains("ApolloCall.execute"), output);
+        assertTrue(output.contains("badSocket") && output.contains("Socket.connect"), output);
+        assertTrue(output.contains("badSslFactory") && output.contains("SSLSocketFactory.createSocket"), output);
+        assertTrue(output.contains("badDns") && output.contains("Lookup.run"), output);
+        assertTrue(output.contains("badForEach"), output);
+        assertTrue(output.contains("badComputeIfAbsent"), output);
+        assertTrue(output.contains("badOptionalOrElse"), output);
+        assertTrue(output.contains("badRunBlocking"), output);
+        assertTrue(output.contains("badSyncEventInRead") && output.contains("onOrder"), output);
+        assertTrue(output.contains("badSupertypeEventInWrite") && output.contains("onBaseAlert"), output);
+        assertTrue(output.contains("badMarkerEventInRead") && output.contains("onMarker"), output);
+
+        assertFalse(output.contains("safeExecutorSubmit"), "ExecutorService.submit must not be treated as synchronous: " + output);
+        assertFalse(output.contains("safeAsyncEventInWrite"), "@Async listener must be excluded: " + output);
+        assertFalse(output.contains("safeTxEventInWrite"), "@TransactionalEventListener must be excluded: " + output);
+        assertFalse(output.contains("safeUntypedObjectInWrite"), "Untyped Object event must not link all listeners: " + output);
+        assertFalse(output.contains("safeAfterCommitEvent"), "afterCommit event publish must be excluded: " + output);
+    }
+
+    @Test void generatedCodeCompilesCleanlyUnderStrictWarningsAndReturnValueChecker() throws Exception {
+        String repository = System.getProperty("vev.repository").replace("\\", "/");
+        String cacheDir = project.resolve(".vev-schema-cache").toString().replace("\\", "/");
+        Files.writeString(project.resolve("settings.gradle.kts"), "rootProject.name = \"strict-consumer\"\n");
+        Files.writeString(project.resolve("gradle.properties"), "org.gradle.configuration-cache=true\n");
+        Files.writeString(Files.createDirectories(project.resolve("src/main/resources/db/migration")).resolve("V1__item.sql"),
+                "CREATE TABLE item(id int PRIMARY KEY, name text NOT NULL, note text);");
+        Path sql = Files.createDirectories(project.resolve("src/main/sql"));
+        Files.writeString(sql.resolve("rename.sql"),
+                "-- vev.name: rename :exec\n-- vev.scope: global\n-- vev.nullable: note\nUPDATE item SET name = :name, note = :note WHERE id = :id;");
+        Files.writeString(sql.resolve("lock.sql"),
+                "-- vev.name: lock :void\n-- vev.scope: global\nSELECT pg_advisory_xact_lock(hashtextextended(:key, 0));");
+        Files.writeString(sql.resolve("export.sql"),
+                "-- vev.name: export :stream\n-- vev.scope: global\nSELECT id, name FROM item ORDER BY id;");
+        Files.writeString(sql.resolve("count.sql"),
+                "-- vev.name: count :one\n-- vev.scope: global\nSELECT count(*) AS total FROM item;");
+        Files.writeString(sql.resolve("find.sql"),
+                "-- vev.name: find :optional\n-- vev.scope: global\n-- vev.type: id ItemId\nSELECT id, name FROM item WHERE id = :id;");
+        Files.writeString(sql.resolve("list.sql"),
+                "-- vev.name: list :many\n-- vev.scope: global\nSELECT id, name FROM item ORDER BY id LIMIT :limit::int;");
+
+        Path consumer = Files.createDirectories(project.resolve("src/main/kotlin")).resolve("Consumer.kt");
+        String validConsumer = """
+                package sample
+                import no.beint.vev.ReadScope
+                import no.beint.vev.WriteScope
+                import sample.sql.ItemId
+                import sample.sql.Queries
+
+                fun exercise(tx: WriteScope, id: Int, limit: Int): Long {
+                    Queries.rename(tx, "updated", null, id)
+                    Queries.lock(tx, "k")
+                    val seen = mutableListOf<String>()
+                    Queries.export(tx) { row -> seen.add(row.name) }
+                    val found = Queries.find(tx, ItemId(id))
+                    val listed = Queries.list(tx, limit)
+                    return Queries.count(tx).total + seen.size + (if (found != null) 1 else 0) + listed.size
+                }
+
+                fun countOnly(tx: ReadScope): Long = Queries.count(tx).total
+                """;
+        Files.writeString(consumer, validConsumer);
+
+        String buildTemplate = """
+                plugins { kotlin("jvm") version "2.5.0-Beta2"; id("no.beint.vev") }
+                repositories { maven { url = uri("%s") }; mavenCentral() }
+                kotlin {
+                    jvmToolchain(27)
+                    compilerOptions {
+                        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_27)
+                        %s
+                    }
+                }
+                tasks.named<no.beint.vev.gradle.GenerateSql>("generateVev") {
+                    packageName.set("sample.sql")
+                    schemaCacheDir.set("%s")
+                }
+                """;
+
+        var runner = GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath();
+
+        // 1. Strict consumer: extraWarnings + allWarningsAsErrors + -Xreturn-value-checker=full
+        Files.writeString(project.resolve("build.gradle.kts"), buildTemplate.formatted(repository, """
+                extraWarnings.set(true)
+                allWarningsAsErrors.set(true)
+                freeCompilerArgs.add("-Xreturn-value-checker=full")
+                """, cacheDir));
+        var strictBuild = runner.withArguments("clean", "check", "--console=plain").build();
+        assertTrue(strictBuild.getOutput().contains("BUILD SUCCESSFUL"), strictBuild.getOutput());
+
+        // Verify -Xreturn-value-checker=full is genuinely enforced: ignoring :one return value must fail.
+        Files.writeString(consumer, validConsumer + "\nfun ignoredOne(tx: ReadScope) { Queries.count(tx) }\n");
+        var ignoredFailure = runner.withArguments("compileKotlin", "--console=plain").buildAndFail();
+        assertTrue(ignoredFailure.getOutput().contains("Unused return value of 'count'"), ignoredFailure.getOutput());
+        Files.writeString(consumer, validConsumer);
+
+        // 2. Strict warnings WITHOUT -Xreturn-value-checker (verifies @IgnorableReturnValue produces no warning when checker is off).
+        Files.writeString(project.resolve("build.gradle.kts"), buildTemplate.formatted(repository, """
+                extraWarnings.set(true)
+                allWarningsAsErrors.set(true)
+                """, cacheDir));
+        var noCheckerStrict = runner.withArguments("clean", "check", "--console=plain").build();
+        assertTrue(noCheckerStrict.getOutput().contains("BUILD SUCCESSFUL"), noCheckerStrict.getOutput());
+
+        // 3. Default Kotlin 2.5 flags (no extraWarnings, no -Xreturn-value-checker).
+        Files.writeString(project.resolve("build.gradle.kts"), buildTemplate.formatted(repository, "", cacheDir));
+        var defaultBuild = runner.withArguments("clean", "check", "--console=plain").build();
+        assertTrue(defaultBuild.getOutput().contains("BUILD SUCCESSFUL"), defaultBuild.getOutput());
+    }
+
+    private static int count(String text, String needle) {
+        int total = 0;
+        for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length())) total++;
+        return total;
+    }
+
+    private GradleRunner runner() {
+        return GradleRunner.create().withProjectDir(project.toFile()).withPluginClasspath()
+                .withArguments("compileKotlin", "--console=plain", "--stacktrace");
+    }
+}

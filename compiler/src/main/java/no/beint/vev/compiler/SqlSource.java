@@ -1,0 +1,679 @@
+package no.beint.vev.compiler;
+
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+/** Lexes bind parameters without interpreting SQL semantics; PostgreSQL owns SQL validation. */
+public record SqlSource(Path path, String name, String cardinality, String sql,
+                        List<String> parameters, Set<String> nullable, Map<String, String> domains,
+                        Map<String, String> enums, Set<String> notNull, List<String> tokens, String tenant,
+                        String positionalSql, boolean customPlan, boolean forceWrite, boolean allowBlob,
+                        boolean allowUnorderedLimit) {
+    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
+    private static final String DIRECTIVES = "(?:name|nullable|notnull|type|enum|scope|plan|access|allow):.*";
+
+    /** Returns the directive without its prefix, or null for an ordinary comment. */
+    private static String directive(Path path, String comment) {
+        if (!comment.startsWith("vev.")) {
+            if (comment.matches(DIRECTIVES)) throw error(path, "Prefix Vev directives with vev.: -- vev." + comment);
+            return null;
+        }
+        String value = comment.substring(4);
+        if (!value.matches(DIRECTIVES)) throw error(path, "Unknown Vev directive: " + comment);
+        return value;
+    }
+
+    private static int lineEnd(String source, int start) {
+        int i = start;
+        while (i < source.length() && source.charAt(i) != '\n' && source.charAt(i) != '\r') i++;
+        return i;
+    }
+
+    private static int afterBlockComment(Path path, String source, int start) {
+        int depth = 1;
+        int i = start + 2;
+        while (i < source.length()) {
+            if (source.startsWith("/*", i)) { depth++; i += 2; }
+            else if (source.startsWith("*/", i)) {
+                i += 2;
+                if (--depth == 0) return i;
+            } else i++;
+        }
+        throw error(path, "Unterminated SQL comment");
+    }
+
+    public static SqlSource parse(Path path, String source) {
+        String name = null;
+        String cardinality = null;
+        String tenant = "tenantId";
+        boolean scopeDeclared = false;
+        boolean customPlan = false;
+        boolean forceWrite = false;
+        boolean allowBlob = false;
+        boolean allowUnorderedLimit = false;
+        Set<String> nullable = new LinkedHashSet<>();
+        Set<String> notNull = new LinkedHashSet<>();
+        Map<String, String> domains = new LinkedHashMap<>();
+        Map<String, String> enums = new LinkedHashMap<>();
+        Set<String> singletonDirectives = new LinkedHashSet<>();
+        int sqlStart = 0;
+        while (sqlStart < source.length()) {
+            if (Character.isWhitespace(source.charAt(sqlStart))) { sqlStart++; continue; }
+            if (source.startsWith("/*", sqlStart)) {
+                sqlStart = afterBlockComment(path, source, sqlStart);
+                continue;
+            }
+            if (!source.startsWith("--", sqlStart)) break;
+            int end = lineEnd(source, sqlStart + 2);
+            String text = directive(path, source.substring(sqlStart + 2, end).strip());
+            sqlStart = end;
+            if (text == null) continue;
+            String key = text.substring(0, text.indexOf(':'));
+            if (Set.of("name", "scope", "plan", "access").contains(key) && !singletonDirectives.add(key)) {
+                throw error(path, "Duplicate " + key + " directive");
+            }
+            if (text.startsWith("name:")) {
+                if (name != null) throw error(path, "Duplicate name directive");
+                String[] parts = text.substring(5).strip().split("\\s+");
+                if (parts.length != 2 || !Set.of(":many", ":one", ":optional", ":stream", ":exec", ":void").contains(parts[1])) {
+                    throw error(path, "Use -- vev.name: queryName :many|:one|:optional|:stream|:exec|:void");
+                }
+                name = identifier(path, parts[0]);
+                cardinality = parts[1].substring(1);
+            } else if (text.startsWith("nullable:")) {
+                for (String value : text.substring(9).strip().split("[ ,]+")) nullable.add(identifier(path, value));
+            } else if (text.startsWith("notnull:")) {
+                for (String value : text.substring(8).strip().split("[ ,]+")) notNull.add(identifier(path, value));
+            } else if (text.startsWith("enum:")) {
+                String[] parts = text.substring(5).strip().split("\\s+");
+                if (parts.length != 2) throw error(path, "Use -- vev.enum: parameterOrColumn fully.qualified.KotlinEnum");
+                String previous = enums.put(identifier(path, parts[0]), enumName(path, parts[1]));
+                if (previous != null) throw error(path, "Duplicate enum declaration: " + parts[0]);
+            } else if (text.startsWith("type:")) {
+                String[] parts = text.substring(5).strip().split("\\s+");
+                if (parts.length != 2) throw error(path, "Use -- vev.type: parameterOrColumn DomainType");
+                String previous = domains.put(identifier(path, parts[0]), typeName(path, parts[1]));
+                if (previous != null) throw error(path, "Duplicate type declaration: " + parts[0]);
+            } else if (text.startsWith("scope:")) {
+                if (scopeDeclared || !text.substring(6).strip().equals("global")) throw error(path, "Use -- vev.scope: global once to opt out of tenant binding");
+                scopeDeclared = true;
+                tenant = null;
+            } else if (text.startsWith("access:")) {
+                if (!text.substring(7).strip().equals("write")) throw error(path, "Use -- vev.access: write to require a write scope");
+                forceWrite = true;
+            } else if (text.startsWith("allow:")) {
+                String raw = text.substring(6).strip();
+                if (raw.isEmpty()) throw error(path, "Use -- vev.allow: blob and/or unordered-limit");
+                for (String value : raw.split("[ ,]+")) {
+                    switch (value) {
+                        case "blob" -> allowBlob = true;
+                        case "unordered-limit" -> allowUnorderedLimit = true;
+                        default -> throw error(path, "Unknown -- vev.allow option: " + value
+                                + "; supported options are blob, unordered-limit");
+                    }
+                }
+            } else {
+                if (!text.substring(5).strip().equals("custom")) throw error(path, "Use -- vev.plan: custom to plan every execution with its parameter values");
+                customPlan = true;
+            }
+        }
+        if (name == null) throw error(path, "Missing -- vev.name: queryName :cardinality");
+        for (String both : enums.keySet()) {
+            if (domains.containsKey(both)) throw error(path, "Declare either type or enum for " + both + ", not both");
+        }
+        List<String> parameters = new ArrayList<>();
+        List<String> tokens = new ArrayList<>();
+        StringBuilder sql = new StringBuilder();
+        // The same SQL with $n placeholders, for EXPLAIN (GENERIC_PLAN) outside JDBC's ? rewriting.
+        StringBuilder positional = new StringBuilder();
+        boolean terminated = false;
+        for (int i = sqlStart; i < source.length();) {
+            char c = source.charAt(i);
+            if (Character.isWhitespace(c)) { sql.append(c); positional.append(c); i++; continue; }
+            if (source.startsWith("--", i)) {
+                int end = lineEnd(source, i + 2);
+                String comment = directive(path, source.substring(i + 2, end).strip());
+                if (!tokens.isEmpty() && comment != null) throw error(path, "Query directives must precede SQL");
+                i = end;
+                sql.append(' '); positional.append(' ');
+                continue;
+            }
+            if (source.startsWith("/*", i)) {
+                i = afterBlockComment(path, source, i);
+                sql.append(' '); positional.append(' ');
+                continue;
+            }
+            if (terminated) throw error(path, "Exactly one SQL statement is allowed per query file");
+            if (c == ';') { terminated = true; i++; continue; }
+            if (c == '\'' || c == '"') {
+                int start = i++;
+                boolean escaped = c == '\'' && start > 0 && (source.charAt(start - 1) == 'E' || source.charAt(start - 1) == 'e')
+                        && (start < 2 || !Character.isJavaIdentifierPart(source.charAt(start - 2)));
+                boolean closed = false;
+                while (i < source.length()) {
+                    if (escaped && source.charAt(i) == '\\') { i += 2; continue; }
+                    if (source.charAt(i++) == c) {
+                        if (i < source.length() && source.charAt(i) == c) { i++; continue; }
+                        closed = true; break;
+                    }
+                }
+                if (!closed) throw error(path, "Unterminated quoted SQL token");
+                sql.append(source, start, i); positional.append(source, start, i);
+                tokens.add(c == '\'' ? "<literal>" : "<identifier>");
+                continue;
+            }
+            if (c == '$') {
+                var match = Pattern.compile("\\$(?:[A-Za-z_][A-Za-z0-9_]*)?\\$").matcher(source.substring(i));
+                if (match.lookingAt()) {
+                    String delimiter = match.group();
+                    int end = source.indexOf(delimiter, i + delimiter.length());
+                    if (end < 0) throw error(path, "Unterminated dollar-quoted SQL literal");
+                    sql.append(source, i, end + delimiter.length()); positional.append(source, i, end + delimiter.length());
+                    i = end + delimiter.length();
+                    tokens.add("<literal>");
+                    continue;
+                }
+                throw error(path, "Use named :parameters, not PostgreSQL positional parameters");
+            }
+            if (source.startsWith("::", i)) { sql.append("::"); positional.append("::"); tokens.add("::"); i += 2; continue; }
+            if (c == ':' && i + 1 < source.length() && Character.isJavaIdentifierStart(source.charAt(i + 1))
+                    && (i == 0 || !Character.isJavaIdentifierPart(source.charAt(i - 1)))) {
+                int end = i + 2;
+                while (end < source.length() && Character.isJavaIdentifierPart(source.charAt(end))) end++;
+                String parameter = identifier(path, source.substring(i + 1, end));
+                if (parameter.equals("tx") || parameter.equals("session")) throw error(path, "Parameter name " + parameter + " is reserved");
+                if (cardinality.equals("stream") && parameter.equals("onRow")) throw error(path, "Parameter name onRow is reserved for :stream queries");
+                parameters.add(parameter);
+                sql.append('?'); positional.append('$').append(parameters.size()); tokens.add("<parameter>"); i = end; continue;
+            }
+            if (Character.isJavaIdentifierStart(c)) {
+                int end = i + 1;
+                while (end < source.length() && Character.isJavaIdentifierPart(source.charAt(end))) end++;
+                String word = source.substring(i, end);
+                sql.append(word); positional.append(word); tokens.add(word.toUpperCase(Locale.ROOT)); i = end; continue;
+            }
+            if (c == '?') sql.append("??"); else sql.append(c);
+            positional.append(c);
+            tokens.add(String.valueOf(c)); i++;
+        }
+        if (tokens.isEmpty() || !Set.of("SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(tokens.getFirst())) {
+            throw error(path, "Queries must be SELECT, WITH, VALUES, INSERT, UPDATE, DELETE, or MERGE");
+        }
+        int depth = 0;
+        String statement = null;
+        boolean projection = false;
+        boolean returningAliases = false;
+        int returningAliasesEnd = -2;
+        boolean hasTopLevelOrderBy = false;
+        boolean hasTopLevelLimit = false;
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (token.equals(")")) depth--;
+            if (depth == 0) {
+                if (token.equals("RETURNING")) returningAliases = i + 2 < tokens.size()
+                        && tokens.get(i + 1).equals("WITH") && tokens.get(i + 2).equals("(");
+                if (returningAliases && token.equals(")")) {
+                    returningAliasesEnd = i;
+                    returningAliases = false;
+                }
+                if (statement == null && Set.of("SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(token)) statement = token;
+                if (token.equals("RETURNING") || token.equals("SELECT") && "SELECT".equals(statement)) projection = true;
+                if (Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR", "UNION", "EXCEPT", "INTERSECT").contains(token)) projection = false;
+                if (projection && token.equals("*") && i > 0
+                        && (i == returningAliasesEnd + 1
+                        || Set.of("SELECT", "RETURNING", "DISTINCT", "ALL", ",", ".").contains(tokens.get(i - 1))
+                        || i + 1 < tokens.size() && Set.of("FROM", "INTO").contains(tokens.get(i + 1)))) {
+                    throw error(path, "List returned columns explicitly; SELECT/RETURNING * is not a stable query contract");
+                }
+                if (token.equals("ORDER") && i + 1 < tokens.size() && tokens.get(i + 1).equals("BY")) {
+                    hasTopLevelOrderBy = true;
+                }
+                boolean precededByAliasOrDot = i > 0 && (tokens.get(i - 1).equals("AS") || tokens.get(i - 1).equals("."));
+                if (!precededByAliasOrDot && token.equals("LIMIT")
+                        && !(i + 1 < tokens.size() && tokens.get(i + 1).equals("ALL"))) {
+                    hasTopLevelLimit = true;
+                }
+                if (!precededByAliasOrDot && token.equals("FETCH") && i + 1 < tokens.size()
+                        && (tokens.get(i + 1).equals("FIRST") || tokens.get(i + 1).equals("NEXT"))) {
+                    hasTopLevelLimit = true;
+                }
+            }
+            if (token.equals("(")) depth++;
+        }
+        if (hasTopLevelLimit && !hasTopLevelOrderBy && !allowUnorderedLimit && !allConstantProjections(tokens)) {
+            throw error(path, "Query uses LIMIT/FETCH without a top-level ORDER BY; add a deterministic ORDER BY or opt in with -- vev.allow: unordered-limit");
+        }
+        int parameterIndex = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!tokens.get(i).equals("<parameter>")) continue;
+            String parameter = parameters.get(parameterIndex++);
+            boolean jsonOperand = i >= 2 && tokens.get(i - 1).equals(">")
+                    && (tokens.get(i - 2).equals("-") || i >= 3 && tokens.get(i - 2).equals(">") && tokens.get(i - 3).equals("-"));
+            if (jsonOperand && (i + 1 == tokens.size() || !tokens.get(i + 1).equals("::"))) {
+                throw error(path, "Cast :" + parameter + " after -> or ->>; PostgreSQL resolves an uncast parameter to a text key,"
+                        + " never an array index. Use :" + parameter + "::int for an index or :" + parameter + "::text for a key");
+            }
+        }
+        if (!new LinkedHashSet<>(parameters).containsAll(nullable)) throw error(path, "nullable names an unknown parameter");
+        if (!notNull.isEmpty() && Set.of("exec", "void").contains(cardinality)) throw error(path, "notnull requires a result set");
+        if (tenant != null && (!parameters.contains(tenant) || nullable.contains(tenant) || domains.containsKey(tenant))) throw error(path, "Tenant queries require a non-null :tenantId parameter; use -- vev.scope: global for global SQL");
+        if (parameters.size() > 65535) throw error(path, "PostgreSQL supports at most 65535 bind positions");
+        boolean effectiveCustomPlan = customPlan || needsCustomPlan(tokens, parameters, nullable);
+        return new SqlSource(path, name, cardinality, sql.toString().strip(),
+                List.copyOf(parameters), Set.copyOf(nullable), Map.copyOf(domains), Map.copyOf(enums),
+                Set.copyOf(notNull), List.copyOf(tokens), tenant, positional.toString().strip(), effectiveCustomPlan,
+                forceWrite, allowBlob, allowUnorderedLimit);
+    }
+
+    /**
+     * Canonical SQL form for duplicate-query detection: collapses whitespace and uppercases unquoted
+     * keywords/identifiers while preserving string and quoted-identifier literals verbatim.
+     */
+    String canonicalSql() {
+        var out = new StringBuilder(sql.length());
+        boolean space = false;
+        for (int i = 0; i < sql.length();) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c)) {
+                space = out.length() > 0;
+                i++;
+                continue;
+            }
+            if (space) {
+                out.append(' ');
+                space = false;
+            }
+            if (c == '\'' || c == '"') {
+                int start = i++;
+                boolean escaped = c == '\'' && start > 0 && (sql.charAt(start - 1) == 'E' || sql.charAt(start - 1) == 'e')
+                        && (start < 2 || !Character.isJavaIdentifierPart(sql.charAt(start - 2)));
+                while (i < sql.length()) {
+                    if (escaped && sql.charAt(i) == '\\') { i += 2; continue; }
+                    if (sql.charAt(i++) == c) {
+                        if (i < sql.length() && sql.charAt(i) == c) { i++; continue; }
+                        break;
+                    }
+                }
+                out.append(sql, start, i);
+                continue;
+            }
+            if (c == '$') {
+                var match = Pattern.compile("\\$(?:[A-Za-z_][A-Za-z0-9_]*)?\\$").matcher(sql.substring(i));
+                if (match.lookingAt()) {
+                    String delimiter = match.group();
+                    int end = sql.indexOf(delimiter, i + delimiter.length());
+                    if (end >= 0) {
+                        out.append(sql, i, end + delimiter.length());
+                        i = end + delimiter.length();
+                        continue;
+                    }
+                }
+            }
+            out.append(Character.toUpperCase(c));
+            i++;
+        }
+        return out.toString();
+    }
+
+    /**
+     * Automatically enables per-execution planning ({@code setPrepareThreshold(0)}) for SQL shapes where
+     * PostgreSQL generic plans are prone to severe selectivity underestimation or cannot fold disabled
+     * branches: nullable {@code IS [NOT] NULL} filters, parameterized {@code WITH} CTEs, {@code ANY(:array)},
+     * parameterized {@code BETWEEN} ranges, sentinel parameter-to-literal checks ({@code :x = ''}), and
+     * boolean-flag branches ({@code NOT :flag}, {@code ON :flag AND}, {@code WHEN :flag THEN}).
+     * Simple single-row lookups and DML stay on fast server-prepared generic plans.
+     */
+    static boolean needsCustomPlan(List<String> tokens, List<String> parameters, Set<String> nullable) {
+        if (parameters.isEmpty()) return false;
+        if (tokens.getFirst().equals("WITH")) return true;
+        if (hasNullableNullCheck(tokens, parameters, nullable)) return true;
+        for (int i = 0; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if (t.equals("ANY") && i + 2 < tokens.size() && tokens.get(i + 1).equals("(")
+                    && (tokens.get(i + 2).equals("<parameter>")
+                    || (i + 4 < tokens.size() && tokens.get(i + 2).equals("CAST") && tokens.get(i + 3).equals("(") && tokens.get(i + 4).equals("<parameter>")))) {
+                return true;
+            }
+            if (t.equals("BETWEEN") && betweenUsesParameter(tokens, i)) {
+                return true;
+            }
+            if (t.equals("<parameter>")) {
+                if (i > 0 && tokens.get(i - 1).equals("NOT")) return true;
+                int after = afterParameterExpression(tokens, i);
+                if (i > 0 && tokens.get(i - 1).equals("ON") && after < tokens.size() && tokens.get(after).equals("AND")) return true;
+                if (i > 0 && tokens.get(i - 1).equals("WHEN") && after < tokens.size() && tokens.get(after).equals("THEN")) return true;
+                if (isSentinelLiteralComparison(tokens, after)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean betweenUsesParameter(List<String> tokens, int betweenIndex) {
+        int depth = 0;
+        boolean seenAnd = false;
+        for (int j = betweenIndex + 1; j < tokens.size(); j++) {
+            String t = tokens.get(j);
+            if (t.equals("(")) { depth++; continue; }
+            if (t.equals(")")) {
+                if (depth == 0) return false;
+                depth--;
+                continue;
+            }
+            if (t.equals("<parameter>")) return true;
+            if (depth == 0) {
+                if (t.equals("AND")) {
+                    if (!seenAnd) { seenAnd = true; continue; }
+                    return false;
+                }
+                if (seenAnd && (t.equals("OR") || t.equals(",") || t.equals("ORDER") || t.equals("GROUP")
+                        || t.equals("HAVING") || t.equals("LIMIT") || t.equals("OFFSET") || t.equals("UNION"))) {
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isSentinelLiteralComparison(List<String> tokens, int afterParam) {
+        if (afterParam + 1 < tokens.size() && tokens.get(afterParam).equals("=")
+                && tokens.get(afterParam + 1).equals("<literal>")) {
+            return true;
+        }
+        if (afterParam + 2 < tokens.size() && tokens.get(afterParam + 2).equals("<literal>")) {
+            String op1 = tokens.get(afterParam);
+            String op2 = tokens.get(afterParam + 1);
+            return (op1.equals("<") && op2.equals(">")) || (op1.equals("!") && op2.equals("="));
+        }
+        return false;
+    }
+
+    private static int afterParameterExpression(List<String> tokens, int paramTokenIndex) {
+        int next = paramTokenIndex + 1;
+        if (paramTokenIndex >= 2 && tokens.get(paramTokenIndex - 2).equals("CAST") && tokens.get(paramTokenIndex - 1).equals("(")
+                && next < tokens.size() && tokens.get(next).equals("AS")) {
+            int depth = 1;
+            next++;
+            while (next < tokens.size() && depth > 0) {
+                String t = tokens.get(next++);
+                if (t.equals("(")) depth++;
+                else if (t.equals(")")) depth--;
+            }
+        } else {
+            while (next < tokens.size() && tokens.get(next).equals("::")) {
+                next++;
+                next = skipTypeName(tokens, next);
+            }
+        }
+        int open = paramTokenIndex - 1;
+        if (paramTokenIndex >= 2 && tokens.get(paramTokenIndex - 2).equals("CAST") && tokens.get(paramTokenIndex - 1).equals("(")) open = paramTokenIndex - 3;
+        while (open >= 0 && tokens.get(open).equals("(") && next < tokens.size() && tokens.get(next).equals(")")) {
+            open--;
+            next++;
+        }
+        return next;
+    }
+
+    /**
+     * Detects nullable parameters checked with {@code IS [NOT] NULL} (e.g. optional filter predicates
+     * {@code (:status::text IS NULL OR status = :status)} or {@code CAST(:name AS text) IS NULL}).
+     * PostgreSQL generic plans cannot fold these predicates away, so Vev plans them per execution.
+     */
+    static boolean hasNullableNullCheck(List<String> tokens, List<String> parameters, Set<String> nullable) {
+        if (nullable.isEmpty()) return false;
+        int paramIndex = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            if (!tokens.get(i).equals("<parameter>")) continue;
+            String parameter = parameters.get(paramIndex++);
+            if (!nullable.contains(parameter)) continue;
+            int next = afterParameterExpression(tokens, i);
+            if (next + 1 < tokens.size() && tokens.get(next).equals("IS")) {
+                if (tokens.get(next + 1).equals("NULL")) return true;
+                if (next + 2 < tokens.size() && tokens.get(next + 1).equals("NOT") && tokens.get(next + 2).equals("NULL")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int skipTypeName(List<String> tokens, int start) {
+        int i = start;
+        while (i < tokens.size()) {
+            String t = tokens.get(i);
+            if (t.equals("IS") || t.equals("OR") || t.equals("AND") || t.equals(")") || t.equals(",")
+                    || t.equals("=") || t.equals("<>") || t.equals("!=") || t.equals("<") || t.equals(">")
+                    || t.equals("THEN") || t.equals("ELSE") || t.equals("END") || t.equals("AS")
+                    || t.equals("FROM") || t.equals("WHERE") || t.equals("ORDER") || t.equals("GROUP")
+                    || t.equals("LIMIT") || t.equals("OFFSET") || t.equals("HAVING") || t.equals("::")) {
+                break;
+            }
+            if (t.equals("(")) {
+                int depth = 1;
+                i++;
+                while (i < tokens.size() && depth > 0) {
+                    if (tokens.get(i).equals("(")) depth++;
+                    else if (tokens.get(i).equals(")")) depth--;
+                    i++;
+                }
+                continue;
+            }
+            if (t.equals("[") && i + 1 < tokens.size() && tokens.get(i + 1).equals("]")) {
+                i += 2;
+                continue;
+            }
+            i++;
+        }
+        return i;
+    }
+
+    /** Detects PostgreSQL mutating/locking calls and FOR UPDATE/SHARE clauses directly in lexed tokens. */
+    boolean hasMutatingOrLockingSyntax() {
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (i + 1 < tokens.size() && tokens.get(i + 1).equals("(")) {
+                if (token.equals("NEXTVAL") || token.equals("SETVAL") || token.equals("PG_NOTIFY")
+                        || token.startsWith("PG_ADVISORY_") || token.startsWith("PG_TRY_ADVISORY_")) {
+                    return true;
+                }
+            }
+            if (token.equals("FOR") && i + 1 < tokens.size()) {
+                String next = tokens.get(i + 1);
+                if (next.equals("UPDATE") || next.equals("SHARE")) return true;
+                if (next.equals("KEY") && i + 2 < tokens.size() && tokens.get(i + 2).equals("SHARE")) return true;
+                if (next.equals("NO") && i + 3 < tokens.size()
+                        && tokens.get(i + 2).equals("KEY") && tokens.get(i + 3).equals("UPDATE")) return true;
+            }
+        }
+        return false;
+    }
+
+    static String identifier(Path path, String name) {
+        if (!IDENTIFIER.matcher(name).matches()) throw error(path, "Invalid identifier: " + name);
+        return name;
+    }
+
+    static IllegalArgumentException error(Path path, String message) {
+        return new IllegalArgumentException(path + ": " + message);
+    }
+
+    /** A reference to an existing Kotlin enum, which Vev imports rather than generates. */
+    static String enumName(Path path, String name) {
+        String[] segments = name.split("\\.", -1);
+        for (String segment : segments) identifier(path, segment);
+        String simple = segments[segments.length - 1];
+        if (!Character.isUpperCase(simple.charAt(0))) throw error(path, "Enum types must start uppercase: " + name);
+        return name;
+    }
+
+    static String typeName(Path path, String name) {
+        identifier(path, name);
+        if (!Character.isUpperCase(name.charAt(0)) || Set.of("Int", "Long", "Short", "String", "Boolean", "Float", "Double", "ByteArray", "List", "Array", "Unit", "Any", "Nothing", "JvmInline").contains(name)) {
+            throw error(path, "Generated types must start uppercase and must not shadow Kotlin built-in types: " + name);
+        }
+        return name;
+    }
+
+    /** Only a single plain SELECT can inherit NOT NULL from origin columns. Other shapes are conservative. */
+    boolean directNullability() {
+        if (!tokens.getFirst().equals("SELECT")) return false;
+        if (tokens.stream().filter("SELECT"::equals).count() != 1) return false;
+        for (int i = 0; i < tokens.size(); i++) {
+            String token = tokens.get(i);
+            if (Set.of("WITH", "GROUP", "UNION", "EXCEPT", "INTERSECT", "VALUES", "TABLE").contains(token)) return false;
+            if (Set.of("LEFT", "RIGHT", "FULL").contains(token) && i + 1 < tokens.size()
+                    && Set.of("OUTER", "JOIN").contains(tokens.get(i + 1))) return false;
+        }
+        return true;
+    }
+
+    private static final Set<String> SELECT_END = Set.of("FROM", "INTO", "WHERE", "GROUP", "HAVING",
+            "WINDOW", "ORDER", "LIMIT", "OFFSET", "FETCH", "FOR");
+    private static final Set<String> SET_OPERATIONS = Set.of("UNION", "EXCEPT", "INTERSECT");
+
+    /**
+     * Returns true when the top-level query is a single {@code SELECT} whose every projected column
+     * is a constant literal (e.g. {@code SELECT 1 AS present ... LIMIT 1} or {@code SELECT TRUE AS ok ... LIMIT 1}),
+     * making {@code LIMIT} deterministic regardless of scan order.
+     */
+    static boolean allConstantProjections(List<String> tokens) {
+        int depth = 0;
+        int selectIndex = -1;
+        for (int i = 0; i < tokens.size(); i++) {
+            String t = tokens.get(i);
+            if (t.equals("(")) { depth++; continue; }
+            if (t.equals(")")) { depth--; continue; }
+            if (depth != 0) continue;
+            if (SET_OPERATIONS.contains(t)) return false;
+            if (selectIndex < 0) {
+                if (t.equals("SELECT")) selectIndex = i;
+                else if (Set.of("INSERT", "UPDATE", "DELETE", "MERGE", "VALUES").contains(t)) return false;
+            }
+        }
+        if (selectIndex < 0) return false;
+        int start = selectIndex + 1;
+        if (start < tokens.size() && (tokens.get(start).equals("ALL") || tokens.get(start).equals("DISTINCT"))) {
+            if (tokens.get(start).equals("DISTINCT") && start + 1 < tokens.size() && tokens.get(start + 1).equals("ON")) {
+                return false;
+            }
+            start++;
+        }
+        int columns = 0;
+        depth = 0;
+        for (int i = start; i <= tokens.size(); i++) {
+            String token = i == tokens.size() ? "FROM" : tokens.get(i);
+            if (depth == 0 && (token.equals(",") || SELECT_END.contains(token))) {
+                if (!isConstantProjection(tokens.subList(start, i))) return false;
+                columns++;
+                if (!token.equals(",")) break;
+                start = i + 1;
+            } else if (token.equals("(") || token.equals("[")) {
+                depth++;
+            } else if (token.equals(")") || token.equals("]")) {
+                depth--;
+            }
+        }
+        return columns > 0;
+    }
+
+    private static boolean isConstantProjection(List<String> expression) {
+        if (expression.isEmpty()) return false;
+        int end = expression.size();
+        if (end >= 2 && expression.get(end - 2).equals("AS")) {
+            end -= 2;
+        } else if (end >= 2 && isSimpleAlias(expression.get(end - 1)) && !expression.get(end - 2).equals("::")) {
+            end -= 1;
+        }
+        if (end <= 0) return false;
+        // Strip trailing ::type casts.
+        int castPos = -1;
+        for (int i = 0; i < end; i++) {
+            if (expression.get(i).equals("::")) { castPos = i; break; }
+        }
+        if (castPos == 0) return false;
+        if (castPos > 0) {
+            if (skipTypeName(expression.subList(0, end), castPos + 1) != end) {
+                // Allow chained ::type casts.
+                int pos = castPos;
+                while (pos < end && expression.get(pos).equals("::")) {
+                    pos = skipTypeName(expression.subList(0, end), pos + 1);
+                }
+                if (pos != end) return false;
+            }
+            end = castPos;
+        }
+        if (end == 1) {
+            String t = expression.getFirst();
+            if (t.equals("<literal>") || t.equals("TRUE") || t.equals("FALSE") || t.equals("NULL")) return true;
+        }
+        // Numeric literal: optional leading +/-, digits, at most one decimal point.
+        int idx = 0;
+        if (idx < end && (expression.get(idx).equals("-") || expression.get(idx).equals("+"))) idx++;
+        boolean sawDigit = false;
+        boolean sawDot = false;
+        for (; idx < end; idx++) {
+            String t = expression.get(idx);
+            if (t.length() == 1 && t.charAt(0) >= '0' && t.charAt(0) <= '9') {
+                sawDigit = true;
+            } else if (t.equals(".") && !sawDot) {
+                sawDot = true;
+            } else {
+                return false;
+            }
+        }
+        return sawDigit;
+    }
+
+    private static boolean isSimpleAlias(String token) {
+        if (token.equals("<identifier>")) return true;
+        if (token.equals("TRUE") || token.equals("FALSE") || token.equals("NULL")
+                || token.equals("<literal>") || token.equals("<parameter>")) return false;
+        return IDENTIFIER.matcher(token).matches();
+    }
+
+    /** Indices of projections that guarantee a value. PostgreSQL supplies the actual column types. */
+    java.util.BitSet requiredExpressions(int columnCount) {
+        var required = new java.util.BitSet();
+        if (!tokens.getFirst().equals("SELECT") || tokens.stream().anyMatch(SET_OPERATIONS::contains)) return required;
+        int start = 1;
+        int column = 0;
+        int depth = 0;
+        for (int i = start; i <= tokens.size(); i++) {
+            String token = i == tokens.size() ? "FROM" : tokens.get(i);
+            if (depth == 0 && (token.equals(",") || SELECT_END.contains(token))) {
+                if (requiredExpression(tokens.subList(start, i))) required.set(column);
+                column++;
+                if (!token.equals(",")) break;
+                start = i + 1;
+            } else if (token.equals("(") || token.equals("[")) {
+                depth++;
+            } else if (token.equals(")") || token.equals("]")) {
+                depth--;
+            }
+        }
+        // Only associate positional hints with columns when Describe agrees with the projection count.
+        if (column != columnCount) required.clear();
+        return required;
+    }
+
+    private static boolean requiredExpression(List<String> expression) {
+        if (expression.size() >= 2 && expression.get(expression.size() - 2).equals("AS")) {
+            expression = expression.subList(0, expression.size() - 2);
+        }
+        if (expression.equals(List.of("COUNT", "(", "*", ")"))) return true;
+        if (expression.size() < 3 || !expression.getFirst().equals("EXISTS") || !expression.get(1).equals("(")) return false;
+        int depth = 0;
+        for (int i = 1; i < expression.size(); i++) {
+            if (expression.get(i).equals("(")) depth++;
+            if (expression.get(i).equals(")")) depth--;
+            if (depth == 0) return i == expression.size() - 1;
+        }
+        return false;
+    }
+}

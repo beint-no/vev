@@ -1,0 +1,4 @@
+-- vev.name: typeCase26 :one
+-- vev.scope: global
+-- vev.nullable: value
+SELECT :value::float4[] AS value;
